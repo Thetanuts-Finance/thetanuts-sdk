@@ -2,6 +2,8 @@
 
 Get up and running with read-only access to the Thetanuts SDK in minutes — no signer required.
 
+> **Skipping straight to LLM workflows?** Use the [MCP server](../guides/mcp-server.md) (`npx -y @thetanuts-finance/mcp`) or paste the [LLM context prompt](../resources/llm-context.md) into Claude / Cursor / ChatGPT. The rest of this page covers direct TypeScript usage.
+
 ## Read-only example
 
 ```typescript
