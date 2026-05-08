@@ -199,32 +199,27 @@ WheelVault is gated to Ethereum mainnet. These tools require `THETANUTS_RPC_URL`
 | `get_fixed_strike_vaults` | Live state of fixed-strike vaults only |
 | `get_clvex_vaults` | Live state of CLVEX directional/condor vaults only |
 
-## Installation
+## Install in your MCP client
 
-The published package is on npm — no clone required.
+[![Add to Cursor](https://img.shields.io/badge/Add_to-Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=thetanuts&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkB0aGV0YW51dHMtZmluYW5jZS9tY3AiXX0=)
+[![Install in VS Code](https://img.shields.io/badge/Install_in-VS_Code-0098FF?style=for-the-badge&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%7B%22name%22%3A%22thetanuts%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40thetanuts-finance%2Fmcp%22%5D%7D)
 
-```bash
-# Run via npx (no install)
-npx -y @thetanuts-finance/mcp
+**Cursor** and **VS Code** support one-click installation; click either badge to register the server with the IDE. Other clients require a single command or JSON snippet, documented below.
 
-# Or install globally
-npm install -g @thetanuts-finance/mcp
-```
-
-To hack on the server locally (changes to source need a fresh build):
+<details>
+<summary><b>Claude Code</b> — single command (or commit <code>.mcp.json</code> for your team)</summary>
 
 ```bash
-git clone https://github.com/Thetanuts-Finance/thetanuts-sdk.git
-cd thetanuts-sdk/mcp-server
-npm install
-npm run build
+claude mcp add --transport stdio thetanuts -- npx -y @thetanuts-finance/mcp
 ```
 
-## Usage
+For team installations, commit a `.mcp.json` file to your repository root and every developer receives the configuration automatically. See [Team setup](#team-setup) below.
+</details>
 
-### With Claude Desktop
+<details>
+<summary><b>Claude Desktop</b> — edit config JSON</summary>
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
@@ -239,10 +234,12 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   }
 }
 ```
+</details>
 
-### With Clawdbot / other MCP clients
+<details>
+<summary><b>Antigravity</b> — Agent Panel → ⋯ → MCP Servers → raw config</summary>
 
-Add to your `.mcp.json`:
+Open the **Agent Panel → ⋯ menu → MCP Servers → Manage MCP Servers → View raw config** and paste the configuration below. The config file is located at `~/.gemini/antigravity/mcp_config.json` on macOS and Linux.
 
 ```json
 {
@@ -254,12 +251,52 @@ Add to your `.mcp.json`:
   }
 }
 ```
+</details>
 
-### Local development (running from source)
+<details>
+<summary><b>Cline, Continue, other MCP clients</b></summary>
+
+Paste this JSON into your client's MCP configuration file (typically `.mcp.json` at the workspace root, or via the client's settings UI):
+
+```json
+{
+  "mcpServers": {
+    "thetanuts": {
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"]
+    }
+  }
+}
+```
+</details>
+
+After installation, restart your client. A `thetanuts` indicator will appear once the server has connected, typically within five seconds on first run while `npx` fetches the package.
+
+## Team setup
+
+Teams building on `@thetanuts-finance/thetanuts-client` are recommended to commit a `.mcp.json` file at the repository root. Every developer using **Claude Code** within the repository receives the MCP server configuration automatically, with no per-developer setup.
+
+```json
+{
+  "mcpServers": {
+    "thetanuts": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"]
+    }
+  }
+}
+```
+
+On first invocation within the repository, Claude Code prompts each user to approve the workspace's MCP servers; subsequent loads are automatic.
+
+## Local development (contributors)
 
 ```bash
-cd mcp-server
-npm run dev  # Run with tsx (no build needed)
+git clone https://github.com/Thetanuts-Finance/thetanuts-sdk.git
+cd thetanuts-sdk/mcp-server
+npm install
+npm run dev   # Run with tsx; no build step required
 ```
 
 If you want Claude Desktop to point at your local checkout instead of npm, swap the `command` to `node` and `args` to `["/absolute/path/to/thetanuts-sdk/mcp-server/dist/index.js"]`.
