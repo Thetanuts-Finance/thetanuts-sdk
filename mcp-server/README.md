@@ -202,8 +202,21 @@ WheelVault is gated to Ethereum mainnet. These tools require `THETANUTS_RPC_URL`
 
 ## Installation
 
+The published package is on npm — no clone required.
+
 ```bash
-cd mcp-server
+# Run via npx (no install)
+npx -y @thetanuts-finance/mcp
+
+# Or install globally
+npm install -g @thetanuts-finance/mcp
+```
+
+To hack on the server locally (changes to source need a fresh build):
+
+```bash
+git clone https://github.com/Thetanuts-Finance/thetanuts-sdk.git
+cd thetanuts-sdk/mcp-server
 npm install
 npm run build
 ```
@@ -218,8 +231,8 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "thetanuts": {
-      "command": "node",
-      "args": ["/path/to/thetanuts-sdk/mcp-server/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"],
       "env": {
         "THETANUTS_RPC_URL": "https://mainnet.base.org"
       }
@@ -228,7 +241,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-### With Clawdbot
+### With Clawdbot / other MCP clients
 
 Add to your `.mcp.json`:
 
@@ -236,18 +249,53 @@ Add to your `.mcp.json`:
 {
   "mcpServers": {
     "thetanuts": {
-      "command": "node",
-      "args": ["./mcp-server/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"]
     }
   }
 }
 ```
 
-### Development
+### Local development (running from source)
 
 ```bash
+cd mcp-server
 npm run dev  # Run with tsx (no build needed)
 ```
+
+If you want Claude Desktop to point at your local checkout instead of npm, swap the `command` to `node` and `args` to `["/absolute/path/to/thetanuts-sdk/mcp-server/dist/index.js"]`.
+
+## Need to execute, not just read?
+
+**This server is read-only by design.** It never holds private keys, never signs messages, never broadcasts transactions. Why: an LLM with wallet write access plus untrusted text in its context window is one prompt injection away from a drained wallet. The May 2026 Bankr/Grok incident (~$150K drained via a Morse-encoded reply on X) is the canonical example of why agentic-wallet patterns need to be carefully separated.
+
+The right pattern for execution is **transaction-crafter**: the Thetanuts MCP builds the unsigned calldata, a separate signer-MCP signs and broadcasts in a wallet you control.
+
+The `encode_*` tools already do half of this:
+
+- `encode_fill_order` — fill an OptionBook order
+- `encode_request_for_quotation` — submit an RFQ
+- `encode_settle_quotation`, `encode_settle_quotation_early`, `encode_cancel_quotation`, `encode_cancel_offer` — RFQ lifecycle
+- `encode_approve` — ERC20 approval
+
+Each returns calldata (`{to, data, value}`) you hand to a signer-MCP. Concrete signer-MCP options to pair with:
+
+| Signer-MCP | What signs the tx | Best for |
+|---|---|---|
+| [`metamask-mcp`](https://github.com/Xiawpohr/metamask-mcp) | Your real MetaMask extension via EIP-6963 | Single-user manual approval per tx |
+| [`nikicat/mcp-wallet-signer`](https://github.com/nikicat/mcp-wallet-signer) | Generic browser wallet picker (MetaMask, Rabby, Coinbase Wallet) | Multi-wallet single-user setups |
+| [`base-mcp`](https://mcpservers.org/servers/base/base-mcp) + [Coinbase AgentKit](https://docs.cdp.coinbase.com/agent-kit/core-concepts/model-context-protocol) | TEE/MPC keys in CDP Server Wallets v2 with policy engine | Autonomous agentic flows with per-tx caps |
+| [`safe-mcp-server`](https://github.com/5ajaki/safe-mcp-server) | Multisig — agent proposes, M-of-N humans sign | Treasury / institutional flows |
+
+A typical LLM workflow:
+
+1. Ask Thetanuts MCP to build the tx: "Use `encode_fill_order` for the cheapest ETH put expiring next Friday."
+2. Pass the resulting calldata to your signer-MCP: "Sign and send this tx using my MetaMask."
+3. Confirm in your wallet UI. Done.
+
+This split keeps the Thetanuts MCP surface read-only forever. The signer holds keys; we don't.
+
+For the full "FORBIDDEN operations" list, see [SPEC.md](./SPEC.md).
 
 ## Environment Variables
 
