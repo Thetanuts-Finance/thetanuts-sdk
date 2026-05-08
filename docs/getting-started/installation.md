@@ -2,6 +2,8 @@
 
 Add the Thetanuts SDK to your project using npm or yarn.
 
+> **Just want to use this with an LLM?** Skip the SDK install. The [MCP server](../guides/mcp-server.md) gives Claude / Cursor / VS Code one-click access to ~100 SDK tools without writing code: `npx -y @thetanuts-finance/mcp`.
+
 ## Install the package
 
 Using npm:
