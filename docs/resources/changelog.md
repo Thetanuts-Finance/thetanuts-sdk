@@ -17,25 +17,25 @@ This SDK follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`
 
 ## Release History
 
-### v0.2.3 — Whitelabel rename (BREAKING)
+### v0.2.3 — strategyVault rename (BREAKING)
 
-Naming-only release that drops partner-protocol names from the public SDK surface and docs. Behavior, ABIs, and contract addresses are unchanged.
+Renames two public symbols on `client.strategyVault`. Behavior, ABIs, and contract addresses are unchanged.
 
-> **Heads up:** despite the patch-level version bump, the two API renames below are **breaking**. Anyone using `STRATEGY_VAULT_CONFIG.kairos` or `client.strategyVault.getKairosVaults()` in v0.2.2 must update on upgrade. There are no deprecated aliases — the old names are gone.
+> **Heads up:** despite the patch-level version bump, the two API renames below are **breaking**. Anyone using the previous config field or method names from v0.2.2 must update on upgrade. There are no deprecated aliases — old names are gone.
 
 **Breaking renames:**
 
 ```diff
-- const vault = STRATEGY_VAULT_CONFIG.kairos.vaults[0].address;
+- const vault = STRATEGY_VAULT_CONFIG.<old>.vaults[0].address;
 + const vault = STRATEGY_VAULT_CONFIG.fixedStrike.vaults[0].address;
 
-- const vaults = await client.strategyVault.getKairosVaults();
+- const vaults = await client.strategyVault.<old>();
 + const vaults = await client.strategyVault.getFixedStrikeVaults();
 ```
 
-All sub-fields of `STRATEGY_VAULT_CONFIG.kairos` (`vaults`, `baseAsset`, `quoteAsset`, `oracle`) move with the rename. Migration is a straight find-and-replace; return shapes are identical.
+All sub-fields of `STRATEGY_VAULT_CONFIG.<old>` (`vaults`, `baseAsset`, `quoteAsset`, `oracle`) move with the rename. Migration is a straight find-and-replace; return shapes are identical.
 
-**Prose updates:** comments, JSDoc, runtime error messages, and docs use neutral language. "Kairos fixed-strike" → "fixed-strike", "Gyro wheel strategy" → "wheel strategy". No symbol changes beyond the two breaking renames above.
+**Prose updates:** comments, JSDoc, runtime error messages, and docs use neutral terms ("fixed-strike", "wheel strategy") throughout. No symbol changes beyond the two breaking renames above.
 
 **Test runner:** `scripts/run-mainnet-tests.ts` now retries transient `CALL_EXCEPTION` errors from public RPCs (the public Base RPC drops bursts of read calls; the test suite was failing 28/30 instead of 30/30 because of dropped responses, not contract bugs). Runner accepts a `BASE_RPC_URL` env var to override the public default.
 
