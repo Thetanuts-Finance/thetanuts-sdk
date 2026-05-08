@@ -153,6 +153,36 @@ The release flow:
 
 `prepublishOnly` re-runs the build automatically. Don't manually edit `dist/` — it gets clobbered.
 
+### MCP server releases (separate cadence)
+
+The MCP server in `mcp-server/` ships as `@thetanuts-finance/mcp` on its own version cadence — tracks its own surface, not the SDK's. Tags use the prefix `mcp-v*` so they don't collide with SDK tags `v*` on the same commit.
+
+```bash
+git checkout main && git pull --ff-only
+cd mcp-server
+
+npm whoami                                  # confirm logged in
+npm org ls thetanuts-finance                # confirm org membership
+
+npm publish --dry-run --access public       # preflight (runs prepublishOnly which swaps the SDK dep)
+npm publish --access public                 # go live (2FA OTP)
+
+# postpublish auto-restores the file:.. SDK dep — verify the working tree is clean:
+git status                                  # mcp-server/package.json should be unchanged
+
+cd ..
+git tag -a mcp-v<version> -m "MCP v<version> — <subject>"
+git push upstream mcp-v<version>
+
+gh release create mcp-v<version> \
+  --title "MCP v<version> — <subject>" \
+  --notes "<release notes>"
+```
+
+The `prepublishOnly` script swaps `@thetanuts-finance/thetanuts-client` from `file:..` (workspace link) to `^<sdkVersion>` (npm range, read from the root `package.json`'s version field). The `postpublish` script restores `file:..` so local dev keeps using the workspace SDK. Both swaps are idempotent.
+
+If the SDK was just published in the same session, bump `mcp-server/package.json`'s SDK dep range mentally (the swap script reads the latest root version automatically; you only need to verify root `package.json` reflects the SDK version you actually want the MCP to depend on).
+
 ## Reporting bugs
 
 Open a GitHub issue using the bug-report template. Include:

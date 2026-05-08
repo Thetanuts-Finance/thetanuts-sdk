@@ -1,13 +1,12 @@
 # Thetanuts MCP Server
 
-Read-only MCP (Model Context Protocol) server for the Thetanuts SDK.
+MCP (Model Context Protocol) server for the Thetanuts SDK. Exposes ~100 tools that let an LLM read state, build transactions, run pricing math, and ship orders end-to-end.
 
-## Features
+## How it's organized
 
-**This server is READ-ONLY. It does NOT:**
-- Execute transactions
-- Handle private keys
-- Perform any state-changing operations
+The server **builds transactions but doesn't sign them.** The signing layer is intentionally separate — pair this MCP with a signer-MCP (MetaMask, Coinbase AgentKit, Safe, or any signer the LLM can call) and you have full execution. See [How to actually fill orders](#how-to-actually-fill-orders) below for the composition pattern and why it's split this way.
+
+This server **does not** hold private keys, sign messages, or broadcast transactions on its own. That layer is your wallet's job — by design, so an LLM can't be tricked into authorizing transactions you never intended.
 
 ### LLM context (call this first)
 
@@ -202,8 +201,21 @@ WheelVault is gated to Ethereum mainnet. These tools require `THETANUTS_RPC_URL`
 
 ## Installation
 
+The published package is on npm — no clone required.
+
 ```bash
-cd mcp-server
+# Run via npx (no install)
+npx -y @thetanuts-finance/mcp
+
+# Or install globally
+npm install -g @thetanuts-finance/mcp
+```
+
+To hack on the server locally (changes to source need a fresh build):
+
+```bash
+git clone https://github.com/Thetanuts-Finance/thetanuts-sdk.git
+cd thetanuts-sdk/mcp-server
 npm install
 npm run build
 ```
@@ -218,8 +230,8 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "thetanuts": {
-      "command": "node",
-      "args": ["/path/to/thetanuts-sdk/mcp-server/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"],
       "env": {
         "THETANUTS_RPC_URL": "https://mainnet.base.org"
       }
@@ -228,7 +240,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-### With Clawdbot
+### With Clawdbot / other MCP clients
 
 Add to your `.mcp.json`:
 
@@ -236,18 +248,104 @@ Add to your `.mcp.json`:
 {
   "mcpServers": {
     "thetanuts": {
-      "command": "node",
-      "args": ["./mcp-server/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"]
     }
   }
 }
 ```
 
-### Development
+### Local development (running from source)
 
 ```bash
+cd mcp-server
 npm run dev  # Run with tsx (no build needed)
 ```
+
+If you want Claude Desktop to point at your local checkout instead of npm, swap the `command` to `node` and `args` to `["/absolute/path/to/thetanuts-sdk/mcp-server/dist/index.js"]`.
+
+## How to actually fill orders
+
+**You can fill orders, create RFQs, settle quotations, and approve tokens with this MCP.** The execution flow is just split across two MCP servers — by design, for security. Here's the picture and why.
+
+### The split: Thetanuts MCP builds the tx, a signer-MCP signs it
+
+Every transaction has two parts: the **calldata** (what to do) and the **signature** (the user authorizing it).
+
+This MCP does the first part. The `encode_*` tools return ready-to-sign transactions:
+
+| Tool | What it builds |
+|---|---|
+| `encode_fill_order` | Fill a maker order on the OptionBook |
+| `encode_request_for_quotation` | Submit an RFQ |
+| `encode_settle_quotation` / `_early` | Settle an RFQ after / before reveal |
+| `encode_cancel_quotation` / `_offer` | Cancel an RFQ or an MM offer |
+| `encode_approve` | ERC20 approval |
+
+Each returns an object like `{ to: "0x...", data: "0x...", value: "0" }` — the calldata your wallet broadcasts. **All you need to actually send it is a signature.**
+
+For the signature, you compose this MCP with one of these:
+
+| Signer-MCP | Where the key lives | Best for |
+|---|---|---|
+| [`metamask-mcp`](https://github.com/Xiawpohr/metamask-mcp) | Your MetaMask extension (EIP-6963) | Single user, manual click-confirm per tx |
+| [`nikicat/mcp-wallet-signer`](https://github.com/nikicat/mcp-wallet-signer) | Any browser wallet picker (MetaMask, Rabby, Coinbase) | Multi-wallet single-user setups |
+| [`base-mcp`](https://mcpservers.org/servers/base/base-mcp) + [Coinbase AgentKit](https://docs.cdp.coinbase.com/agent-kit/core-concepts/model-context-protocol) | Coinbase CDP Server Wallets v2 (TEE/MPC) with programmable policies | Autonomous agentic flows ("max $500/tx, only Thetanuts contracts") — no per-tx click |
+| [`safe-mcp-server`](https://github.com/5ajaki/safe-mcp-server) | Gnosis Safe multisig — agent proposes, M-of-N humans sign | Treasury / institutional flows |
+
+### What it looks like end to end
+
+In Claude Desktop (or any MCP client), wire up both servers:
+
+```json
+{
+  "mcpServers": {
+    "thetanuts": {
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"]
+    },
+    "wallet": {
+      "command": "npx",
+      "args": ["-y", "metamask-mcp"]
+    }
+  }
+}
+```
+
+Then ask Claude:
+
+> "Find the cheapest ETH put expiring next Friday for 1 contract, build the fill, sign it with my wallet, and send."
+
+Claude calls `thetanuts.fetch_orders`, picks the order, calls `thetanuts.encode_fill_order` to get calldata, hands the calldata to `wallet.sign_and_send`. Your MetaMask pops up: "Confirm: send 250 USDC to 0x1bDff855... (OptionBook)." You click confirm. The order fills on-chain.
+
+For autonomous flows where you don't want to click every time, swap MetaMask for Coinbase AgentKit:
+
+```json
+{
+  "mcpServers": {
+    "thetanuts": { "command": "npx", "args": ["-y", "@thetanuts-finance/mcp"] },
+    "wallet":    { "command": "npx", "args": ["-y", "@coinbase/cdp-mcp"] }
+  }
+}
+```
+
+CDP holds the key in a Trusted Execution Environment behind a policy you set ("max 5 tx/hour, max $500/tx, only Thetanuts contracts"). The agent can fill orders without per-tx confirmation, but it can't violate the policy you set.
+
+### Why this is split (the security reason)
+
+If this MCP held a private key directly, an LLM could be tricked into signing transactions you never intended. Real example from May 2026: **the Bankr/Grok agent lost ~$150K** when an attacker replied to its X thread with a Morse-encoded "send 3B DRB to 0x…". Grok decoded the prompt and Bankr executed.
+
+Splitting calldata-building from signing puts a hard checkpoint between "an LLM proposed this transaction" and "this transaction got broadcast." That checkpoint is either your wallet UI (manual mode) or a policy engine (autonomous mode). Either way, the protocol-knowledge layer (Thetanuts MCP) and the key-custody layer (signer-MCP) are independently auditable, independently versioned, and independently swappable.
+
+This is the same architecture every DeFi frontend uses: the website builds the calldata, your wallet signs. The Thetanuts MCP is the same idea, exposed for LLMs.
+
+### TL;DR
+
+- **Want to read?** This MCP alone is enough.
+- **Want to fill orders?** This MCP + a signer-MCP. You stay in control of signing.
+- **Want autonomous agents?** This MCP + Coinbase AgentKit (or Safe, or thirdweb Engine) with policies you configure.
+
+For the full SDK context (every module, every workflow, every gotcha), call `get_sdk_context` once at session start.
 
 ## Environment Variables
 
