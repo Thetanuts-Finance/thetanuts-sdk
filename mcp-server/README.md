@@ -1,13 +1,12 @@
 # Thetanuts MCP Server
 
-Read-only MCP (Model Context Protocol) server for the Thetanuts SDK.
+MCP (Model Context Protocol) server for the Thetanuts SDK. Exposes ~100 tools that let an LLM read state, build transactions, run pricing math, and ship orders end-to-end.
 
-## Features
+## How it's organized
 
-**This server is READ-ONLY. It does NOT:**
-- Execute transactions
-- Handle private keys
-- Perform any state-changing operations
+The server **builds transactions but doesn't sign them.** The signing layer is intentionally separate — pair this MCP with a signer-MCP (MetaMask, Coinbase AgentKit, Safe, or any signer the LLM can call) and you have full execution. See [How to actually fill orders](#how-to-actually-fill-orders) below for the composition pattern and why it's split this way.
+
+This server **does not** hold private keys, sign messages, or broadcast transactions on its own. That layer is your wallet's job — by design, so an LLM can't be tricked into authorizing transactions you never intended.
 
 ### LLM context (call this first)
 
@@ -265,37 +264,88 @@ npm run dev  # Run with tsx (no build needed)
 
 If you want Claude Desktop to point at your local checkout instead of npm, swap the `command` to `node` and `args` to `["/absolute/path/to/thetanuts-sdk/mcp-server/dist/index.js"]`.
 
-## Need to execute, not just read?
+## How to actually fill orders
 
-**This server is read-only by design.** It never holds private keys, never signs messages, never broadcasts transactions. Why: an LLM with wallet write access plus untrusted text in its context window is one prompt injection away from a drained wallet. The May 2026 Bankr/Grok incident (~$150K drained via a Morse-encoded reply on X) is the canonical example of why agentic-wallet patterns need to be carefully separated.
+**You can fill orders, create RFQs, settle quotations, and approve tokens with this MCP.** The execution flow is just split across two MCP servers — by design, for security. Here's the picture and why.
 
-The right pattern for execution is **transaction-crafter**: the Thetanuts MCP builds the unsigned calldata, a separate signer-MCP signs and broadcasts in a wallet you control.
+### The split: Thetanuts MCP builds the tx, a signer-MCP signs it
 
-The `encode_*` tools already do half of this:
+Every transaction has two parts: the **calldata** (what to do) and the **signature** (the user authorizing it).
 
-- `encode_fill_order` — fill an OptionBook order
-- `encode_request_for_quotation` — submit an RFQ
-- `encode_settle_quotation`, `encode_settle_quotation_early`, `encode_cancel_quotation`, `encode_cancel_offer` — RFQ lifecycle
-- `encode_approve` — ERC20 approval
+This MCP does the first part. The `encode_*` tools return ready-to-sign transactions:
 
-Each returns calldata (`{to, data, value}`) you hand to a signer-MCP. Concrete signer-MCP options to pair with:
+| Tool | What it builds |
+|---|---|
+| `encode_fill_order` | Fill a maker order on the OptionBook |
+| `encode_request_for_quotation` | Submit an RFQ |
+| `encode_settle_quotation` / `_early` | Settle an RFQ after / before reveal |
+| `encode_cancel_quotation` / `_offer` | Cancel an RFQ or an MM offer |
+| `encode_approve` | ERC20 approval |
 
-| Signer-MCP | What signs the tx | Best for |
+Each returns an object like `{ to: "0x...", data: "0x...", value: "0" }` — the calldata your wallet broadcasts. **All you need to actually send it is a signature.**
+
+For the signature, you compose this MCP with one of these:
+
+| Signer-MCP | Where the key lives | Best for |
 |---|---|---|
-| [`metamask-mcp`](https://github.com/Xiawpohr/metamask-mcp) | Your real MetaMask extension via EIP-6963 | Single-user manual approval per tx |
-| [`nikicat/mcp-wallet-signer`](https://github.com/nikicat/mcp-wallet-signer) | Generic browser wallet picker (MetaMask, Rabby, Coinbase Wallet) | Multi-wallet single-user setups |
-| [`base-mcp`](https://mcpservers.org/servers/base/base-mcp) + [Coinbase AgentKit](https://docs.cdp.coinbase.com/agent-kit/core-concepts/model-context-protocol) | TEE/MPC keys in CDP Server Wallets v2 with policy engine | Autonomous agentic flows with per-tx caps |
-| [`safe-mcp-server`](https://github.com/5ajaki/safe-mcp-server) | Multisig — agent proposes, M-of-N humans sign | Treasury / institutional flows |
+| [`metamask-mcp`](https://github.com/Xiawpohr/metamask-mcp) | Your MetaMask extension (EIP-6963) | Single user, manual click-confirm per tx |
+| [`nikicat/mcp-wallet-signer`](https://github.com/nikicat/mcp-wallet-signer) | Any browser wallet picker (MetaMask, Rabby, Coinbase) | Multi-wallet single-user setups |
+| [`base-mcp`](https://mcpservers.org/servers/base/base-mcp) + [Coinbase AgentKit](https://docs.cdp.coinbase.com/agent-kit/core-concepts/model-context-protocol) | Coinbase CDP Server Wallets v2 (TEE/MPC) with programmable policies | Autonomous agentic flows ("max $500/tx, only Thetanuts contracts") — no per-tx click |
+| [`safe-mcp-server`](https://github.com/5ajaki/safe-mcp-server) | Gnosis Safe multisig — agent proposes, M-of-N humans sign | Treasury / institutional flows |
 
-A typical LLM workflow:
+### What it looks like end to end
 
-1. Ask Thetanuts MCP to build the tx: "Use `encode_fill_order` for the cheapest ETH put expiring next Friday."
-2. Pass the resulting calldata to your signer-MCP: "Sign and send this tx using my MetaMask."
-3. Confirm in your wallet UI. Done.
+In Claude Desktop (or any MCP client), wire up both servers:
 
-This split keeps the Thetanuts MCP surface read-only forever. The signer holds keys; we don't.
+```json
+{
+  "mcpServers": {
+    "thetanuts": {
+      "command": "npx",
+      "args": ["-y", "@thetanuts-finance/mcp"]
+    },
+    "wallet": {
+      "command": "npx",
+      "args": ["-y", "metamask-mcp"]
+    }
+  }
+}
+```
 
-For the full "FORBIDDEN operations" list, see [SPEC.md](./SPEC.md).
+Then ask Claude:
+
+> "Find the cheapest ETH put expiring next Friday for 1 contract, build the fill, sign it with my wallet, and send."
+
+Claude calls `thetanuts.fetch_orders`, picks the order, calls `thetanuts.encode_fill_order` to get calldata, hands the calldata to `wallet.sign_and_send`. Your MetaMask pops up: "Confirm: send 250 USDC to 0x1bDff855... (OptionBook)." You click confirm. The order fills on-chain.
+
+For autonomous flows where you don't want to click every time, swap MetaMask for Coinbase AgentKit:
+
+```json
+{
+  "mcpServers": {
+    "thetanuts": { "command": "npx", "args": ["-y", "@thetanuts-finance/mcp"] },
+    "wallet":    { "command": "npx", "args": ["-y", "@coinbase/cdp-mcp"] }
+  }
+}
+```
+
+CDP holds the key in a Trusted Execution Environment behind a policy you set ("max 5 tx/hour, max $500/tx, only Thetanuts contracts"). The agent can fill orders without per-tx confirmation, but it can't violate the policy you set.
+
+### Why this is split (the security reason)
+
+If this MCP held a private key directly, an LLM could be tricked into signing transactions you never intended. Real example from May 2026: **the Bankr/Grok agent lost ~$150K** when an attacker replied to its X thread with a Morse-encoded "send 3B DRB to 0x…". Grok decoded the prompt and Bankr executed.
+
+Splitting calldata-building from signing puts a hard checkpoint between "an LLM proposed this transaction" and "this transaction got broadcast." That checkpoint is either your wallet UI (manual mode) or a policy engine (autonomous mode). Either way, the protocol-knowledge layer (Thetanuts MCP) and the key-custody layer (signer-MCP) are independently auditable, independently versioned, and independently swappable.
+
+This is the same architecture every DeFi frontend uses: the website builds the calldata, your wallet signs. The Thetanuts MCP is the same idea, exposed for LLMs.
+
+### TL;DR
+
+- **Want to read?** This MCP alone is enough.
+- **Want to fill orders?** This MCP + a signer-MCP. You stay in control of signing.
+- **Want autonomous agents?** This MCP + Coinbase AgentKit (or Safe, or thirdweb Engine) with policies you configure.
+
+For the full SDK context (every module, every workflow, every gotcha), call `get_sdk_context` once at session start.
 
 ## Environment Variables
 
