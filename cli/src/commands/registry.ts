@@ -6,6 +6,8 @@ import * as wallet from './wallet.js';
 import * as market from './market.js';
 import * as pricing from './pricing.js';
 import * as util from './util.js';
+import * as book from './book.js';
+import * as position from './position.js';
 
 /**
  * Centralized command registration. Each module under `commands/` exports a
@@ -20,4 +22,6 @@ export function registerCommands(program: Command): void {
   market.register(program);
   pricing.register(program);
   util.register(program);
+  book.register(program);
+  position.register(program);
 }
