@@ -44,6 +44,9 @@ thetanuts chain tokens
 thetanuts book orders --underlying ETH --type PUT
 thetanuts pricing all --underlying ETH
 
+# Pre-trade liquidity check: should I fill on the orderbook or RFQ this strike?
+thetanuts book check --underlying ETH --type PUT --strike 2200 --expiry 1778832000 --direction sell
+
 # Pure helpers, no network
 thetanuts util payout --type call --strikes 2000 --price 2150 --contracts 1
 
@@ -51,10 +54,16 @@ thetanuts util payout --type call --strikes 2000 --price 2150 --contracts 1
 thetanuts -o json market data | jq '.prices.ETH'
 ```
 
-To trade, run setup:
+To trade, set up a wallet first:
 
 ```sh
+# Generate a new wallet (recommended — random key, saved locally)
+thetanuts wallet create
+# Or import an existing key (interactive, masked prompt)
+thetanuts wallet import
+# Or run the guided wizard which offers both options
 thetanuts setup
+
 # Then approvals + a tiny dry-run before any real fill
 thetanuts wallet approve --token USDC --for optionBook --amount 100 --dry-run
 thetanuts book fill --order-index 0 --collateral 1 --dry-run
@@ -68,16 +77,23 @@ Precedence (highest first):
 2. Environment variables: `THETANUTS_PRIVATE_KEY`, `THETANUTS_RPC_URL`, `THETANUTS_CHAIN`
 3. Persisted config at `~/.config/thetanuts/config.json`
 
-The fastest way to get configured is the interactive wizard:
+Three ways to create or import a wallet:
 
 ```sh
+# Option 1 — generate a fresh random wallet (recommended for dedicated trading wallets)
+thetanuts wallet create
+# Interactive TTY: offers to display the 12-word mnemonic ONCE for paper backup.
+# Non-TTY / --yes: saves silently, prints a stern stderr warning that the mnemonic
+# was discarded and the config file is the only backup.
+
+thetanuts wallet create --reveal-key      # show key + mnemonic in stdout (gated by confirm)
+thetanuts wallet create --force           # overwrite existing key (prints old address)
+
+# Option 2 — import an existing private key (masked input)
+thetanuts wallet import
+
+# Option 3 — guided wizard that bundles wallet + chain + RPC choice
 thetanuts setup
-```
-
-Or import a key without running the full wizard:
-
-```sh
-thetanuts wallet import       # masked-input prompt
 ```
 
 Config file shape (`~/.config/thetanuts/config.json`):
@@ -111,14 +127,17 @@ Read-only (no wallet required):
 - `pricing` — MM pricing grid, ticker math, fee adjustment, collateral cost
 - `chain` — chain id, contracts, tokens, implementations, feeds
 - `util` — unit conversions, payout math, structure validators
-- `book orders`, `book preview`, `book max-contracts`, `book fees`,
-  `book claimable-fees`, `book referrer-fee-split`, `book hash-order`,
-  `book compute-nonce`, `book eip712-domain`
+- `book orders`, `book preview`, `book max-contracts`, `book check`,
+  `book fees`, `book claimable-fees`, `book referrer-fee-split`,
+  `book hash-order`, `book compute-nonce`, `book eip712-domain`
 - `position list`, `position info`, `position full`, and every other
   `position` read
+- `wallet create`, `wallet import`, `wallet show` — wallet setup (generate
+  or import keys; these are how you get a wallet in the first place)
 
 Wallet required:
 
+- `wallet balance`, `wallet allowance` (when no `--address` is provided)
 - `wallet approve`, `wallet ensure-allowance`, `wallet transfer`
 - `book fill`, `book swap-and-fill`, `book cancel`, `book claim`,
   `book claim-all`, `book static-fill`, `book static-cancel`
@@ -212,17 +231,37 @@ thetanuts chain implementations               # CALL, PUT, SPREAD, FLY, CONDOR, 
 thetanuts chain feeds                         # 8 Chainlink price feeds
 ```
 
-### `wallet` — balances, approvals, transfers
+### `wallet` — create/import wallets, balances, approvals, transfers
 
 ```sh
-thetanuts wallet show
-thetanuts wallet balance
+# Wallet setup
+thetanuts wallet create                       # generate fresh, save locally, optional paper backup
+thetanuts wallet create --reveal-key          # also print key + mnemonic (gated by confirm)
+thetanuts wallet create --force               # overwrite existing (prints old address)
+thetanuts wallet import                       # interactive masked-input prompt for an existing key
+thetanuts wallet show                         # address + source + config path
+thetanuts wallet reset                        # delete the config file (prompts for confirmation)
+
+# Balances + allowances
+thetanuts wallet balance                      # all configured tokens
 thetanuts wallet balance --token USDC
 thetanuts wallet allowance --token USDC --spender 0x...
-thetanuts wallet import
+thetanuts wallet info --token USDC            # decimals + symbol
+
+# Writes
 thetanuts wallet approve --token USDC --for optionBook --amount 100
+thetanuts wallet ensure-allowance --token USDC --spender 0x... --amount 100
 thetanuts wallet transfer --token USDC --to 0x... --amount 10 --dry-run
 ```
+
+Flags for `wallet create`:
+
+| Flag             | Meaning                                                                                       |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| `--force`        | Overwrite an existing key without prompting. Stderr warning names the old address being destroyed. |
+| `--reveal-key`   | After saving, also print the private key + 12-word BIP-39 mnemonic to stdout. Gated by a confirm prompt that warns about scrollback. |
+| `--yes`          | Auto-confirm prompts. The post-save "mnemonic discarded" stderr warning still fires.          |
+| `--dry-run`      | Beats `--reveal-key --yes` for the reveal prompt — key is never printed under `--dry-run`.    |
 
 Flags for `wallet approve`:
 
@@ -283,14 +322,38 @@ thetanuts util validate-expiry 1771228800
 ### `book` — OptionBook orderflow
 
 ```sh
+# Reads + pre-trade analysis
 thetanuts book orders --underlying ETH
 thetanuts book preview --order-index 0 --collateral 1
 thetanuts book max-contracts --order-index 0
+thetanuts book check --underlying ETH --type PUT --strike 2200 --expiry 1778832000 --direction sell
+
+# Writes (broadcast — use --dry-run first)
 thetanuts book fill --order-index 0 --collateral 1 --dry-run
 thetanuts book cancel --order-index 0 --dry-run
 thetanuts book claim --token USDC
+thetanuts book claim-all
+
+# Static reflection (no broadcast)
 thetanuts book static-fill --order-index 0 --num-contracts 1
+thetanuts book static-cancel --order-index 0
+
+# Order metadata
+thetanuts book hash-order --order-index 0
+thetanuts book compute-nonce
+thetanuts book eip712-domain
+
+# Referrer accounting
+thetanuts book fees --token USDC
+thetanuts book claimable-fees
+thetanuts book referrer-fee-split
 ```
+
+`book check` is a deterministic port of OpenClaw's pre-trade liquidity
+analyzer. It returns matching orderbook orders + best price + available
+size + partial-fill availability + nearby strikes within 5% + a
+recommendation (`orderbook` vs `rfq`) with reason. Useful before a
+`book fill` or (once Phase 3 lands) an `rfq request`.
 
 Flags for `book fill`:
 
@@ -341,7 +404,11 @@ thetanuts book preview --order-index 0 --collateral 1
 ### 2. First-time wallet setup and approvals
 
 ```sh
-thetanuts setup
+# Pick one — all three end up with a wallet in ~/.config/thetanuts/config.json
+thetanuts wallet create        # generate fresh, paper-backup the mnemonic
+thetanuts wallet import        # paste an existing private key
+thetanuts setup                # guided wizard: wallet + chain + RPC in one flow
+
 thetanuts wallet show
 thetanuts wallet balance
 thetanuts wallet approve --token USDC --for optionBook --amount 100
@@ -389,34 +456,38 @@ thetanuts -o json pricing all --underlying ETH \
 
 ## Architecture
 
-The CLI is a thin wrapper over `@thetanuts-finance/thetanutsent`. Each
+The CLI is a thin wrapper over `@thetanuts-finance/thetanuts-client`. Each
 command group lives in one file under `cli/src/commands/`; a registry wires
 them into the Commander root.
 
 ```
 cli/src/
-├── index.ts                    Commander root, global flags, EPIPE handler
+├── index.ts                    Commander root, global flags, EPIPE handler, --version
 ├── client.ts                   getClient() factory (flag → env → config → default)
 ├── config.ts                   Load/save ~/.config/thetanuts/config.json (0o600)
+├── defaults.ts                 Single source for default chain ID + RPC URLs
 ├── output.ts                   table / json / csv / yaml renderers; BigInt-safe
-├── confirm.ts                  Preview + confirm() + dry-run plumbing
+├── confirm.ts                  Preview + confirm() + dry-run plumbing (dry-run > yes)
 ├── options.ts                  Shared Commander option declarations
 ├── warn.ts                     Shared safety-warning helpers (stderr)
 └── commands/
     ├── registry.ts             Wires every group's register(program)
-    ├── setup.ts                Interactive first-run wizard
+    ├── setup.ts                Interactive first-run wizard (create | import | skip)
     ├── config.ts               Inspect/edit persisted config
     ├── chain.ts                Chain metadata
-    ├── wallet.ts               Balances, allowances, approvals, transfers
+    ├── wallet.ts               Create/import wallets, balances, allowances, transfers
     ├── market.ts               Live market reads
     ├── pricing.ts              MM pricing + ticker math
     ├── util.ts                 Pure conversions and validators
-    ├── book.ts                 OptionBook orderflow
+    ├── book.ts                 OptionBook orderflow + pre-trade liquidity check
     └── position.ts             Owned option management
 ```
 
-For the full spec, see `cli/PRD.md` (working doc, gitignored). For the
-pending-work handoff, see `todo_cli.md` at the repo root.
+Roadmap groups still to land: `keys`, `rfq`, `loan`, `ranger`, `events`,
+`watch`, `wheel`, `vault`. See `cli/rfq_design.md` for the next major
+feature (RFQ) and `todo_cli.md` §5 / §13 for the full pending-work map.
+
+For the full spec, see `cli/PRD.md` (working doc, gitignored).
 
 ## License
 
