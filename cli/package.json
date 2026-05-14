@@ -1,0 +1,63 @@
+{
+  "name": "@thetanuts-finance/cli",
+  "version": "0.1.0",
+  "description": "Thetanuts Finance V4 command-line interface",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "thetanuts-cli": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "node scripts/swap-sdk-dep.cjs && npm run build && chmod +x dist/index.js",
+    "postpublish": "node scripts/restore-sdk-dep.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "thetanuts",
+    "cli",
+    "options",
+    "defi",
+    "ethereum",
+    "base",
+    "sdk"
+  ],
+  "author": "Thetanuts Finance",
+  "license": "MIT",
+  "homepage": "https://github.com/Thetanuts-Finance/thetanuts-sdk/tree/main/cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Thetanuts-Finance/thetanuts-sdk.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Thetanuts-Finance/thetanuts-sdk/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@thetanuts-finance/thetanuts-client": "file:..",
+    "cli-table3": "^0.6.5",
+    "commander": "^12.1.0",
+    "ethers": "^6.13.0",
+    "picocolors": "^1.1.0",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
