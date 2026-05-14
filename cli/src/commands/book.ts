@@ -161,9 +161,299 @@ export function register(program: Command): void {
     .description('OptionBook orderflow: list orders, preview, fill, cancel, claim referrer fees');
 
   registerReads(grp);
+  registerCheck(grp);
   registerWrites(grp);
   registerFees(grp);
   registerStatic(grp);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-trade liquidity check
+// ---------------------------------------------------------------------------
+
+interface CheckParams {
+  underlying: 'ETH' | 'BTC';
+  type: 'PUT' | 'CALL';
+  strike: number;
+  expiry: number;
+  direction: 'buy' | 'sell';
+  size?: number;
+}
+
+interface MatchingOrder {
+  index: number;
+  ticker: string;
+  type: 'PUT' | 'CALL';
+  strike: number;
+  expiry: number;
+  expiryDate: string;
+  side: 'BID' | 'ASK';
+  price: number;
+  availableContracts: number;
+  maker: string;
+}
+
+interface NearbyStrike {
+  strike: number;
+  priceDiff: string;
+  bestPrice: number;
+  availableContracts: number;
+  orderIndex: number;
+}
+
+interface CheckResult {
+  recommendation: 'orderbook' | 'rfq';
+  reason: string;
+  params: CheckParams;
+  orderbookOrders: MatchingOrder[];
+  bestPrice: number | null;
+  availableSize: number | null;
+  partialFillAvailable: boolean;
+  partialSize: number | null;
+  nearbyStrikes: NearbyStrike[];
+  nextStep: string;
+  timestamp: string;
+}
+
+function formatCheckTicker(underlying: string, expiry: number, strike: number, type: string): string {
+  const expiryDate = new Date(expiry * 1000);
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const day = expiryDate.getUTCDate();
+  const month = months[expiryDate.getUTCMonth()];
+  const year = expiryDate.getUTCFullYear().toString().slice(-2);
+  return `${underlying}-${day}${month}${year}-${strike}-${type === 'PUT' ? 'P' : 'C'}`;
+}
+
+function registerCheck(grp: Command): void {
+  grp
+    .command('check')
+    .description('Pre-trade liquidity check: scan orderbook for matching strike/expiry/type and recommend orderbook vs RFQ')
+    .requiredOption('--underlying <asset>', 'underlying asset (ETH|BTC)')
+    .requiredOption('--type <type>', 'option type (PUT|CALL)')
+    .requiredOption('--strike <price>', 'target strike price in USD')
+    .requiredOption('--expiry <ts>', 'expiry unix timestamp')
+    .requiredOption('--direction <dir>', 'buy = you buy the option, sell = you sell the option')
+    .option('--size <contracts>', 'desired contract size (if omitted, shows all available)')
+    .action(async (_local: unknown, cmd: Command) => {
+      const opts = getGlobalOpts(cmd);
+      const local = cmd.opts<{
+        underlying: string;
+        type: string;
+        strike: string;
+        expiry: string;
+        direction: string;
+        size?: string;
+      }>();
+
+      // Validate params upfront
+      // CLI surfaces the same errors as the script it ports
+      const underlying = local.underlying.toUpperCase();
+      const type = local.type.toUpperCase();
+      const direction = local.direction.toLowerCase();
+      const strike = parseFloat(local.strike);
+      const expiry = parseInt(local.expiry, 10);
+      const size = local.size !== undefined ? parseFloat(local.size) : undefined;
+
+      const missing: string[] = [];
+      if (!['ETH', 'BTC'].includes(underlying)) missing.push('--underlying (ETH|BTC)');
+      if (!['PUT', 'CALL'].includes(type)) missing.push('--type (PUT|CALL)');
+      if (!strike || Number.isNaN(strike)) missing.push('--strike (price)');
+      if (!expiry || Number.isNaN(expiry)) missing.push('--expiry (unix timestamp)');
+      if (!['buy', 'sell'].includes(direction)) missing.push('--direction (buy|sell)');
+      if (size !== undefined && Number.isNaN(size)) missing.push('--size (number)');
+
+      const params: CheckParams = {
+        underlying: underlying as 'ETH' | 'BTC',
+        type: type as 'PUT' | 'CALL',
+        strike,
+        expiry,
+        direction: direction as 'buy' | 'sell',
+        ...(size !== undefined ? { size } : {}),
+      };
+
+      if (missing.length > 0) {
+        renderError(
+          new Error(`Missing or invalid required parameters: ${missing.join(', ')}`),
+          renderOpts(opts)
+        );
+        process.exit(1);
+      }
+
+      try {
+        const { client } = getClient(opts);
+        const now = Math.floor(Date.now() / 1000);
+
+        // Fetch all orders
+        const orders = await client.api.fetchOrders();
+
+        // Extract order data helper
+        // numeric scaling (1e8 for strike/price/availableAmount) matches
+        const extractOrderData = (o: OrderWithSignature, index: number): MatchingOrder | null => {
+          const raw = o.rawApiData as Record<string, unknown> | undefined;
+          const isCall = (raw?.isCall as boolean | undefined) ?? true;
+          const strikePrice = o.order?.strikePrice;
+          const strike = strikePrice ? Number(strikePrice) / 1e8 : 0;
+          const expiry = o.order?.expiry ? Number(o.order.expiry) : 0;
+          const price = o.order?.price ? Number(o.order.price) / 1e8 : 0;
+          const availableAmount = o.availableAmount ? Number(o.availableAmount) / 1e8 : 0;
+          const isBuyer = o.order?.isBuyer ?? false;
+          const orderExpiry = (raw?.orderExpiryTimestamp as number | undefined) ?? 0;
+
+          // Skip expired orders
+          if (orderExpiry > 0 && orderExpiry < now) {
+            return null;
+          }
+
+          const optionType: 'PUT' | 'CALL' = isCall ? 'CALL' : 'PUT';
+
+          return {
+            index,
+            // Preserve OpenClaw quirk: ticker formatter hardcodes 'ETH'. Don't
+            // "fix" this — number alignment requires byte-for-byte parity.
+            ticker: formatCheckTicker('ETH', expiry, strike, optionType),
+            type: optionType,
+            strike,
+            expiry,
+            expiryDate: new Date(expiry * 1000).toISOString(),
+            side: isBuyer ? 'BID' : 'ASK',
+            price,
+            availableContracts: availableAmount,
+            maker: o.makerAddress ?? '',
+          };
+        };
+
+        // Filter orders by type and expiry
+        const filteredOrders: MatchingOrder[] = [];
+
+        orders.forEach((o, index) => {
+          const orderData = extractOrderData(o, index);
+          if (!orderData) return;
+
+          if (orderData.type !== params.type) return;
+          if (orderData.expiry !== params.expiry) return;
+
+          // Direction match: buy -> need ASK (sellers); sell -> need BID (buyers)
+          const matchesSide =
+            params.direction === 'buy'
+              ? orderData.side === 'ASK'
+              : orderData.side === 'BID';
+          if (!matchesSide) return;
+
+          filteredOrders.push(orderData);
+        });
+
+        // Exact strike matches
+        const exactMatches = filteredOrders.filter((o) => o.strike === params.strike);
+
+        // Nearby strikes (within 5%)
+        const strikeTolerance = params.strike * 0.05;
+        const nearbyMatches = filteredOrders.filter(
+          (o) =>
+            o.strike !== params.strike &&
+            Math.abs(o.strike - params.strike) <= strikeTolerance
+        );
+
+        // Aggregate nearby strikes
+        const nearbyStrikes: NearbyStrike[] = [];
+        const strikeMap = new Map<number, MatchingOrder[]>();
+        nearbyMatches.forEach((o) => {
+          if (!strikeMap.has(o.strike)) strikeMap.set(o.strike, []);
+          strikeMap.get(o.strike)!.push(o);
+        });
+        strikeMap.forEach((ordersAtStrike, strikeKey) => {
+          const bestOrder = ordersAtStrike.reduce(
+            (best, curr) =>
+              params.direction === 'buy'
+                ? curr.price < best.price
+                  ? curr
+                  : best
+                : curr.price > best.price
+                  ? curr
+                  : best,
+            ordersAtStrike[0]
+          );
+          const totalContracts = ordersAtStrike.reduce(
+            (sum, o) => sum + o.availableContracts,
+            0
+          );
+          const priceDiff = (((strikeKey - params.strike) / params.strike) * 100).toFixed(1);
+          nearbyStrikes.push({
+            strike: strikeKey,
+            priceDiff: `${parseFloat(priceDiff) >= 0 ? '+' : ''}${priceDiff}%`,
+            bestPrice: bestOrder.price,
+            availableContracts: totalContracts,
+            orderIndex: bestOrder.index,
+          });
+        });
+        nearbyStrikes.sort(
+          (a, b) =>
+            Math.abs(a.strike - params.strike) - Math.abs(b.strike - params.strike)
+        );
+
+        // Totals + best price for exact matches
+        const totalAvailable = exactMatches.reduce(
+          (sum, o) => sum + o.availableContracts,
+          0
+        );
+        const bestPrice =
+          exactMatches.length > 0
+            ? params.direction === 'buy'
+              ? Math.min(...exactMatches.map((o) => o.price))
+              : Math.max(...exactMatches.map((o) => o.price))
+            : null;
+
+        // Recommendation logic — lifted from OpenClaw
+        let recommendation: 'orderbook' | 'rfq';
+        let reason: string;
+        let nextStep: string;
+        let partialFillAvailable = false;
+        let partialSize: number | null = null;
+
+        if (exactMatches.length > 0) {
+          if (params.size && params.size > totalAvailable) {
+            partialFillAvailable = true;
+            partialSize = totalAvailable;
+            recommendation = 'orderbook';
+            reason = `Found ${totalAvailable.toFixed(4)} contracts at strike $${params.strike} (you requested ${params.size}). Partial fill available via orderbook, or use RFQ for full amount.`;
+            nextStep = `Preview fill: thetanuts book preview --order-index ${exactMatches[0].index} --collateral <amount>`;
+          } else {
+            recommendation = 'orderbook';
+            reason = `Found orderbook liquidity at strike $${params.strike}. Best ${params.direction === 'buy' ? 'ask' : 'bid'} price: $${bestPrice?.toFixed(2)}. Available: ${totalAvailable.toFixed(4)} contracts. This will execute instantly.`;
+            nextStep = `Preview fill: thetanuts book preview --order-index ${exactMatches[0].index} --collateral <amount>`;
+          }
+        } else if (nearbyStrikes.length > 0) {
+          recommendation = 'rfq';
+          reason = `No orderbook liquidity at exact strike $${params.strike}. Nearby strikes available: ${nearbyStrikes
+            .slice(0, 3)
+            .map((s) => `$${s.strike} (${s.priceDiff})`)
+            .join(', ')}. Use RFQ for your exact strike, or consider nearby strikes.`;
+          nextStep = `Build RFQ (Phase 3, not yet implemented): would request --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --direction ${params.direction}`;
+        } else {
+          recommendation = 'rfq';
+          reason = `No orderbook liquidity at strike $${params.strike} or nearby. Submitting RFQ - market makers will respond within 6 minutes.`;
+          nextStep = `Build RFQ (Phase 3, not yet implemented): would request --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --direction ${params.direction}`;
+        }
+
+        const result: CheckResult = {
+          recommendation,
+          reason,
+          params,
+          orderbookOrders: exactMatches.slice(0, 10),
+          bestPrice,
+          availableSize: totalAvailable > 0 ? totalAvailable : null,
+          partialFillAvailable,
+          partialSize,
+          nearbyStrikes: nearbyStrikes.slice(0, 5),
+          nextStep,
+          timestamp: new Date().toISOString(),
+        };
+
+        render(result, renderOpts(opts));
+      } catch (err) {
+        renderError(err, renderOpts(opts));
+        process.exit(1);
+      }
+    });
 }
 
 // ---------------------------------------------------------------------------
