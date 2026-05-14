@@ -2,20 +2,19 @@ import { ethers } from 'ethers';
 import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 import type { OptionValues } from 'commander';
 import { loadConfig, type Config } from './config.js';
+import { DEFAULT_CHAIN_ID, DEFAULT_RPC_URL } from './defaults.js';
 
 /**
  * Resolution order for any setting (descending priority):
  *   1. CLI global flag (e.g. --rpc-url, --private-key, --chain)
  *   2. Environment variable (THETANUTS_RPC_URL, THETANUTS_PRIVATE_KEY)
  *   3. Config file at --config or ~/.config/thetanuts/config.json
- *   4. Hardcoded default (chainId 8453 / Base mainnet, https://mainnet.base.org)
+ *   4. Hardcoded default (see defaults.ts — Base mainnet by default)
  *
  * `getClient` always returns a read-capable client. The signer is only attached
  * when a private key resolves; modules that need a signer should call
  * `requireSigner(client)` for a clearer error message.
  */
-const DEFAULT_CHAIN_ID = 8453; // Base mainnet
-const DEFAULT_RPC_URL = 'https://mainnet.base.org';
 
 export interface GetClientResult {
   client: ThetanutsClient;
