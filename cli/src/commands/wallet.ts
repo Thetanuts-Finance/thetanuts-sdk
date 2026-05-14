@@ -292,6 +292,168 @@ export function register(program: Command): void {
   // ---- Writes / config mutations ----
 
   grp
+    .command('create')
+    .description(
+      'Generate a fresh random wallet and store it in the config. ' +
+        'The private key is NEVER printed unless --reveal-key is passed (with confirmation). ' +
+        'For a one-time backup, use --reveal-key or copy the config file to a secure location.'
+    )
+    .option('--force', 'overwrite an existing private key without prompting', false)
+    .option(
+      '--reveal-key',
+      'after saving, display the private key and BIP-39 mnemonic on stdout. Will appear in scrollback — pipe to a secure destination.',
+      false
+    )
+    .action(async (_localOpts: unknown, cmd: Command) => {
+      const opts = getGlobalOpts(cmd);
+      const local = cmd.opts<{ force?: boolean; revealKey?: boolean }>();
+      try {
+        const path = (opts.config as string | undefined) ?? defaultConfigPath();
+        const existing = loadConfig(path);
+        if (existing?.privateKey && !local.force) {
+          const ok = await confirm(
+            `Config at ${path} already has a private key (${maskPrivateKey(existing.privateKey)}). Overwrite with a NEW random wallet? ` +
+              `The existing key cannot be recovered after overwrite.`,
+            { yes: Boolean(opts.yes), dryRun: Boolean(opts.dryRun) }
+          );
+          if (!ok) process.exit(3);
+        } else if (existing?.privateKey && local.force) {
+          // --force skipped the confirm prompt entirely. Surface the address
+          // being destroyed so a user rotating keys can at least verify which
+          // one is going away — silent overwrite is too easy to mis-aim.
+          try {
+            const oldAddr = new ethers.Wallet(existing.privateKey).address;
+            process.stderr.write(
+              `--force: overwriting wallet ${oldAddr} (key permanently destroyed)\n`
+            );
+          } catch {
+            process.stderr.write(
+              '--force: overwriting an unparseable existing key (no recovery possible)\n'
+            );
+          }
+        }
+
+        // Generate a fresh wallet. ethers v6's createRandom() returns a
+        // wallet whose mnemonic is accessible at this instance — once we
+        // persist only the raw private key, the mnemonic is unrecoverable.
+        // The mnemonic is strictly more sensitive than the key (HD master
+        // vs single-account); we deliberately do NOT persist it, instead
+        // nudging the user to capture a paper backup at create time.
+        const wallet = ethers.Wallet.createRandom();
+        const address = wallet.address;
+        const privateKey = wallet.privateKey;
+        const mnemonic = wallet.mnemonic?.phrase;
+
+        // Announcement goes to stderr so `-o json | jq` stays clean. The
+        // structured success record still lands on stdout via render() below.
+        process.stderr.write(`\nGenerated wallet ${address}\n\n`);
+
+        // ---- Interactive backup warning ----
+        //
+        // The mnemonic exists ONLY in this process's memory right now. Once
+        // we save the raw key to disk and the action returns, the mnemonic
+        // is irretrievable. This is THE moment to offer paper backup.
+        //
+        // Skipped when:
+        //   - --reveal-key (user already opted in to seeing it below)
+        //   - --yes (user pre-confirmed everything; respect the contract)
+        //   - --dry-run (no broadcast pattern; skip prompts)
+        //   - stdin is not a TTY (scripted invocation; warn on stderr instead)
+        let mnemonicShown = Boolean(local.revealKey);
+        const canPrompt =
+          !local.revealKey &&
+          !opts.yes &&
+          !opts.dryRun &&
+          process.stdin.isTTY;
+        if (canPrompt) {
+          const showBackup = await prompts({
+            type: 'confirm',
+            name: 'show',
+            message:
+              'Display the 12-word mnemonic now for paper backup? ' +
+              '(One-shot — once you dismiss this, only the config file is your backup.)',
+            initial: true,
+          });
+          if (showBackup.show && mnemonic) {
+            process.stdout.write(
+              `\nMnemonic (write this down somewhere safe — anyone with these 12 words controls the wallet):\n\n  ${mnemonic}\n\n`
+            );
+            const ack = await prompts({
+              type: 'confirm',
+              name: 'ok',
+              message: 'I have written down the mnemonic',
+              initial: false,
+            });
+            if (!ack.ok) {
+              process.stderr.write(
+                'Aborting. Wallet was NOT saved. Re-run `thetanuts wallet create` to try again.\n'
+              );
+              process.exit(3);
+            }
+            mnemonicShown = true;
+          }
+        }
+
+        const cfg: Config = existing
+          ? { ...existing, privateKey }
+          : {
+              version: 1,
+              chainId: DEFAULT_CHAIN_ID,
+              rpcUrl: DEFAULT_RPC_URL,
+              privateKey,
+            };
+        saveConfig(cfg, path);
+
+        const out: Record<string, unknown> = {
+          created: true,
+          address,
+          path,
+          note:
+            'Private key stored locally with chmod 600. ' +
+            'To back up later: copy the config file to a secure location.',
+        };
+
+        if (local.revealKey) {
+          // Explicit --reveal-key path: gated by an additional confirm
+          // because the key + mnemonic about to land in stdout / scrollback.
+          const ack = await confirm(
+            'About to print your private key and mnemonic to stdout. They will appear in scrollback / pipe / log targets. Continue?',
+            { yes: Boolean(opts.yes), dryRun: Boolean(opts.dryRun) }
+          );
+          if (ack) {
+            out.privateKey = privateKey;
+            if (mnemonic) out.mnemonic = mnemonic;
+            out.backupReminder =
+              'Write the mnemonic down on paper, not screenshots. Anyone with this key or mnemonic controls the wallet.';
+            mnemonicShown = true;
+          }
+        }
+
+        render(out, { output: opts.output, noColor: !opts.color });
+
+        // ---- Loud post-save warning when mnemonic was discarded ----
+        //
+        // If the user got here without backing up the mnemonic (declined the
+        // prompt, ran with --yes, --dry-run, or non-TTY stdin), the mnemonic
+        // is now unrecoverable. We can't bring it back — but we can be
+        // very loud about what just happened, on stderr so JSON-output
+        // pipelines still parse cleanly.
+        if (!mnemonicShown) {
+          process.stderr.write(
+            '\n⚠ Mnemonic discarded — the config file is now your ONLY backup of this wallet.\n' +
+              `  If ${path} is lost, deleted, or corrupted with no copy elsewhere, the wallet is unrecoverable.\n` +
+              '  Back up now: cp "' +
+              path +
+              '" /path/to/secure/location\n\n'
+          );
+        }
+      } catch (err) {
+        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
+        process.exit(1);
+      }
+    });
+
+  grp
     .command('import')
     .description('Interactively import a private key into the config')
     .action(async (_localOpts: unknown, cmd: Command) => {

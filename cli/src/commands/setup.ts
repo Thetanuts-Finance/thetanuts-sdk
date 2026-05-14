@@ -119,9 +119,10 @@ export function register(program: Command): void {
         const mode = await prompts({
           type: 'select',
           name: 'value',
-          message: 'Import an existing private key, or skip (read-only mode)?',
+          message: 'How would you like to configure a wallet?',
           choices: [
-            { title: 'Import private key', value: 'import' },
+            { title: 'Create a new wallet (random key, saved locally)', value: 'create' },
+            { title: 'Import an existing private key', value: 'import' },
             { title: 'Skip — read-only mode', value: 'skip' },
           ],
           initial: 0,
@@ -131,7 +132,42 @@ export function register(program: Command): void {
         }
 
         let privateKey: string | undefined;
-        if (mode.value === 'import') {
+        if (mode.value === 'create') {
+          // Generate in memory → give user a single chance
+          // to back up the mnemonic → save raw key to disk. Once the user
+          // acknowledges (or declines backup), the mnemonic is unrecoverable.
+          const wallet = ethers.Wallet.createRandom();
+          privateKey = wallet.privateKey;
+          const mnemonic = wallet.mnemonic?.phrase;
+          process.stdout.write(`\nGenerated new wallet\n`);
+          process.stdout.write(`  Address: ${wallet.address}\n\n`);
+          process.stdout.write(
+            'You have ONE chance to back up the mnemonic before it is discarded.\n' +
+              'Anyone with this mnemonic (or the saved private key) controls the wallet.\n\n'
+          );
+          const showBackup = await prompts({
+            type: 'confirm',
+            name: 'show',
+            message: 'Display mnemonic phrase now for backup?',
+            initial: false,
+          });
+          if (showBackup.show && mnemonic) {
+            process.stdout.write(`\n  ${mnemonic}\n\n`);
+            const ack = await prompts({
+              type: 'confirm',
+              name: 'ok',
+              message: 'I have written down the mnemonic somewhere safe',
+              initial: false,
+            });
+            if (!ack.ok) {
+              process.stderr.write(
+                'Aborting setup. Wallet was NOT saved. Re-run `thetanuts setup` to try again.\n'
+              );
+              process.exit(3);
+            }
+          }
+          process.stdout.write('Saving wallet to config...\n');
+        } else if (mode.value === 'import') {
           privateKey = await promptPrivateKey();
         }
 
