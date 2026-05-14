@@ -16,7 +16,11 @@ export function addGlobalOptions(program: Command): void {
     .option('--yes', 'skip interactive confirmation prompts', false)
     .option('--rpc-url <url>', 'override the RPC endpoint for the active chain')
     .option('--chain <id|name>', 'chain id (8453, 1) or name (base, ethereum)')
-    .option('--private-key <key>', 'hex private key for signing (prefer env or config)')
+    .option(
+      '--private-key <key>',
+      'hex private key for signing. WARNING: argv lands in shell history and ps aux — ' +
+        'prefer THETANUTS_PRIVATE_KEY env var, or `thetanuts wallet import` to store in the config.'
+    )
     .option('--config <path>', 'path to a config file (default: ~/.config/thetanuts/config.json)')
     .option('--referrer <addr>', 'referrer address to forward to SDK calls')
     .option('--json-errors', 'emit errors as JSON on stderr', false)
