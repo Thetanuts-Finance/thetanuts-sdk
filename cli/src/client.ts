@@ -2,7 +2,11 @@ import { ethers } from 'ethers';
 import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 import type { OptionValues } from 'commander';
 import { loadConfig, type Config } from './config.js';
-import { DEFAULT_CHAIN_ID, DEFAULT_RPC_URL } from './defaults.js';
+import {
+  DEFAULT_CHAIN_ID,
+  DEFAULT_ETHEREUM_RPC_URL,
+  DEFAULT_RPC_URL,
+} from './defaults.js';
 
 /**
  * Resolution order for any setting (descending priority):
@@ -44,9 +48,15 @@ function resolveRpcUrl(opts: OptionValues, cfg: Config | null, chainId: number):
   if (fromFlag) return fromFlag;
   const fromEnv = process.env.THETANUTS_RPC_URL;
   if (fromEnv) return fromEnv;
-  if (chainId === 1 && cfg?.ethereumRpcUrl) return cfg.ethereumRpcUrl;
-  if (cfg?.rpcUrl) return cfg.rpcUrl;
-  return DEFAULT_RPC_URL;
+  // Per-chain fallback. The SDK supports chainId 1 (Ethereum, vault-only) and
+  // chainId 8453 (Base, full trading surface). If the user selects Ethereum
+  // without setting an Ethereum RPC, we MUST NOT fall through to the Base RPC
+  // — that would route Ethereum-chainId queries to Base infrastructure and
+  // produce garbage data (or, for writes, broadcast on the wrong chain).
+  if (chainId === 1) {
+    return cfg?.ethereumRpcUrl ?? DEFAULT_ETHEREUM_RPC_URL;
+  }
+  return cfg?.rpcUrl ?? DEFAULT_RPC_URL;
 }
 
 function resolvePrivateKey(opts: OptionValues, cfg: Config | null): string | undefined {

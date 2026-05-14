@@ -15,7 +15,11 @@ export function addGlobalOptions(program: Command): void {
     .option('--dry-run', 'simulate without sending transactions', false)
     .option('--yes', 'skip interactive confirmation prompts', false)
     .option('--rpc-url <url>', 'override the RPC endpoint for the active chain')
-    .option('--chain <id|name>', 'chain id (8453, 1) or name (base, ethereum)')
+    .option(
+      '--chain <id|name>',
+      'chain id (8453=Base default; 1=Ethereum for wheel-vault reads only — ' +
+        'trading + RFQ + indexer features are Base-only)'
+    )
     .option(
       '--private-key <key>',
       'hex private key for signing. WARNING: argv lands in shell history and ps aux — ' +
