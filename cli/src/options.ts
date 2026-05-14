@@ -16,11 +16,6 @@ export function addGlobalOptions(program: Command): void {
     .option('--yes', 'skip interactive confirmation prompts', false)
     .option('--rpc-url <url>', 'override the RPC endpoint for the active chain')
     .option(
-      '--chain <id|name>',
-      'chain id (8453=Base default; 1=Ethereum for wheel-vault reads only — ' +
-        'trading + RFQ + indexer features are Base-only)'
-    )
-    .option(
       '--private-key <key>',
       'hex private key for signing. WARNING: argv lands in shell history and ps aux — ' +
         'prefer THETANUTS_PRIVATE_KEY env var, or `thetanuts wallet import` to store in the config.'

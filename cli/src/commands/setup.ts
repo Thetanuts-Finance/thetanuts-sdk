@@ -3,27 +3,12 @@ import type { Command } from 'commander';
 import prompts from 'prompts';
 import { ethers } from 'ethers';
 import { defaultConfigPath, loadConfig, saveConfig, type Config } from '../config.js';
-import {
-  DEFAULT_CHAIN_ID,
-  DEFAULT_ETHEREUM_RPC_URL,
-  DEFAULT_RPC_URL,
-} from '../defaults.js';
+import { DEFAULT_CHAIN_ID, DEFAULT_RPC_URL } from '../defaults.js';
 import { getGlobalOpts } from '../options.js';
 import { getClient } from '../client.js';
 import { render, renderError } from '../output.js';
 
 const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
-
-interface ChainChoice {
-  chainId: 1 | 8453;
-  defaultRpc: string;
-  label: string;
-}
-
-const CHAIN_CHOICES: ChainChoice[] = [
-  { chainId: 8453, defaultRpc: DEFAULT_RPC_URL, label: 'Base (8453)' },
-  { chainId: 1, defaultRpc: DEFAULT_ETHEREUM_RPC_URL, label: 'Ethereum (1)' },
-];
 
 function checkNodeVersion(): void {
   const v = process.versions.node;
@@ -54,8 +39,8 @@ async function promptPrivateKey(): Promise<string> {
 }
 
 async function promptAndValidateRpc(
-  defaultUrl: string,
-  expectedChainId: number
+  defaultUrl: string = DEFAULT_RPC_URL,
+  expectedChainId: number = DEFAULT_CHAIN_ID
 ): Promise<string> {
   while (true) {
     const response = await prompts({
@@ -90,7 +75,7 @@ async function promptAndValidateRpc(
 export function register(program: Command): void {
   program
     .command('setup')
-    .description('Interactive first-run setup: chain, RPC URL, private key, referrer')
+    .description('Interactive first-run setup: wallet, Base RPC URL')
     .action(async (_localOpts: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       try {
@@ -171,36 +156,17 @@ export function register(program: Command): void {
           privateKey = await promptPrivateKey();
         }
 
-        const initialChainIdx = CHAIN_CHOICES.findIndex(
-          (c) => c.chainId === (existing?.chainId ?? DEFAULT_CHAIN_ID)
-        );
-        const chainResp = await prompts({
-          type: 'select',
-          name: 'value',
-          message: 'Select chain',
-          choices: CHAIN_CHOICES.map((c) => ({ title: c.label, value: c.chainId })),
-          initial: initialChainIdx >= 0 ? initialChainIdx : 0,
-        });
-        const chainId = chainResp.value as 1 | 8453 | undefined;
-        if (!chainId) {
-          throw new Error('Setup aborted');
-        }
-        const chainChoice = CHAIN_CHOICES.find((c) => c.chainId === chainId);
-        if (!chainChoice) {
-          throw new Error(`Unsupported chain id ${chainId}`);
-        }
-
-        const defaultRpc =
-          (chainId === 1 ? existing?.ethereumRpcUrl : existing?.rpcUrl) ??
-          chainChoice.defaultRpc;
+        // hardcode Base chain for current setup of CLI (since v4 mostly on Base)
+        const chainId = 8453 as const;
+        const defaultRpc = existing?.rpcUrl ?? DEFAULT_RPC_URL;
         const rpcUrl = await promptAndValidateRpc(defaultRpc, chainId);
 
         // Persist. Preserve unrelated fields from any prior config.
         const newCfg: Config = {
           version: 1,
           chainId,
-          rpcUrl: chainId === 8453 ? rpcUrl : (existing?.rpcUrl ?? DEFAULT_RPC_URL),
-          ethereumRpcUrl: chainId === 1 ? rpcUrl : existing?.ethereumRpcUrl,
+          rpcUrl,
+          ethereumRpcUrl: existing?.ethereumRpcUrl,
           privateKey: privateKey ?? existing?.privateKey,
           referrer: existing?.referrer,
           rfqKeysDir: existing?.rfqKeysDir,

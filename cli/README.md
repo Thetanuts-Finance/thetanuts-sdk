@@ -73,7 +73,7 @@ thetanuts book fill --order-index 0 --collateral 1 --dry-run
 
 Precedence (highest first):
 
-1. `--private-key <key>` flag (and `--rpc-url`, `--chain`) on any invocation
+1. `--private-key <key>` flag (and `--rpc-url`) on any invocation
 2. Environment variables: `THETANUTS_PRIVATE_KEY`, `THETANUTS_RPC_URL`, `THETANUTS_CHAIN`
 3. Persisted config at `~/.config/thetanuts/config.json`
 
@@ -103,7 +103,6 @@ Config file shape (`~/.config/thetanuts/config.json`):
   "version": 1,
   "chainId": 8453,
   "rpcUrl": "https://mainnet.base.org",
-  "ethereumRpcUrl": "https://ethereum-rpc.publicnode.com",
   "privateKey": "0x...",
   "referrer": "0x...",
   "rfqKeysDir": "~/.config/thetanuts/rfq-keys"
