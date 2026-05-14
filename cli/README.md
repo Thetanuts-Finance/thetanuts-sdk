@@ -28,8 +28,9 @@ up changes automatically.
 npm install -g @thetanuts-finance/cli
 ```
 
-The package is `@thetanuts-finance/cli`; the binary on PATH is `thetanuts`
-(mirrors `thetanuts-mcp` from `mcp-server/`).
+The package is `@thetanuts-finance/cli`; the binary on PATH is `thetanuts`.
+The MCP server (a daemon, separate concern) ships as `thetanuts-mcp` from
+`mcp-server/`.
 
 Homebrew distribution is not currently planned for v0.1 — `npm install -g` is
 sufficient.
