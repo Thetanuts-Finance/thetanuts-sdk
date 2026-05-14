@@ -1,4 +1,4 @@
-# thetanuts-cli
+# thetanuts
 
 TypeScript CLI for Thetanuts Finance V4. Browse the orderbook, query market pricing, fill orders, manage option positions — from a terminal or as a JSON API for scripts and agents.
 
@@ -14,8 +14,8 @@ cd thetanuts-sdk
 npm install && npm run build       # build the parent SDK once
 cd cli
 npm install && npm run build       # build the CLI
-npm link                           # exposes `thetanuts-cli` on PATH
-thetanuts-cli --help
+npm link                           # exposes `thetanuts` on PATH
+thetanuts --help
 ```
 
 `npm link` symlinks the freshly-built `dist/index.js` into your npm global bin
@@ -28,7 +28,7 @@ up changes automatically.
 npm install -g @thetanuts-finance/cli
 ```
 
-The package is `@thetanuts-finance/cli`; the binary on PATH is `thetanuts-cli`
+The package is `@thetanuts-finance/cli`; the binary on PATH is `thetanuts`
 (mirrors `thetanuts-mcp` from `mcp-server/`).
 
 Homebrew distribution is not currently planned for v0.1 — `npm install -g` is
@@ -38,25 +38,25 @@ sufficient.
 
 ```sh
 # No wallet needed — query live data immediately
-thetanuts-cli market data
-thetanuts-cli chain tokens
-thetanuts-cli book orders --underlying ETH --type PUT
-thetanuts-cli pricing all --underlying ETH
+thetanuts market data
+thetanuts chain tokens
+thetanuts book orders --underlying ETH --type PUT
+thetanuts pricing all --underlying ETH
 
 # Pure helpers, no network
-thetanuts-cli util payout --type call --strikes 2000 --price 2150 --contracts 1
+thetanuts util payout --type call --strikes 2000 --price 2150 --contracts 1
 
 # JSON output for scripts
-thetanuts-cli -o json market data | jq '.prices.ETH'
+thetanuts -o json market data | jq '.prices.ETH'
 ```
 
 To trade, run setup:
 
 ```sh
-thetanuts-cli setup
+thetanuts setup
 # Then approvals + a tiny dry-run before any real fill
-thetanuts-cli wallet approve --token USDC --for optionBook --amount 100 --dry-run
-thetanuts-cli book fill --order-index 0 --collateral 1 --dry-run
+thetanuts wallet approve --token USDC --for optionBook --amount 100 --dry-run
+thetanuts book fill --order-index 0 --collateral 1 --dry-run
 ```
 
 ## Configuration
@@ -70,13 +70,13 @@ Precedence (highest first):
 The fastest way to get configured is the interactive wizard:
 
 ```sh
-thetanuts-cli setup
+thetanuts setup
 ```
 
 Or import a key without running the full wizard:
 
 ```sh
-thetanuts-cli wallet import       # masked-input prompt
+thetanuts wallet import       # masked-input prompt
 ```
 
 Config file shape (`~/.config/thetanuts/config.json`):
@@ -137,7 +137,7 @@ Every command accepts `-o <fmt>`:
 Same command, two formats:
 
 ```sh
-$ thetanuts-cli market data
+$ thetanuts market data
 ┌────────┬──────────┐
 │ key    │ value    │
 ├────────┼──────────┤
@@ -146,7 +146,7 @@ $ thetanuts-cli market data
 │ ...    │ ...      │
 └────────┴──────────┘
 
-$ thetanuts-cli -o json market data
+$ thetanuts -o json market data
 {
   "prices": { "ETH": "2150.42", "BTC": "64210", ... },
   "currentTime": 1747200000,
@@ -157,8 +157,8 @@ $ thetanuts-cli -o json market data
 Piping works cleanly. EPIPE on stdout is handled, so:
 
 ```sh
-thetanuts-cli pricing all -o json | head -5
-thetanuts-cli -o json market orders --underlying ETH | jq '.[].pricePerContract'
+thetanuts pricing all -o json | head -5
+thetanuts -o json market orders --underlying ETH | jq '.[].pricePerContract'
 ```
 
 both exit silently with status 0.
@@ -179,8 +179,8 @@ errors on stderr instead. Either way, exit code is non-zero.
 
 ## Commands
 
-Run `thetanuts-cli <group> --help` for a group's subcommands, or
-`thetanuts-cli <group> <subcommand> --help` for flags on a specific subcommand.
+Run `thetanuts <group> --help` for a group's subcommands, or
+`thetanuts <group> <subcommand> --help` for flags on a specific subcommand.
 
 ### `setup` — first-run wizard
 
@@ -188,39 +188,39 @@ Interactive: pick chain, RPC URL, import a private key, set the referrer
 address. Writes to `~/.config/thetanuts/config.json` with `chmod 600`.
 
 ```sh
-thetanuts-cli setup
+thetanuts setup
 ```
 
 ### `config` — inspect and edit persisted config
 
 ```sh
-thetanuts-cli config show                         # private key masked
-thetanuts-cli config path
-thetanuts-cli config set chainId 8453
-thetanuts-cli config unset referrer
-thetanuts-cli config validate                     # checks RPC + key still work
+thetanuts config show                         # private key masked
+thetanuts config path
+thetanuts config set chainId 8453
+thetanuts config unset referrer
+thetanuts config validate                     # checks RPC + key still work
 ```
 
 ### `chain` — chain metadata
 
 ```sh
-thetanuts-cli chain info                          # chainId, RPC, contracts
-thetanuts-cli chain tokens                        # 8 supported tokens
-thetanuts-cli chain contracts                     # contract addresses
-thetanuts-cli chain implementations               # CALL, PUT, SPREAD, FLY, CONDOR, etc.
-thetanuts-cli chain feeds                         # 8 Chainlink price feeds
+thetanuts chain info                          # chainId, RPC, contracts
+thetanuts chain tokens                        # 8 supported tokens
+thetanuts chain contracts                     # contract addresses
+thetanuts chain implementations               # CALL, PUT, SPREAD, FLY, CONDOR, etc.
+thetanuts chain feeds                         # 8 Chainlink price feeds
 ```
 
 ### `wallet` — balances, approvals, transfers
 
 ```sh
-thetanuts-cli wallet show
-thetanuts-cli wallet balance
-thetanuts-cli wallet balance --token USDC
-thetanuts-cli wallet allowance --token USDC --spender 0x...
-thetanuts-cli wallet import
-thetanuts-cli wallet approve --token USDC --for optionBook --amount 100
-thetanuts-cli wallet transfer --token USDC --to 0x... --amount 10 --dry-run
+thetanuts wallet show
+thetanuts wallet balance
+thetanuts wallet balance --token USDC
+thetanuts wallet allowance --token USDC --spender 0x...
+thetanuts wallet import
+thetanuts wallet approve --token USDC --for optionBook --amount 100
+thetanuts wallet transfer --token USDC --to 0x... --amount 10 --dry-run
 ```
 
 Flags for `wallet approve`:
@@ -237,15 +237,15 @@ Flags for `wallet approve`:
 ### `market` — live market reads
 
 ```sh
-thetanuts-cli market data
-thetanuts-cli market prices
-thetanuts-cli market orders --underlying ETH --type PUT
-thetanuts-cli market stats
-thetanuts-cli market daily-stats --from 1746800000
-thetanuts-cli market positions --address 0x...
-thetanuts-cli market history --address 0x...
-thetanuts-cli market option --address 0x...
-thetanuts-cli market referrer-stats --address 0x...
+thetanuts market data
+thetanuts market prices
+thetanuts market orders --underlying ETH --type PUT
+thetanuts market stats
+thetanuts market daily-stats --from 1746800000
+thetanuts market positions --address 0x...
+thetanuts market history --address 0x...
+thetanuts market option --address 0x...
+thetanuts market referrer-stats --address 0x...
 ```
 
 Flags for `market orders`:
@@ -259,36 +259,36 @@ Flags for `market orders`:
 ### `pricing` — market-maker quotes and ticker math
 
 ```sh
-thetanuts-cli pricing all --underlying ETH
-thetanuts-cli pricing ticker --ticker ETH-16FEB26-1800-P
-thetanuts-cli pricing array --underlying ETH
-thetanuts-cli pricing spread --underlying ETH --strikes 1800,2000 --expiry 1771228800 --type put
-thetanuts-cli pricing butterfly --underlying ETH --strikes 1700,1800,1900 --expiry 1771228800 --type call
-thetanuts-cli pricing parse-ticker ETH-16FEB26-1800-P
-thetanuts-cli pricing build-ticker --underlying ETH --expiry 1771228800 --strike 1800 --type put
+thetanuts pricing all --underlying ETH
+thetanuts pricing ticker --ticker ETH-16FEB26-1800-P
+thetanuts pricing array --underlying ETH
+thetanuts pricing spread --underlying ETH --strikes 1800,2000 --expiry 1771228800 --type put
+thetanuts pricing butterfly --underlying ETH --strikes 1700,1800,1900 --expiry 1771228800 --type call
+thetanuts pricing parse-ticker ETH-16FEB26-1800-P
+thetanuts pricing build-ticker --underlying ETH --expiry 1771228800 --strike 1800 --type put
 ```
 
 ### `util` — pure conversions, payout math, validators
 
 ```sh
-thetanuts-cli util to-price --value 2000               # → 200000000000  (8 dp)
-thetanuts-cli util to-usdc --value 100                 # → 100000000     (6 dp)
-thetanuts-cli util from-usdc --value 100000000         # → 100
-thetanuts-cli util payout --type call --strikes 2000 --price 2150 --contracts 1
-thetanuts-cli util validate-address 0x4200000000000000000000000000000000000006
-thetanuts-cli util validate-expiry 1771228800
+thetanuts util to-price --value 2000               # → 200000000000  (8 dp)
+thetanuts util to-usdc --value 100                 # → 100000000     (6 dp)
+thetanuts util from-usdc --value 100000000         # → 100
+thetanuts util payout --type call --strikes 2000 --price 2150 --contracts 1
+thetanuts util validate-address 0x4200000000000000000000000000000000000006
+thetanuts util validate-expiry 1771228800
 ```
 
 ### `book` — OptionBook orderflow
 
 ```sh
-thetanuts-cli book orders --underlying ETH
-thetanuts-cli book preview --order-index 0 --collateral 1
-thetanuts-cli book max-contracts --order-index 0
-thetanuts-cli book fill --order-index 0 --collateral 1 --dry-run
-thetanuts-cli book cancel --order-index 0 --dry-run
-thetanuts-cli book claim --token USDC
-thetanuts-cli book static-fill --order-index 0 --num-contracts 1
+thetanuts book orders --underlying ETH
+thetanuts book preview --order-index 0 --collateral 1
+thetanuts book max-contracts --order-index 0
+thetanuts book fill --order-index 0 --collateral 1 --dry-run
+thetanuts book cancel --order-index 0 --dry-run
+thetanuts book claim --token USDC
+thetanuts book static-fill --order-index 0 --num-contracts 1
 ```
 
 Flags for `book fill`:
@@ -309,15 +309,15 @@ transactions without first granting an allowance on-chain.
 ### `position` — owned option management
 
 ```sh
-thetanuts-cli position list
-thetanuts-cli position info --address 0x...
-thetanuts-cli position full --address 0x...
-thetanuts-cli position payout-at --address 0x... --price 2100
-thetanuts-cli position simulate-payout --address 0x...
-thetanuts-cli position close --address 0x... --dry-run
-thetanuts-cli position split --address 0x... --collateral 1 --dry-run
-thetanuts-cli position transfer --address 0x... --to 0x... --dry-run
-thetanuts-cli position calc-payout --type call --strikes 2000 --price 2150 --contracts 1
+thetanuts position list
+thetanuts position info --address 0x...
+thetanuts position full --address 0x...
+thetanuts position payout-at --address 0x... --price 2100
+thetanuts position simulate-payout --address 0x...
+thetanuts position close --address 0x... --dry-run
+thetanuts position split --address 0x... --collateral 1 --dry-run
+thetanuts position transfer --address 0x... --to 0x... --dry-run
+thetanuts position calc-payout --type call --strikes 2000 --price 2150 --contracts 1
 ```
 
 Flags for `position info`:
@@ -331,44 +331,44 @@ Flags for `position info`:
 ### 1. Browse and research before trading
 
 ```sh
-thetanuts-cli market data
-thetanuts-cli book orders --underlying ETH --type PUT
-thetanuts-cli pricing all --underlying ETH
-thetanuts-cli book preview --order-index 0 --collateral 1
+thetanuts market data
+thetanuts book orders --underlying ETH --type PUT
+thetanuts pricing all --underlying ETH
+thetanuts book preview --order-index 0 --collateral 1
 ```
 
 ### 2. First-time wallet setup and approvals
 
 ```sh
-thetanuts-cli setup
-thetanuts-cli wallet show
-thetanuts-cli wallet balance
-thetanuts-cli wallet approve --token USDC --for optionBook --amount 100
+thetanuts setup
+thetanuts wallet show
+thetanuts wallet balance
+thetanuts wallet approve --token USDC --for optionBook --amount 100
 ```
 
 ### 3. Fill an order with dry-run preview, then real fill
 
 ```sh
-thetanuts-cli book fill --order-index 0 --collateral 1 --dry-run
+thetanuts book fill --order-index 0 --collateral 1 --dry-run
 # Inspect the { approve, fill } calldata. When happy:
-thetanuts-cli book fill --order-index 0 --collateral 1
+thetanuts book fill --order-index 0 --collateral 1
 ```
 
 ### 4. Inspect a position you own
 
 ```sh
-thetanuts-cli position list
-thetanuts-cli position info --address 0xYourOption...
-thetanuts-cli position simulate-payout --address 0xYourOption...
+thetanuts position list
+thetanuts position info --address 0xYourOption...
+thetanuts position simulate-payout --address 0xYourOption...
 ```
 
 ### 5. Pipe JSON output to scripts
 
 ```sh
-thetanuts-cli -o json market orders --underlying ETH \
+thetanuts -o json market orders --underlying ETH \
   | jq '.[].pricePerContract'
 
-thetanuts-cli -o json pricing all --underlying ETH \
+thetanuts -o json pricing all --underlying ETH \
   | jq 'to_entries | map({ticker: .key, ask: .value.rawAskPrice})'
 ```
 
@@ -388,7 +388,7 @@ thetanuts-cli -o json pricing all --underlying ETH \
 
 ## Architecture
 
-The CLI is a thin wrapper over `@thetanuts-finance/thetanuts-client`. Each
+The CLI is a thin wrapper over `@thetanuts-finance/thetanutsent`. Each
 command group lives in one file under `cli/src/commands/`; a registry wires
 them into the Commander root.
 

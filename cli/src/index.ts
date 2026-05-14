@@ -21,7 +21,7 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
 
 const program = new Command();
 program
-  .name('thetanuts-cli')
+  .name('thetanuts')
   .description('Thetanuts Finance V4 command-line interface')
   .version(pkg.version);
 
