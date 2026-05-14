@@ -168,12 +168,21 @@ export function register(program: Command): void {
 
   grp
     .command('balance')
-    .description('Show balance for a token or all configured tokens')
+    .description(
+      'Show balance for a token or all configured tokens. ' +
+        'By default, tokens whose balanceOf call fails (known SDK config quirks: aBasUSDC, cbDOGE, cbXRP) ' +
+        'are silently skipped — pass --all to inspect them.'
+    )
     .option('--token <symbol>', 'token symbol or address')
     .option('--address <addr>', 'owner address (defaults to signer)')
+    .option(
+      '--all',
+      'include tokens whose balanceOf call fails (truncated error in cell). Useful for SDK debugging.',
+      false
+    )
     .action(async (_localOpts: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token?: string; address?: string }>();
+      const local = cmd.opts<{ token?: string; address?: string; all?: boolean }>();
       try {
         const result = getClient(opts);
         const { client } = result;
@@ -203,7 +212,11 @@ export function register(program: Command): void {
           return;
         }
 
+        // Multi-token path. Default: hide tokens whose balanceOf fails — they
+        // tend to be SDK-config stragglers (stale Aave addresses, EIP-55
+        // checksum mismatches on cbDOGE/cbXRP)
         const rows: Array<Record<string, unknown>> = [];
+        const skipped: string[] = [];
         for (const [symbol, t] of Object.entries(client.chainConfig.tokens)) {
           try {
             const balance = await client.erc20.getBalance(t.address, owner);
@@ -214,13 +227,25 @@ export function register(program: Command): void {
               raw: balance.toString(),
             });
           } catch (err) {
-            rows.push({
-              symbol,
-              address: t.address,
-              balance: 'error',
-              raw: (err as Error).message ?? String(err),
-            });
+            if (local.all) {
+              const msg = (err as Error).message ?? String(err);
+              rows.push({
+                symbol,
+                address: t.address,
+                balance: 'error',
+                raw: msg.length > 80 ? `${msg.slice(0, 77)}...` : msg,
+              });
+            } else {
+              skipped.push(symbol);
+            }
           }
+        }
+        if (!local.all && skipped.length > 0) {
+          // Stderr note so JSON pipelines stay clean
+          process.stderr.write(
+            `Skipped ${skipped.length} token(s) with known SDK config issues: ${skipped.join(', ')}. ` +
+              'Use --all to inspect.\n'
+          );
         }
         render(rows, { output: opts.output, noColor: !opts.color });
       } catch (err) {
