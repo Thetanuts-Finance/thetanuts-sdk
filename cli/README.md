@@ -2,7 +2,7 @@
 
 TypeScript CLI for Thetanuts Finance V4 on Base (chainId 8453). Browse the orderbook, query market pricing, fill orders, manage option positions — from a terminal or as a JSON API for scripts and agents.
 
-> **v0.1 — early release.** The trading surface (`book fill`, `position payout`) is wired and dry-run verified, but always test with `--dry-run` and tiny amounts before sending real transactions. Start with a dedicated wallet, not your main funds wallet.
+> **v0.1 — early release.** The trading surface (`book fill`, `position payout`, `rfq request/cancel/accept/settle`) is wired and dry-run verified, but always test with `--dry-run` and tiny amounts before sending real transactions. Start with a dedicated wallet, not your main funds wallet.
 
 ## Install
 
@@ -100,7 +100,8 @@ Config file shape (`~/.config/thetanuts/config.json`):
   "version": 1,
   "chainId": 8453,
   "rpcUrl": "https://mainnet.base.org",
-  "privateKey": "0x..."
+  "privateKey": "0x...",
+  "rfqKeysDir": "~/.config/thetanuts/rfq-keys"
 }
 ```
 
@@ -125,10 +126,19 @@ Read-only (no wallet required):
   either `--address` or a signer)
 - `wallet create`, `wallet import`, `wallet show` — wallet setup (generate
   or import keys; these are how you get a wallet in the first place)
+- `keys` — RFQ keypair management subcommands (generate, show, export,
+  import, remove). Independent of the signing wallet.
+- `rfq build`, `rfq get` — builders and read views.
+
+Keystore required (no signing wallet needed):
+
+- `rfq offers` — lists OfferMade events for an RFQ and decrypts those
+  addressed to the keystore. Needs an RFQ key from `keys generate`.
 
 Wallet required only when no `--address` is passed:
 
 - `position list` — when no `--address` given, defaults to the signer's positions
+- `rfq status` — same: signer is the default address to query the indexer for
 
 Wallet required:
 
@@ -136,6 +146,10 @@ Wallet required:
 - `wallet approve`
 - `book fill`
 - `position payout`
+- `rfq request`, `rfq cancel`
+- `rfq accept` (optional — see RFQ section; the protocol auto-settles if
+  you do nothing)
+- `rfq settle` (post-reveal finalize)
 
 ## Output Formats
 
@@ -185,11 +199,12 @@ errors on stderr instead. Either way, exit code is non-zero.
 | Code | Meaning                                                              |
 | ---- | -------------------------------------------------------------------- |
 | `0`  | Success                                                              |
-| `1`  | Generic error (network, RPC, contract revert)                        |
+| `1`  | Generic error (network, RPC, contract revert) — also `keys show` when no RFQ key is stored |
 | `2`  | Usage error (bad flags, missing required arg)                        |
 | `3`  | Confirmation refused / dry-run aborted                               |
 | `4`  | Config / wallet / keyfile error (missing key, bad key file)          |
 | `5`  | Chain unsupported (reserved — no current command reaches this)       |
+| `6`  | RFQ crypto error (stored key corrupted, decrypt key mismatch, `keys export` with no key, `keys show` with corrupt stored key) |
 
 ## Commands
 
@@ -302,7 +317,7 @@ thetanuts book fill --order-index 0 --collateral 1 --dry-run
 analyzer. It returns matching orderbook orders + best price + available
 size + partial-fill availability + nearby strikes within 5% + a
 recommendation (`orderbook` vs `rfq`) with reason. Useful before a
-`book fill` or (once the `rfq` group lands) an `rfq request`.
+`book fill` or an `rfq request`.
 
 Flags for `book fill`:
 
@@ -335,9 +350,164 @@ Flags for `position info`:
 | ------------------- | ---------------------------------------------------------------- |
 | `--address <addr>`  | Option contract address.                                         |
 
-Groups still entirely unimplemented: `keys`, `rfq`, `loan`, `ranger`,
-`events`, `watch`, `wheel`, `vault`. The keys + rfq groups land in a
-follow-up commit; the others are deferred per design.
+### `keys` — ECDH keypair management for sealed-bid RFQ
+
+The RFQ workflow uses a sealed-bid auction. Makers encrypt offer amounts
+to the requester's compressed public key (ECDH + AES-256-GCM); only the
+requester's matching private key can decrypt them. The `keys` group
+manages that keypair — one keypair per chain, persisted under
+`<config-dir>/rfq-keys/` with `chmod 700` on the directory and `chmod
+600` on the key file.
+
+```sh
+thetanuts keys generate                        # generate + persist (or load existing)
+thetanuts keys show                            # public key + storage path (NEVER the private key)
+thetanuts keys export --out ~/rfq-key-backup.key
+thetanuts keys import --in ~/rfq-key-backup.key
+thetanuts keys remove --force                  # destroy the key (strands every prior RFQ — back up first!)
+```
+
+| Subcommand        | Exit codes                                                        |
+| ----------------- | ----------------------------------------------------------------- |
+| `keys generate`   | 0 success / 1 internal error                                      |
+| `keys show`       | 0 found / 1 no key / 6 stored key is corrupted                    |
+| `keys export`     | 0 success / 3 refused / 6 no key stored / 1 fs error              |
+| `keys import`     | 0 success / 3 overwrite refused / 4 bad file or invalid key       |
+| `keys remove`     | 0 success / 3 refused (no `--force`, no `--yes`)                  |
+
+Storage layout (one file per chain; the CLI is Base-only, chainId 8453):
+
+```
+~/.config/thetanuts/rfq-keys/                  ← directory, mode 0o700
+└── thetanuts_rfq_key_8453.key                 ← Base, mode 0o600
+```
+
+Override the directory by adding `"rfqKeysDir": "/path/to/keys"` to your
+config.json, or by passing `--config /other/path.json` (the keystore
+follows the config file's parent directory).
+
+**Loss consequences.** If you delete the keystore for a chain, every
+encrypted offer that was ever sent to your public key for that chain
+becomes undecryptable — they cannot be recovered. Always run
+`keys export --out <backup-path>` before doing anything destructive,
+and treat the resulting file like the wallet itself.
+
+`keys export` and `keys import` refuse `--out -` / `--in -` on purpose:
+private-key material must never land in stdin/stdout where shell
+scrollback, pipe targets, or log capture could persist it.
+
+### `rfq` — Request-for-Quotation lifecycle (requester side)
+
+Full requester lifecycle in 8 subcommands: build → request → see offers →
+accept (optional) → settle → check status. The maker side (encrypt + sign +
+submit an offer) is intentionally out of scope — real makers run dedicated
+MM bots, and OpenClaw is also requester-only.
+
+```sh
+# Build an RFQRequest off-chain from human inputs (no RPC).
+# Multi-leg structures auto-detected from --strikes count.
+thetanuts rfq build --underlying ETH --type PUT --strike 1900 \
+  --expiry 1800000000 --contracts 1 --direction buy
+thetanuts rfq build --underlying ETH --type PUT --strikes 1900,1800        # PUT_SPREAD
+thetanuts rfq build --underlying ETH --type CALL --strikes 2000,2050,2100  # CALL_FLY
+thetanuts rfq build --underlying ETH --type PUT --strikes 1800,1900,2100,2200 \
+  --structure iron-condor                                                  # IRON_CONDOR
+
+# Save a build artifact for later reuse
+thetanuts rfq build --underlying ETH --type PUT --strike 1900 \
+  --expiry 1800000000 --contracts 1 --direction buy --out /tmp/build.json
+
+# Inspect a quotation by ID
+thetanuts rfq get --id 42
+
+# Submit an RFQ. Auto-stamps requesterPublicKey from the RFQ keystore
+# (creates one if missing). Always dry-run first.
+thetanuts rfq request --underlying ETH --type PUT --strike 1900 \
+  --expiry 1800000000 --contracts 1 --direction buy --dry-run
+thetanuts rfq request --underlying ETH --type PUT --strike 1900 \
+  --expiry 1800000000 --contracts 1 --direction buy
+thetanuts rfq request --from-build-file /tmp/build.json --dry-run
+
+# For SHORT (--direction sell) requests, optionally ensure collateral
+# allowance to the OptionFactory at request time:
+thetanuts rfq request --underlying ETH --type PUT --strike 1900 \
+  --expiry 1800000000 --contracts 1 --direction sell \
+  --ensure-allowance --approve-amount max
+
+# Cancel an RFQ you created (only the original requester can cancel)
+thetanuts rfq cancel --id 42 --dry-run
+thetanuts rfq cancel --id 42
+```
+
+**Number alignment guarantees (matches OpenClaw `build-rfq.ts` verbatim):**
+
+| Constant                                | Value                              |
+| --------------------------------------- | ---------------------------------- |
+| Default offer deadline                  | 0.75 minutes (45 seconds)          |
+| Single-strike CALL default collateral   | WETH (INVERSE_CALL)                |
+| All other structures default collateral | USDC                               |
+| PUT spread/fly strike ordering          | DESCENDING (high → low)            |
+| CALL spread/fly strike ordering         | ASCENDING (low → high)             |
+| Condor / iron condor strike ordering    | ASCENDING (always)                 |
+| Placeholder requester when no signer    | `0x0000…0001`                      |
+
+The CLI runs `validateStrikeOrdering` locally before the SDK builder, so
+ordering violations exit cleanly with code 4 and an OpenClaw-style error
+message — no RPC round-trip required.
+
+**Offer flow:**
+
+```sh
+# List every OfferMade event for an RFQ, with decrypted amounts where
+# your keystore can open them. Marks undecryptable rows so you can spot
+# key-mismatch / cross-chain bleed-through.
+thetanuts rfq offers --id 42
+
+# Accept a specific offer (OPTIONAL — see disclaimer below). By default,
+# walks OfferMade events and decrypts the matching one to recover
+# (offerAmount, nonce). Or pass them explicitly to skip decryption.
+thetanuts rfq accept --id 42 --offeror 0xMakerAddress --dry-run
+thetanuts rfq accept --id 42 --offeror 0xMakerAddress
+thetanuts rfq accept --id 42 --offeror 0xMakerAddress \
+  --offer-amount 420000 --nonce 1234567890
+```
+
+> **Disclaimer — `rfq accept` is optional.** If you do nothing, the
+> protocol settles automatically once the offer window closes (anyone
+> can then call `rfq settle` to finalize, and the contract picks the
+> winner from on-chain reveals). Use `rfq accept` only when you want
+> to lock in a *specific* maker's offer early via
+> `settleQuotationEarly`. The auto-settle path is fine for most users.
+
+Errors that don't fit exit-code-1:
+- Exit 4 — no `OfferMade` event matches the `--offeror`
+- Exit 6 — the matching offer can't be decrypted (key mismatch, wrong chain,
+  or you never were the requester for this RFQ)
+
+**Settle + status:**
+
+```sh
+# Anyone can settle after the reveal window closes
+thetanuts rfq settle --id 42 --dry-run
+thetanuts rfq settle --id 42
+
+# Detect whether an RFQ was filled by walking the indexer for a matching
+# position ticker (port of OpenClaw scripts/check-rfq-fill.ts).
+# Exit code 1 if no matching position found.
+thetanuts rfq status --ticker ETH-29MAR26-1900-P --since 1779000000
+thetanuts rfq status --ticker ETH-29MAR26-1900/1800-P --since 1779000000 \
+  --address 0xRequesterAddress
+```
+
+The CLI's requester-side `rfq` surface is complete end-to-end: request →
+listen for offers → (optionally accept) → settle → check status. The maker
+side (encrypt + sign + submit an offer, then reveal post-deadline) is
+intentionally NOT in the CLI — real RFQ makers run dedicated MM bots with
+their own signing infrastructure, which is also why OpenClaw is
+requester-only.
+
+Groups still entirely unimplemented: `loan`, `ranger`, `events`, `watch`,
+`wheel`, `vault`. The last three are deferred per design.
 
 ## Common Workflows
 
@@ -418,21 +588,31 @@ cli/src/
 ├── output.ts                   table / json / csv / yaml renderers; BigInt-safe
 ├── confirm.ts                  Preview + confirm() + dry-run plumbing (dry-run > yes)
 ├── options.ts                  Shared Commander option declarations
+├── rfqKeyStorage.ts            Filesystem-backed RFQ keystore (0o700/0o600, atomic writes)
 └── commands/
     ├── registry.ts             Wires every group's register(program)
     ├── setup.ts                Interactive first-run wizard (create | import | skip)
     ├── config.ts               Inspect/edit persisted config
     ├── chain.ts                Chain metadata
-    ├── wallet.ts               Create/import wallets, balances, approvals
+    ├── wallet.ts               Create/import wallets, balances, allowances, transfers
     ├── market.ts               Live market reads
-    ├── pricing.ts              MM pricing for vanilla and multi-leg options
+    ├── pricing.ts              MM pricing + ticker math
     ├── book.ts                 OptionBook orderflow + pre-trade liquidity check
-    └── position.ts             Owned option management
+    ├── position.ts             Owned option management
+    ├── keys.ts                 RFQ ECDH keypair management (generate, ensure, export, import, etc.)
+    └── rfq.ts                  Requester-side RFQ: builders, encoders, reads, request/cancel/accept/settle/status. Maker side is out of scope (MM bots only).
 ```
 
-Roadmap: `keys` and `rfq` groups land in a follow-up commit. Beyond that:
-`loan`, `ranger`, `events`, `watch`, `wheel`, `vault` remain
-unimplemented (the last three are deferred per design).
+Roadmap: groups still entirely unimplemented are `loan`, `ranger`,
+`events`, `watch`, `wheel`, `vault` (the last three are deferred per
+user direction). Some SDK methods worth surfacing in a future commit:
+`optionFactory.withdrawFees` (lets referral owners claim accrued fees),
+`api.getUserRfqs` / `getRfq` / `getUserOffersFromRfq` (state-API
+listings for RFQ tracking), and `optionFactory.getOfferSignature` (read
+an offer's on-chain signature). See `cli/rfq_design.md` and
+`todo_cli.md` §5 / §13 for the full pending-work map.
+
+For the full spec, see `cli/PRD.md` (working doc, gitignored).
 
 ## License
 

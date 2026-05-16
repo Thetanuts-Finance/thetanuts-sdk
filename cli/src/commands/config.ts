@@ -39,12 +39,14 @@ async function readStdin(): Promise<string> {
 type AllowedKey =
   | 'chainId'
   | 'rpcUrl'
-  | 'privateKey';
+  | 'privateKey'
+  | 'rfqKeysDir';
 
 const ALLOWED_KEYS: ReadonlyArray<AllowedKey> = [
   'chainId',
   'rpcUrl',
   'privateKey',
+  'rfqKeysDir',
 ];
 
 const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
@@ -81,7 +83,7 @@ function parseValue(key: AllowedKey, value: string): Config[AllowedKey] {
     }
     return value;
   }
-  // rpcUrl — plain string.
+  // rpcUrl, rfqKeysDir — plain strings
   return value;
 }
 
@@ -107,6 +109,7 @@ export function register(program: Command): void {
           chainId: cfg.chainId,
           rpcUrl: cfg.rpcUrl,
           privateKey: maskPrivateKey(cfg.privateKey),
+          rfqKeysDir: cfg.rfqKeysDir ?? '<not set>',
           path,
         };
         render(masked, { output: opts.output, noColor: !opts.color });
@@ -133,7 +136,7 @@ export function register(program: Command): void {
   grp
     .command('set <key> <value>')
     .description(
-      'Set one config field (chainId, rpcUrl, privateKey). ' +
+      'Set one config field (chainId, rpcUrl, privateKey, rfqKeysDir). ' +
         'For privateKey, only `-` (read from stdin) is accepted — argv would leak the key via shell history.'
     )
     .action(async (key: string, value: string, _localOpts: unknown, cmd: Command) => {

@@ -14,6 +14,7 @@ export interface Config {
   chainId: number;
   rpcUrl: string;
   privateKey?: string;
+  rfqKeysDir?: string;
 }
 
 export function defaultConfigPath(): string {

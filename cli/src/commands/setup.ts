@@ -167,6 +167,7 @@ export function register(program: Command): void {
           chainId,
           rpcUrl,
           privateKey: privateKey ?? existing?.privateKey,
+          rfqKeysDir: existing?.rfqKeysDir,
         };
         saveConfig(newCfg, cfgPath);
         process.stdout.write(`Saved to ${cfgPath}\n`);
