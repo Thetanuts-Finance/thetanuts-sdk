@@ -71,15 +71,22 @@ function computeCollateralAmount(
   client: GetClientResult['client'],
   flags: { collateral?: string; numContracts?: string }
 ): bigint | undefined {
-  if (flags.collateral !== undefined && flags.collateral !== '') {
-    const decimals = collateralDecimalsFromOrder(order, client);
-    return client.utils.toBigInt(flags.collateral, decimals);
+  const hasCollateral = flags.collateral !== undefined && flags.collateral !== '';
+  const hasNumContracts = flags.numContracts !== undefined && flags.numContracts !== '';
+  if (hasCollateral && hasNumContracts) {
+    throw new Error(
+      '--collateral and --num-contracts are mutually exclusive. Pass exactly one'
+    );
   }
-  if (flags.numContracts !== undefined && flags.numContracts !== '') {
-    // numContracts is denominated in collateral decimals (per SDK convention),
-    // pricePerContract is 8-decimal. premium = numContracts * price / 1e8.
+  if (hasCollateral) {
     const decimals = collateralDecimalsFromOrder(order, client);
-    const numContractsRaw = client.utils.toBigInt(flags.numContracts, decimals);
+    return client.utils.toBigInt(flags.collateral!, decimals);
+  }
+  if (hasNumContracts) {
+    // numContracts is denominated in collateral decimals,
+    // pricePerContract is 8-decimal. premium = numContracts * price / 1e8
+    const decimals = collateralDecimalsFromOrder(order, client);
+    const numContractsRaw = client.utils.toBigInt(flags.numContracts!, decimals);
     return (numContractsRaw * order.order.price) / 100000000n;
   }
   return undefined;
@@ -95,6 +102,26 @@ function collateralDecimalsFromOrder(
     if (cfg.address.toLowerCase() === addr) return cfg.decimals;
   }
   return 6;
+}
+
+/**
+ * Currently only USDC-collateralized fills are supported
+ * TODO: WETH and cbBTC fill support will roll out in a future release
+ * 
+ */
+function assertUsdcCollateral(
+  order: OrderWithSignature,
+  client: GetClientResult['client']
+): void {
+  const orderCollateral = order.rawApiData?.collateral?.toLowerCase();
+  const usdc = client.chainConfig.tokens.USDC!;
+  if (orderCollateral !== usdc.address.toLowerCase()) {
+    throw new Error(
+      `Only USDC-collateralized fills are supported in this version ` +
+        `This order uses ${order.rawApiData?.collateral ?? '<unknown>'} as collateral. ` +
+        `WETH and cbBTC fill support will roll out in a future release.`
+    );
+  }
 }
 
 function summarizeOrder(
@@ -253,8 +280,10 @@ function registerCheck(grp: Command): void {
         const extractOrderData = (o: OrderWithSignature, index: number): MatchingOrder | null => {
           const raw = o.rawApiData as Record<string, unknown> | undefined;
           const isCall = (raw?.isCall as boolean | undefined) ?? true;
-          const strikePrice = o.order?.strikePrice;
-          const strike = strikePrice ? Number(strikePrice) / 1e8 : 0;
+          // Use strikes[0] (SDK deprecated `strikePrice` for multi-leg correctness)
+          const rawStrikes = (raw?.strikes as unknown[] | undefined) ?? [];
+          const firstStrike = rawStrikes[0];
+          const strike = firstStrike ? Number(firstStrike) / 1e8 : 0;
           const expiry = o.order?.expiry ? Number(o.order.expiry) : 0;
           const price = o.order?.price ? Number(o.order.price) / 1e8 : 0;
           const availableAmount = o.availableAmount ? Number(o.availableAmount) / 1e8 : 0;
@@ -564,6 +593,7 @@ function registerWrites(grp: Command): void {
 
         const orders = await fetchOrdersOnce(client);
         const order = resolveOrderByIndex(orders, local.orderIndex);
+        assertUsdcCollateral(order, client);
         const collateralAmount = computeCollateralAmount(order, client, local);
 
         // 1+2+3: build preview, render it
