@@ -14,6 +14,7 @@ export function addGlobalOptions(program: Command): void {
     .option('-o, --output <fmt>', 'output format (table|json|csv|yaml)', 'table')
     .option('--dry-run', 'simulate without sending transactions', false)
     .option('--yes', 'skip interactive confirmation prompts', false)
+    .option('--chain <name>', 'chain to target (base only — chainId 8453)')
     .option('--rpc-url <url>', 'override the RPC endpoint for the active chain')
     .option(
       '--private-key <key>',
@@ -21,7 +22,6 @@ export function addGlobalOptions(program: Command): void {
         'prefer THETANUTS_PRIVATE_KEY env var, or `thetanuts wallet import` to store in the config.'
     )
     .option('--config <path>', 'path to a config file (default: ~/.config/thetanuts/config.json)')
-    .option('--referrer <addr>', 'referrer address to forward to SDK calls')
     .option('--json-errors', 'emit errors as JSON on stderr', false)
     .option('--color', 'enable ANSI color output', true)
     .option('--no-color', 'disable ANSI color output');

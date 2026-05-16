@@ -39,21 +39,14 @@ async function readStdin(): Promise<string> {
 type AllowedKey =
   | 'chainId'
   | 'rpcUrl'
-  | 'ethereumRpcUrl'
-  | 'privateKey'
-  | 'referrer'
-  | 'rfqKeysDir';
+  | 'privateKey';
 
 const ALLOWED_KEYS: ReadonlyArray<AllowedKey> = [
   'chainId',
   'rpcUrl',
-  'ethereumRpcUrl',
   'privateKey',
-  'referrer',
-  'rfqKeysDir',
 ];
 
-const ADDRESS_REGEX = /^0x[0-9a-fA-F]{40}$/;
 const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
 
 function isAllowedKey(key: string): key is AllowedKey {
@@ -82,19 +75,13 @@ function parseValue(key: AllowedKey, value: string): Config[AllowedKey] {
     }
     return n;
   }
-  if (key === 'referrer') {
-    if (!ADDRESS_REGEX.test(value)) {
-      throw new Error(`referrer must be a 0x-prefixed 40-char hex address`);
-    }
-    return value;
-  }
   if (key === 'privateKey') {
     if (!PRIVATE_KEY_REGEX.test(value)) {
       throw new Error(`privateKey must be a 0x-prefixed 64-char hex string`);
     }
     return value;
   }
-  // rpcUrl, ethereumRpcUrl, rfqKeysDir — plain strings.
+  // rpcUrl — plain string.
   return value;
 }
 
@@ -119,10 +106,7 @@ export function register(program: Command): void {
           version: cfg.version,
           chainId: cfg.chainId,
           rpcUrl: cfg.rpcUrl,
-          ethereumRpcUrl: cfg.ethereumRpcUrl ?? '<not set>',
           privateKey: maskPrivateKey(cfg.privateKey),
-          referrer: cfg.referrer ?? '<not set>',
-          rfqKeysDir: cfg.rfqKeysDir ?? '<not set>',
           path,
         };
         render(masked, { output: opts.output, noColor: !opts.color });
@@ -149,7 +133,7 @@ export function register(program: Command): void {
   grp
     .command('set <key> <value>')
     .description(
-      'Set one config field (chainId, rpcUrl, ethereumRpcUrl, privateKey, referrer, rfqKeysDir). ' +
+      'Set one config field (chainId, rpcUrl, privateKey). ' +
         'For privateKey, only `-` (read from stdin) is accepted — argv would leak the key via shell history.'
     )
     .action(async (key: string, value: string, _localOpts: unknown, cmd: Command) => {
@@ -249,7 +233,7 @@ export function register(program: Command): void {
           process.stderr.write(`Could not parse config at ${path}\n`);
           process.exit(4);
         }
-        const rpcUrl = cfg.chainId === 1 && cfg.ethereumRpcUrl ? cfg.ethereumRpcUrl : cfg.rpcUrl;
+        const rpcUrl = cfg.rpcUrl;
         let chainId: number;
         try {
           const provider = new ethers.JsonRpcProvider(rpcUrl);

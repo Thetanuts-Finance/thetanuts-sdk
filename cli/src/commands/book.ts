@@ -5,7 +5,6 @@ import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner, type GetClientResult } from '../client.js';
 import { render, renderError } from '../output.js';
 import { confirm } from '../confirm.js';
-import { warnMaxApproval } from '../warn.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — kept module-local; do not export
@@ -56,41 +55,7 @@ function resolveOrderByIndex(
       `Order index ${idx} out of range. Live orderbook has ${orders.length} order(s) (valid range: 0..${orders.length - 1}).`
     );
   }
-  const order = orders[idx];
-  if (!order) {
-    throw new Error(`Order at index ${idx} is undefined`);
-  }
-  return order;
-}
-
-/**
- * Resolve a token argument that may be a chain-config symbol (e.g. 'USDC') or
- * a raw 0x address. Throws if it's neither.
- */
-function resolveTokenAddress(
-  client: GetClientResult['client'],
-  tokenArg: string
-): { address: string; symbol: string; decimals: number } {
-  if (!tokenArg) {
-    throw new Error('--token is required');
-  }
-  // Address path
-  if (tokenArg.startsWith('0x') && tokenArg.length === 42) {
-    const lower = tokenArg.toLowerCase();
-    for (const [symbol, cfg] of Object.entries(client.chainConfig.tokens)) {
-      if (cfg.address.toLowerCase() === lower) {
-        return { address: cfg.address, symbol, decimals: cfg.decimals };
-      }
-    }
-    return { address: tokenArg, symbol: tokenArg, decimals: 18 };
-  }
-  // Symbol path
-  const cfg = client.chainConfig.tokens[tokenArg];
-  if (!cfg) {
-    const known = Object.keys(client.chainConfig.tokens).join(', ');
-    throw new Error(`Unknown token symbol "${tokenArg}". Known: ${known}`);
-  }
-  return { address: cfg.address, symbol: tokenArg, decimals: cfg.decimals };
+  return orders[idx]!;
 }
 
 /**
@@ -158,13 +123,11 @@ function summarizeOrder(
 export function register(program: Command): void {
   const grp = program
     .command('book')
-    .description('OptionBook orderflow: list orders, preview, fill, cancel, claim referrer fees');
+    .description('OptionBook orderflow: list orders, preview, fill');
 
   registerReads(grp);
   registerCheck(grp);
   registerWrites(grp);
-  registerFees(grp);
-  registerStatic(grp);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +175,6 @@ interface CheckResult {
   partialSize: number | null;
   nearbyStrikes: NearbyStrike[];
   nextStep: string;
-  timestamp: string;
 }
 
 function formatCheckTicker(underlying: string, expiry: number, strike: number, type: string): string {
@@ -427,11 +389,11 @@ function registerCheck(grp: Command): void {
             .slice(0, 3)
             .map((s) => `$${s.strike} (${s.priceDiff})`)
             .join(', ')}. Use RFQ for your exact strike, or consider nearby strikes.`;
-          nextStep = `Build RFQ (Phase 3, not yet implemented): would request --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --direction ${params.direction}`;
+          nextStep = `thetanuts rfq build --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --contracts <n> --direction ${params.direction}`;
         } else {
           recommendation = 'rfq';
-          reason = `No orderbook liquidity at strike $${params.strike} or nearby. Submitting RFQ - market makers will respond within 6 minutes.`;
-          nextStep = `Build RFQ (Phase 3, not yet implemented): would request --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --direction ${params.direction}`;
+          reason = `No orderbook liquidity at strike $${params.strike} or nearby. Submit an RFQ — market makers respond within 45 seconds (default deadline).`;
+          nextStep = `thetanuts rfq build --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --contracts <n> --direction ${params.direction}`;
         }
 
         const result: CheckResult = {
@@ -445,7 +407,6 @@ function registerCheck(grp: Command): void {
           partialSize,
           nearbyStrikes: nearbyStrikes.slice(0, 5),
           nextStep,
-          timestamp: new Date().toISOString(),
         };
 
         render(result, renderOpts(opts));
@@ -463,7 +424,7 @@ function registerCheck(grp: Command): void {
 function registerReads(grp: Command): void {
   grp
     .command('orders')
-    .description('List open maker orders (alias of `market orders`)')
+    .description('List open maker orders')
     .option('--underlying <asset>', 'filter by underlying (e.g. ETH, BTC)')
     .option('--type <type>', 'filter by option type (CALL|PUT)')
     .option('--min-expiry <ts>', 'filter by minimum expiry timestamp (unix seconds)')
@@ -672,7 +633,7 @@ function registerWrites(grp: Command): void {
               `Approving the OptionBook contract is required to proceed.\n`
           );
           if (approveIsMax) {
-            warnMaxApproval(collateralAddr, spender, {});
+            process.stderr.write('WARNING: approving MaxUint256. The spender will be able to move any amount.\n');
           }
           const approvePromptAmount = approveIsMax
             ? 'unlimited (MaxUint256)'
@@ -710,467 +671,4 @@ function registerWrites(grp: Command): void {
         process.exit(1);
       }
     });
-
-  grp
-    .command('swap-and-fill')
-    .description('Swap a source token into the order collateral and fill in one tx — swap path: requires aggregator support')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
-    .requiredOption('--src-token <addr-or-sym>', 'source token (symbol or address)')
-    .requiredOption('--src-amount <n>', 'human-readable amount of source token to swap')
-    .option('--num-contracts <n>', 'human-readable number of contracts to fill (informational)')
-    .option('--swap-router <addr>', 'swap router contract address (required)')
-    .option('--swap-data <hex>', 'encoded aggregator calldata (required)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{
-        orderIndex: string;
-        srcToken: string;
-        srcAmount: string;
-        numContracts?: string;
-        swapRouter?: string;
-        swapData?: string;
-      }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-
-        // SDK requires swapRouter + swapData (encoded aggregator calldata).
-        // Neither can be safely derived from --src-token/--src-amount alone.
-        const missing: string[] = [];
-        if (!local.swapRouter) missing.push('--swap-router');
-        if (!local.swapData) missing.push('--swap-data');
-        if (missing.length) {
-          throw new Error(
-            `swap-and-fill requires aggregator-provided fields the CLI cannot derive: ${missing.join(', ')}. ` +
-              `Obtain these from your aggregator (0x, 1inch, etc.) and re-run.`
-          );
-        }
-
-        const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
-        const srcInfo = resolveTokenAddress(client, local.srcToken);
-        const srcAmount = client.utils.toBigInt(local.srcAmount, srcInfo.decimals);
-
-        // Preview so the user sees the expected destination-side fill before signing
-        const preview = client.optionBook.previewFillOrder(order);
-        const summary = {
-          srcToken: srcInfo.address,
-          srcSymbol: srcInfo.symbol,
-          srcAmount: srcAmount.toString(),
-          swapRouter: local.swapRouter,
-          ...preview,
-        };
-        render(summary, renderOpts(opts));
-
-        if (opts.dryRun) {
-          const encoded = client.optionBook.encodeSwapAndFillOrder(
-            order,
-            local.swapRouter!,
-            srcInfo.address,
-            srcAmount,
-            local.swapData!
-          );
-          render({ dryRun: true, ...encoded }, renderOpts(opts));
-          process.exit(0);
-        }
-
-        const ok = await confirm('Proceed with swap-and-fill?', {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const receipt = await client.optionBook.swapAndFillOrder(
-          order,
-          local.swapRouter!,
-          srcInfo.address,
-          srcAmount,
-          local.swapData!
-        );
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('cancel')
-    .description('Cancel an order (maker-side)')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-
-        const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
-
-        render(summarizeOrder(order, Number(local.orderIndex)), renderOpts(opts));
-
-        if (opts.dryRun) {
-          const sim = await client.optionBook.callStaticCancelOrder(order);
-          render(
-            {
-              dryRun: true,
-              success: sim.success,
-              gasEstimate: sim.gasEstimate.toString(),
-              gasLimitWithBuffer: sim.gasLimitWithBuffer.toString(),
-              error: sim.error?.message,
-            },
-            renderOpts(opts)
-          );
-          process.exit(0);
-        }
-
-        const ok = await confirm('Proceed with cancel?', {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const receipt = await client.optionBook.cancelOrder(order);
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
 }
-
-// ---------------------------------------------------------------------------
-// Fees / referrer
-// ---------------------------------------------------------------------------
-
-function registerFees(grp: Command): void {
-  grp
-    .command('fees')
-    .description('Get the accrued fee balance for (token, referrer)')
-    .requiredOption('--token <symbol-or-addr>', 'token symbol or address')
-    .option('--referrer <addr>', 'referrer address (defaults to signer)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token: string; referrer?: string }>();
-      try {
-        const res = getClient(opts);
-        const { client } = res;
-        const tokenInfo = resolveTokenAddress(client, local.token);
-        let referrer = local.referrer ?? (opts.referrer as string | undefined);
-        if (!referrer) {
-          requireSigner(res);
-          referrer = await client.signer!.getAddress();
-        }
-        const amount = await client.optionBook.getFees(tokenInfo.address, referrer);
-        render(
-          {
-            token: tokenInfo.address,
-            symbol: tokenInfo.symbol,
-            referrer,
-            amount: amount.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('claimable-fees')
-    .description('List all claimable referrer fees across configured tokens')
-    .option('--address <addr>', 'referrer address (defaults to signer)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address?: string }>();
-      try {
-        const res = getClient(opts);
-        const { client } = res;
-        let addr = local.address;
-        if (!addr) {
-          requireSigner(res);
-          addr = await client.signer!.getAddress();
-        }
-        const fees = await client.optionBook.getAllClaimableFees(addr);
-        const rows = fees.map((f) => ({
-          token: f.token,
-          symbol: f.symbol,
-          decimals: f.decimals,
-          amount: f.amount.toString(),
-        }));
-        render(rows, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('claim')
-    .description('Claim accrued referrer fees for one token')
-    .requiredOption('--token <symbol-or-addr>', 'token symbol or address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-        const tokenInfo = resolveTokenAddress(client, local.token);
-        const signerAddr = await client.signer!.getAddress();
-        const accrued = await client.optionBook.getFees(tokenInfo.address, signerAddr);
-        render(
-          {
-            token: tokenInfo.address,
-            symbol: tokenInfo.symbol,
-            referrer: signerAddr,
-            amountToClaim: accrued.toString(),
-          },
-          renderOpts(opts)
-        );
-
-        if (opts.dryRun) {
-          render({ dryRun: true, action: 'claimFees', token: tokenInfo.address }, renderOpts(opts));
-          process.exit(0);
-        }
-
-        const ok = await confirm('Proceed with claim?', {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const receipt = await client.optionBook.claimFees(tokenInfo.address);
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('claim-all')
-    .description('Claim accrued referrer fees for every token with a non-zero balance')
-    .option('--address <addr>', 'referrer address (defaults to signer)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address?: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-        const addr = local.address ?? (await client.signer!.getAddress());
-        const fees = await client.optionBook.getAllClaimableFees(addr);
-        if (fees.length === 0) {
-          render({ message: 'No claimable fees', referrer: addr }, renderOpts(opts));
-          return;
-        }
-        render(
-          fees.map((f) => ({
-            token: f.token,
-            symbol: f.symbol,
-            amount: f.amount.toString(),
-          })),
-          renderOpts(opts)
-        );
-
-        if (opts.dryRun) {
-          render({ dryRun: true, action: 'claimAllFees', tokens: fees.map((f) => f.symbol) }, renderOpts(opts));
-          process.exit(0);
-        }
-
-        const ok = await confirm(`Proceed claiming ${fees.length} token(s)?`, {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const results = await client.optionBook.claimAllFees(addr);
-        const rows = results.map((r) => ({
-          symbol: r.symbol,
-          amount: r.amount.toString(),
-          txHash: r.receipt?.hash,
-          status: r.receipt?.status,
-          error: r.error?.message,
-        }));
-        render(rows, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('referrer-fee-split')
-    .description('Get the referrer fee split in basis points (read-only)')
-    .requiredOption('--referrer <addr>', 'referrer address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ referrer: string }>();
-      try {
-        const { client } = getClient(opts);
-        const bps = await client.optionBook.getReferrerFeeSplit(local.referrer);
-        render({ referrer: local.referrer, feeSplitBps: bps.toString() }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Static reflection (read-only)
-// ---------------------------------------------------------------------------
-
-function registerStatic(grp: Command): void {
-  grp
-    .command('static-fill')
-    .description('Simulate filling an order (callStatic, no broadcast)')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
-    .option('--num-contracts <n>', 'human-readable number of contracts (passes through to preview)')
-    .option('--collateral <n>', 'human-readable collateral amount to spend')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string; numContracts?: string; collateral?: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-        const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
-        const collateralAmount = computeCollateralAmount(order, client, local);
-        const result = await client.optionBook.callStaticFillOrder(order, collateralAmount);
-        render(
-          {
-            success: result.success,
-            gasEstimate: result.gasEstimate.toString(),
-            gasLimitWithBuffer: result.gasLimitWithBuffer.toString(),
-            error: result.error?.message,
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('static-cancel')
-    .description('Simulate cancelling an order (callStatic, no broadcast)')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-        const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
-        const result = await client.optionBook.callStaticCancelOrder(order);
-        render(
-          {
-            success: result.success,
-            gasEstimate: result.gasEstimate.toString(),
-            gasLimitWithBuffer: result.gasLimitWithBuffer.toString(),
-            error: result.error?.message,
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('hash-order')
-    .description('Get the EIP-712 hash of an order')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string }>();
-      try {
-        const { client } = getClient(opts);
-        const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
-        const hash = await client.optionBook.hashOrder(order);
-        render({ hash }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('compute-nonce')
-    .description('Compute the on-chain nonce for an order')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string }>();
-      try {
-        const { client } = getClient(opts);
-        const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
-        const nonce = await client.optionBook.computeNonce(order);
-        render({ nonce: nonce.toString() }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('eip712-domain')
-    .description('Get the OptionBook EIP-712 domain')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      try {
-        const { client } = getClient(opts);
-        const domain = await client.optionBook.getEip712Domain();
-        render(
-          {
-            fields: domain.fields,
-            name: domain.name,
-            version: domain.version,
-            chainId: domain.chainId.toString(),
-            verifyingContract: domain.verifyingContract,
-            salt: domain.salt,
-            extensions: domain.extensions.map((e) => e.toString()),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-}
-

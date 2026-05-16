@@ -7,7 +7,6 @@ import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner, type GetClientResult } from '../client.js';
 import { render, renderError } from '../output.js';
 import { confirm } from '../confirm.js';
-import { warnMaxApproval } from '../warn.js';
 import {
   defaultConfigPath,
   loadConfig,
@@ -289,31 +288,6 @@ export function register(program: Command): void {
       }
     });
 
-  grp
-    .command('info')
-    .description('Show token decimals and symbol')
-    .requiredOption('--token <symbol>', 'token symbol or address')
-    .action(async (_localOpts: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token: string }>();
-      try {
-        const { client } = getClient(opts);
-        const tokenAddr = resolveToken(client, local.token);
-        const [rawDecimals, symbol] = await Promise.all([
-          client.erc20.getDecimals(tokenAddr),
-          client.erc20.getSymbol(tokenAddr),
-        ]);
-        const decimals = Number(rawDecimals);
-        render(
-          { address: tokenAddr, symbol, decimals },
-          { output: opts.output, noColor: !opts.color }
-        );
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
   // ---- Writes / config mutations ----
 
   grp
@@ -433,9 +407,6 @@ export function register(program: Command): void {
           created: true,
           address,
           path,
-          note:
-            'Private key stored locally with chmod 600. ' +
-            'To back up later: copy the config file to a secure location.',
         };
 
         if (local.revealKey) {
@@ -577,7 +548,7 @@ export function register(program: Command): void {
         };
         render(preview, { output: opts.output, noColor: !opts.color });
         if (amount === ethers.MaxUint256) {
-          warnMaxApproval(tokenAddr, spender, {});
+          process.stderr.write('WARNING: approving MaxUint256. The spender will be able to move any amount.\n');
         }
 
         if (opts.dryRun) {
@@ -603,129 +574,4 @@ export function register(program: Command): void {
       }
     });
 
-  grp
-    .command('ensure-allowance')
-    .description('Approve a spender only if current allowance is insufficient')
-    .requiredOption('--token <symbol>', 'token symbol or address')
-    .requiredOption('--spender <addr>', 'spender address')
-    .requiredOption('--amount <amount>', 'minimum allowance (or "max")')
-    .action(async (_localOpts: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token: string; spender: string; amount: string }>();
-      try {
-        const result = getClient(opts);
-        requireSigner(result);
-        const { client } = result;
-        if (!ADDRESS_REGEX.test(local.spender)) {
-          throw new Error('--spender must be a 0x-prefixed 40-char hex address');
-        }
-        const tokenAddr = resolveToken(client, local.token);
-        const decimals = Number(await client.erc20.getDecimals(tokenAddr));
-        const amount = parseAmount(local.amount, decimals, client);
-
-        const owner = await client.getSignerAddress();
-        const current = await client.erc20.getAllowance(tokenAddr, owner, local.spender);
-
-        const preview = {
-          action: 'ensure-allowance',
-          token: tokenAddr,
-          owner,
-          spender: local.spender,
-          current: client.utils.fromBigInt(current, decimals),
-          required: amount === ethers.MaxUint256 ? 'max' : client.utils.fromBigInt(amount, decimals),
-          willApprove: current < amount,
-        };
-        render(preview, { output: opts.output, noColor: !opts.color });
-
-        if (current >= amount) {
-          process.stdout.write('Allowance already sufficient\n');
-          return;
-        }
-
-        if (opts.dryRun) {
-          const encoded = client.erc20.encodeApprove(tokenAddr, local.spender, amount);
-          render({ dryRun: true, ...encoded }, { output: opts.output, noColor: !opts.color });
-          return;
-        }
-
-        const ok = await confirm('Proceed with approval?', {
-          yes: Boolean(opts.yes),
-          dryRun: Boolean(opts.dryRun),
-        });
-        if (!ok) process.exit(3);
-
-        const receipt = await client.erc20.ensureAllowance(tokenAddr, local.spender, amount);
-        if (!receipt) {
-          render(
-            { status: 'no-op', reason: 'allowance already sufficient' },
-            { output: opts.output, noColor: !opts.color }
-          );
-          return;
-        }
-        render(
-          { txHash: receipt.hash, status: receipt.status === 1 ? 'success' : 'failed' },
-          { output: opts.output, noColor: !opts.color }
-        );
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('transfer')
-    .description('Transfer tokens to another address')
-    .requiredOption('--token <symbol>', 'token symbol or address')
-    .requiredOption('--to <addr>', 'recipient address')
-    .requiredOption('--amount <amount>', 'amount in human units')
-    .action(async (_localOpts: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token: string; to: string; amount: string }>();
-      try {
-        const result = getClient(opts);
-        requireSigner(result);
-        const { client } = result;
-        if (!ADDRESS_REGEX.test(local.to)) {
-          throw new Error('--to must be a 0x-prefixed 40-char hex address');
-        }
-        const tokenAddr = resolveToken(client, local.token);
-        const decimals = Number(await client.erc20.getDecimals(tokenAddr));
-        if (local.amount === 'max') {
-          throw new Error('--amount max is not supported for transfer; pass a numeric amount');
-        }
-        const amount = client.utils.toBigInt(local.amount, decimals);
-        const from = await client.getSignerAddress();
-
-        const preview = {
-          action: 'transfer',
-          token: tokenAddr,
-          from,
-          to: local.to,
-          amount: client.utils.fromBigInt(amount, decimals),
-          raw: amount.toString(),
-        };
-        render(preview, { output: opts.output, noColor: !opts.color });
-
-        if (opts.dryRun) {
-          const encoded = client.erc20.encodeTransfer(tokenAddr, local.to, amount);
-          render({ dryRun: true, ...encoded }, { output: opts.output, noColor: !opts.color });
-          return;
-        }
-
-        const ok = await confirm('Proceed with transfer?', {
-          yes: Boolean(opts.yes),
-          dryRun: Boolean(opts.dryRun),
-        });
-        if (!ok) process.exit(3);
-
-        const receipt = await client.erc20.transfer(tokenAddr, local.to, amount);
-        render(
-          { txHash: receipt.hash, status: receipt.status === 1 ? 'success' : 'failed' },
-          { output: opts.output, noColor: !opts.color }
-        );
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
 }

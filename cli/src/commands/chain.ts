@@ -1,8 +1,4 @@
 import type { Command } from 'commander';
-import {
-  buildPriceFeedSymbolMap,
-  getOptionImplementationInfo,
-} from '@thetanuts-finance/thetanuts-client';
 import { getGlobalOpts } from '../options.js';
 import { getClient } from '../client.js';
 import { render, renderError } from '../output.js';
@@ -86,49 +82,4 @@ export function register(program: Command): void {
       }
     });
 
-  grp
-    .command('implementations')
-    .description('Option implementation map (CALL, PUT, SPREAD, BUTTERFLY, …)')
-    .action(async (_localOpts: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      try {
-        const { client, chainId } = getClient(opts);
-        const impls = client.chainConfig.implementations;
-        const rows = Object.entries(impls).map(([name, address]) => {
-          const info = address
-            ? getOptionImplementationInfo(chainId as 1 | 8453, address)
-            : null;
-          return {
-            name,
-            address: address ?? '<not deployed>',
-            type: info?.type ?? '',
-            numStrikes: info?.numStrikes ?? '',
-          };
-        });
-        render(rows, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('feeds')
-    .description('Price-feed map (symbol → Chainlink address)')
-    .action(async (_localOpts: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      try {
-        const { client, chainId } = getClient(opts);
-        const reverseMap = buildPriceFeedSymbolMap(chainId as 1 | 8453);
-        // Forward mapping: prefer the canonical (non-legacy) entries from chainConfig.priceFeeds that appear in the reverse map.
-        const reverseKeys = new Set(Object.keys(reverseMap));
-        const rows = Object.entries(client.chainConfig.priceFeeds)
-          .filter(([symbol, addr]) => !symbol.includes('/') && reverseKeys.has(addr.toLowerCase()))
-          .map(([symbol, address]) => ({ symbol, address }));
-        render(rows, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
 }

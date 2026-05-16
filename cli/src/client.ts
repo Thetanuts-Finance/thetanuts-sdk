@@ -2,11 +2,7 @@ import { ethers } from 'ethers';
 import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 import type { OptionValues } from 'commander';
 import { loadConfig, type Config } from './config.js';
-import {
-  DEFAULT_CHAIN_ID,
-  DEFAULT_ETHEREUM_RPC_URL,
-  DEFAULT_RPC_URL,
-} from './defaults.js';
+import { DEFAULT_CHAIN_ID, DEFAULT_RPC_URL } from './defaults.js';
 
 /**
  * Resolution order for any setting (descending priority):
@@ -31,31 +27,27 @@ export interface GetClientResult {
 function resolveChainId(opts: OptionValues, cfg: Config | null): number {
   const raw = opts.chain as string | number | undefined;
   if (raw !== undefined && raw !== null && raw !== '') {
-    if (typeof raw === 'number') return raw;
+    // The CLI is Base-only. Accept the canonical name and chainId; reject
+    // everything else with a clear, actionable error so users who try
+    // `--chain ethereum` (or `--chain 1`) get a useful message rather than
+    // a cryptic SDK chain-not-found later.
+    if (typeof raw === 'number') {
+      if (raw === 8453) return 8453;
+      throw new Error(`--chain only supports base (chainId 8453). Got: "${raw}"`);
+    }
     const trimmed = String(raw).trim().toLowerCase();
-    if (trimmed === 'base') return 8453;
-    if (trimmed === 'ethereum' || trimmed === 'mainnet') return 1;
-    const parsed = Number.parseInt(trimmed, 10);
-    if (!Number.isNaN(parsed)) return parsed;
-    throw new Error(`Unrecognized --chain value: ${raw}`);
+    if (trimmed === 'base' || trimmed === '8453') return 8453;
+    throw new Error(`--chain only supports base (chainId 8453). Got: "${raw}"`);
   }
   if (cfg?.chainId) return cfg.chainId;
   return DEFAULT_CHAIN_ID;
 }
 
-function resolveRpcUrl(opts: OptionValues, cfg: Config | null, chainId: number): string {
+function resolveRpcUrl(opts: OptionValues, cfg: Config | null, _chainId: number): string {
   const fromFlag = opts.rpcUrl as string | undefined;
   if (fromFlag) return fromFlag;
   const fromEnv = process.env.THETANUTS_RPC_URL;
   if (fromEnv) return fromEnv;
-  // Per-chain fallback. The SDK supports chainId 1 (Ethereum, vault-only) and
-  // chainId 8453 (Base, full trading surface). If the user selects Ethereum
-  // without setting an Ethereum RPC, we MUST NOT fall through to the Base RPC
-  // — that would route Ethereum-chainId queries to Base infrastructure and
-  // produce garbage data (or, for writes, broadcast on the wrong chain).
-  if (chainId === 1) {
-    return cfg?.ethereumRpcUrl ?? DEFAULT_ETHEREUM_RPC_URL;
-  }
   return cfg?.rpcUrl ?? DEFAULT_RPC_URL;
 }
 
@@ -86,7 +78,7 @@ export function getClient(opts: OptionValues): GetClientResult {
   const signer = privateKey ? new ethers.Wallet(privateKey, provider) : undefined;
 
   const client = new ThetanutsClient({
-    chainId: chainId as 1 | 8453,
+    chainId: chainId as 8453,
     provider,
     signer,
   });

@@ -166,10 +166,7 @@ export function register(program: Command): void {
           version: 1,
           chainId,
           rpcUrl,
-          ethereumRpcUrl: existing?.ethereumRpcUrl,
           privateKey: privateKey ?? existing?.privateKey,
-          referrer: existing?.referrer,
-          rfqKeysDir: existing?.rfqKeysDir,
         };
         saveConfig(newCfg, cfgPath);
         process.stdout.write(`Saved to ${cfgPath}\n`);

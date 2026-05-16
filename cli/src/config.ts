@@ -13,10 +13,7 @@ export interface Config {
   version: 1;
   chainId: number;
   rpcUrl: string;
-  ethereumRpcUrl?: string;
   privateKey?: string;
-  referrer?: string;
-  rfqKeysDir?: string;
 }
 
 export function defaultConfigPath(): string {

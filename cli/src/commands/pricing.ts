@@ -3,37 +3,47 @@ import { getGlobalOpts } from '../options.js';
 import { getClient } from '../client.js';
 import { render, renderError } from '../output.js';
 import {
-  parseTicker,
-  buildTicker,
-  applyFeeAdjustment,
-  calculateCollateralCost,
   validateButterfly,
   validateCondor,
 } from '@thetanuts-finance/thetanuts-client';
 
 /**
- * `thetanuts pricing` — wraps `client.mmPricing` plus the module-level helper
- * exports (`parseTicker`, `buildTicker`, `applyFeeAdjustment`,
- * `calculateCollateralCost`). All reads, no signer
+ * `thetanuts pricing` — wraps `client.mmPricing`. All reads, no signer.
  */
 export function register(program: Command): void {
   const grp = program
     .command('pricing')
-    .description('Market-maker pricing: quote vanilla/multi-leg, parse/build tickers, fee helpers');
+    .description('Market-maker pricing: quote vanilla and multi-leg options');
 
   // -------------------------------------------------------------- all
+  // Sorted flat list of every non-expired quote for the underlying, projected
+  // to the columns a trader actually reads (ticker, strike, expiry, bid, ask,
+  // mark). Use `-o json` to get the full pricing object per row.
   grp
     .command('all')
-    .description('Fetch all MM pricing for an underlying (ETH or BTC)')
-    .requiredOption('--underlying <sym>', 'underlying asset symbol (ETH or BTC)')
+    .description('All non-expired MM quotes for an underlying, sorted by expiry then strike')
+    .requiredOption('--underlying <sym>', 'underlying asset (ETH or BTC)')
     .action(async (_opts, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const { underlying } = cmd.opts<{ underlying: string }>();
       try {
         const { client } = getClient(opts);
         const u = underlying.toUpperCase() as 'ETH' | 'BTC';
-        const pricing = await client.mmPricing.getAllPricing(u);
-        render(pricing, { output: opts.output, noColor: !opts.color });
+        const pricing = await client.mmPricing.getPricingArray(u);
+        if ((opts.output ?? 'table') === 'table') {
+          const rows = pricing.map((p) => ({
+            ticker: p.ticker,
+            strike: p.strike,
+            expiry: p.expiry,
+            isCall: p.isCall,
+            bid: p.feeAdjustedBid,
+            ask: p.feeAdjustedAsk,
+            mark: p.markPrice,
+          }));
+          render(rows, { output: 'table', noColor: !opts.color });
+        } else {
+          render(pricing, { output: opts.output, noColor: !opts.color });
+        }
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -52,40 +62,6 @@ export function register(program: Command): void {
         const { client } = getClient(opts);
         const pricing = await client.mmPricing.getTickerPricing(ticker);
         render(pricing, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  // ------------------------------------------------------------ array
-  grp
-    .command('array')
-    .description('Non-expired pricing as a flat array, sorted by expiry then strike')
-    .requiredOption('--underlying <sym>', 'underlying asset (ETH or BTC)')
-    .action(async (_opts, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const { underlying } = cmd.opts<{ underlying: string }>();
-      try {
-        const { client } = getClient(opts);
-        const u = underlying.toUpperCase() as 'ETH' | 'BTC';
-        const pricing = await client.mmPricing.getPricingArray(u);
-        // Already sorted by SDK. Render with a small projection for table mode
-        // so the user sees the most useful columns.
-        if ((opts.output ?? 'table') === 'table') {
-          const rows = pricing.map((p) => ({
-            ticker: p.ticker,
-            strike: p.strike,
-            expiry: p.expiry,
-            isCall: p.isCall,
-            bid: p.feeAdjustedBid,
-            ask: p.feeAdjustedAsk,
-            mark: p.markPrice,
-          }));
-          render(rows, { output: 'table', noColor: !opts.color });
-        } else {
-          render(pricing, { output: opts.output, noColor: !opts.color });
-        }
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -267,108 +243,6 @@ export function register(program: Command): void {
           type,
         });
         render(pricing, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  // ----------------------------------------------------- parse-ticker
-  grp
-    .command('parse-ticker <ticker>')
-    .description('Parse a ticker string into its components (no RPC)')
-    .action((ticker: string, _localOpts: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      try {
-        const parsed = parseTicker(ticker);
-        render(parsed, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  // ----------------------------------------------------- build-ticker
-  grp
-    .command('build-ticker')
-    .description('Build a ticker string from components')
-    .requiredOption('--underlying <sym>', 'underlying asset (ETH or BTC)')
-    .requiredOption('--expiry <ts>', 'expiry Unix timestamp')
-    .requiredOption('--strike <n>', 'strike price (as number)')
-    .requiredOption('--type <type>', 'call|put')
-    .action((_localOpts, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{
-        underlying: string;
-        expiry: string;
-        strike: string;
-        type: string;
-      }>();
-      try {
-        const ticker = buildTicker(
-          local.underlying.toUpperCase(),
-          Number(local.expiry),
-          Number(local.strike),
-          local.type.toLowerCase() === 'call'
-        );
-        render({ ticker }, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  // ------------------------------------------------------- apply-fee
-  grp
-    .command('apply-fee')
-    .description('Apply MM fee adjustment to a raw bid or ask price')
-    .requiredOption('--raw <n>', 'raw price (fraction of underlying)')
-    .requiredOption('--side <side>', 'bid|ask — which side to adjust')
-    .action((_localOpts, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ raw: string; side: string }>();
-      try {
-        const raw = Number(local.raw);
-        const side = local.side.toLowerCase();
-        // applyFeeAdjustment expects both bid and ask; we pass `raw` to the
-        // relevant slot and 0 to the other, then return the adjusted side.
-        const [adjBid, adjAsk] =
-          side === 'bid'
-            ? applyFeeAdjustment(raw, 0)
-            : applyFeeAdjustment(0, raw);
-        const adjusted = side === 'bid' ? adjBid : adjAsk;
-        render({ side, raw, adjusted }, { output: opts.output, noColor: !opts.color });
-      } catch (err) {
-        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
-        process.exit(1);
-      }
-    });
-
-  // ------------------------------------------------- collateral-cost
-  grp
-    .command('collateral-cost')
-    .description('Calculate collateral cost (raw, in collateral-native units)')
-    .requiredOption('--value <n>', 'collateral amount per contract (e.g. 1.0 for ETH, 1800 for USD)')
-    .requiredOption('--time-to-expiry <s>', 'time to expiry in seconds')
-    .requiredOption('--asset <asset>', 'collateral asset: cbBTC|WETH|USD|ETH|BTC')
-    .action((_localOpts, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ value: string; timeToExpiry: string; asset: string }>();
-      try {
-        // SDK uses asset-class symbols (BTC, ETH, USD). Map the user-friendly
-        // collateral-token symbols cbBTC/WETH to their asset classes.
-        const assetIn = local.asset.toUpperCase();
-        let asset = assetIn;
-        if (assetIn === 'CBBTC') asset = 'BTC';
-        else if (assetIn === 'WETH') asset = 'ETH';
-        else if (assetIn === 'USDC') asset = 'USD';
-        const seconds = Number(local.timeToExpiry);
-        const years = seconds / (365 * 24 * 3600);
-        const cost = calculateCollateralCost(asset, Number(local.value), years);
-        render(
-          { asset, value: Number(local.value), timeToExpiryYears: years, cost },
-          { output: opts.output, noColor: !opts.color }
-        );
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);

@@ -1,8 +1,8 @@
-# thetanuts
+# thetanuts CLI
 
-TypeScript CLI for Thetanuts Finance V4. Browse the orderbook, query market pricing, fill orders, manage option positions — from a terminal or as a JSON API for scripts and agents.
+TypeScript CLI for Thetanuts Finance V4 on Base (chainId 8453). Browse the orderbook, query market pricing, fill orders, manage option positions — from a terminal or as a JSON API for scripts and agents.
 
-> **Warning:** This is early, experimental software (v0.1). The trading surface (`book fill`, `position close`, `position split`) has not yet been exercised against a real live broadcast — only `--dry-run` calldata generation is verified. Use at your own risk and start with tiny amounts. Always verify with `--dry-run` before sending real transactions.
+> **v0.1 — early release.** The trading surface (`book fill`, `position payout`) is wired and dry-run verified, but always test with `--dry-run` and tiny amounts before sending real transactions. Start with a dedicated wallet, not your main funds wallet.
 
 ## Install
 
@@ -47,9 +47,6 @@ thetanuts pricing all --underlying ETH
 # Pre-trade liquidity check: should I fill on the orderbook or RFQ this strike?
 thetanuts book check --underlying ETH --type PUT --strike 2200 --expiry 1778832000 --direction sell
 
-# Pure helpers, no network
-thetanuts util payout --type call --strikes 2000 --price 2150 --contracts 1
-
 # JSON output for scripts
 thetanuts -o json market data | jq '.prices.ETH'
 ```
@@ -74,7 +71,7 @@ thetanuts book fill --order-index 0 --collateral 1 --dry-run
 Precedence (highest first):
 
 1. `--private-key <key>` flag (and `--rpc-url`) on any invocation
-2. Environment variables: `THETANUTS_PRIVATE_KEY`, `THETANUTS_RPC_URL`, `THETANUTS_CHAIN`
+2. Environment variables: `THETANUTS_PRIVATE_KEY`, `THETANUTS_RPC_URL`
 3. Persisted config at `~/.config/thetanuts/config.json`
 
 Three ways to create or import a wallet:
@@ -92,7 +89,7 @@ thetanuts wallet create --force           # overwrite existing key (prints old a
 # Option 2 — import an existing private key (masked input)
 thetanuts wallet import
 
-# Option 3 — guided wizard that bundles wallet + chain + RPC choice
+# Option 3 — guided wizard that bundles wallet + RPC setup
 thetanuts setup
 ```
 
@@ -103,9 +100,7 @@ Config file shape (`~/.config/thetanuts/config.json`):
   "version": 1,
   "chainId": 8453,
   "rpcUrl": "https://mainnet.base.org",
-  "privateKey": "0x...",
-  "referrer": "0x...",
-  "rfqKeysDir": "~/.config/thetanuts/rfq-keys"
+  "privateKey": "0x..."
 }
 ```
 
@@ -122,25 +117,25 @@ chmod 600 ~/.config/thetanuts/config.json
 
 Read-only (no wallet required):
 
-- `market` — spot prices, orders, daily stats, indexer positions/history
-- `pricing` — MM pricing grid, ticker math, fee adjustment, collateral cost
-- `chain` — chain id, contracts, tokens, implementations, feeds
-- `util` — unit conversions, payout math, structure validators
-- `book orders`, `book preview`, `book max-contracts`, `book check`,
-  `book fees`, `book claimable-fees`, `book referrer-fee-split`,
-  `book hash-order`, `book compute-nonce`, `book eip712-domain`
-- `position list`, `position info`, `position full`, and every other
-  `position` read
+- `market` — spot prices, protocol stats, indexer positions/history/option
+- `pricing` — MM quotes for vanilla and multi-leg options
+- `chain` — chain id, contracts, tokens
+- `book orders`, `book preview`, `book max-contracts`, `book check`
+- `position info`, `position full` (read-only; `position list` needs
+  either `--address` or a signer)
 - `wallet create`, `wallet import`, `wallet show` — wallet setup (generate
   or import keys; these are how you get a wallet in the first place)
+
+Wallet required only when no `--address` is passed:
+
+- `position list` — when no `--address` given, defaults to the signer's positions
 
 Wallet required:
 
 - `wallet balance`, `wallet allowance` (when no `--address` is provided)
-- `wallet approve`, `wallet ensure-allowance`, `wallet transfer`
-- `book fill`, `book swap-and-fill`, `book cancel`, `book claim`,
-  `book claim-all`, `book static-fill`, `book static-cancel`
-- `position close`, `position split`, `position transfer`, `position payout`
+- `wallet approve`
+- `book fill`
+- `position payout`
 
 ## Output Formats
 
@@ -150,7 +145,7 @@ Every command accepts `-o <fmt>`:
 | ------- | ---------------------------------------------- |
 | `table` | Default. Human-readable; ANSI colors on TTY.   |
 | `json`  | Scripts and agents. BigInts as decimal strings. |
-| `csv`   | List endpoints only (`market orders`, etc.).   |
+| `csv`   | List endpoints only (`book orders`, `market history`, etc.). |
 | `yaml`  | Config-style readability for runbooks.         |
 
 Same command, two formats:
@@ -176,8 +171,8 @@ $ thetanuts -o json market data
 Piping works cleanly. EPIPE on stdout is handled, so:
 
 ```sh
-thetanuts pricing all -o json | head -5
-thetanuts -o json market orders --underlying ETH | jq '.[].pricePerContract'
+thetanuts pricing all -o json --underlying ETH | head -5
+thetanuts -o json book orders --underlying ETH | jq '.[].pricePerContract'
 ```
 
 both exit silently with status 0.
@@ -193,8 +188,8 @@ errors on stderr instead. Either way, exit code is non-zero.
 | `1`  | Generic error (network, RPC, contract revert)                        |
 | `2`  | Usage error (bad flags, missing required arg)                        |
 | `3`  | Confirmation refused / dry-run aborted                               |
-| `4`  | Config / wallet error (missing key, bad key file)                    |
-| `5`  | Chain unsupported for requested operation (e.g. `wheel` on Base)     |
+| `4`  | Config / wallet / keyfile error (missing key, bad key file)          |
+| `5`  | Chain unsupported (reserved — no current command reaches this)       |
 
 ## Commands
 
@@ -203,8 +198,9 @@ Run `thetanuts <group> --help` for a group's subcommands, or
 
 ### `setup` — first-run wizard
 
-Interactive: pick chain, RPC URL, import a private key, set the referrer
-address. Writes to `~/.config/thetanuts/config.json` with `chmod 600`.
+Interactive: set the Base RPC URL and import a private key. Writes to
+`~/.config/thetanuts/config.json` with `chmod 600`. Base only
+(chainId 8453).
 
 ```sh
 thetanuts setup
@@ -216,7 +212,6 @@ thetanuts setup
 thetanuts config show                         # private key masked
 thetanuts config path
 thetanuts config set chainId 8453
-thetanuts config unset referrer
 thetanuts config validate                     # checks RPC + key still work
 ```
 
@@ -226,8 +221,6 @@ thetanuts config validate                     # checks RPC + key still work
 thetanuts chain info                          # chainId, RPC, contracts
 thetanuts chain tokens                        # 8 supported tokens
 thetanuts chain contracts                     # contract addresses
-thetanuts chain implementations               # CALL, PUT, SPREAD, FLY, CONDOR, etc.
-thetanuts chain feeds                         # 8 Chainlink price feeds
 ```
 
 ### `wallet` — create/import wallets, balances, approvals, transfers
@@ -245,12 +238,9 @@ thetanuts wallet reset                        # delete the config file (prompts 
 thetanuts wallet balance                      # all configured tokens
 thetanuts wallet balance --token USDC
 thetanuts wallet allowance --token USDC --spender 0x...
-thetanuts wallet info --token USDC            # decimals + symbol
 
 # Writes
 thetanuts wallet approve --token USDC --for optionBook --amount 100
-thetanuts wallet ensure-allowance --token USDC --spender 0x... --amount 100
-thetanuts wallet transfer --token USDC --to 0x... --amount 10 --dry-run
 ```
 
 Flags for `wallet create`:
@@ -276,46 +266,23 @@ Flags for `wallet approve`:
 ### `market` — live market reads
 
 ```sh
-thetanuts market data
-thetanuts market prices
-thetanuts market orders --underlying ETH --type PUT
-thetanuts market stats
-thetanuts market daily-stats --from 1746800000
-thetanuts market positions --address 0x...
-thetanuts market history --address 0x...
-thetanuts market option --address 0x...
-thetanuts market referrer-stats --address 0x...
+thetanuts market data                          # spot prices + lastUpdated
+thetanuts market stats                         # protocol-wide stats
+thetanuts market positions --address 0x...     # indexer positions for any address
+thetanuts market history --address 0x...       # trade history (realized P&L source)
+thetanuts market option --address 0x...        # indexer detail for an option contract
 ```
 
-Flags for `market orders`:
-
-| Flag                  | Meaning                                                     |
-| --------------------- | ----------------------------------------------------------- |
-| `--underlying <sym>`  | Filter by underlying (ETH, BTC, etc.).                      |
-| `--type <PUT\|CALL>`  | Filter by option type.                                      |
-| `--min-expiry <ts>`   | Filter to orders expiring after this Unix timestamp.        |
-
-### `pricing` — market-maker quotes and ticker math
+### `pricing` — market-maker quotes
 
 ```sh
-thetanuts pricing all --underlying ETH
-thetanuts pricing ticker --ticker ETH-16FEB26-1800-P
-thetanuts pricing array --underlying ETH
-thetanuts pricing spread --underlying ETH --strikes 1800,2000 --expiry 1771228800 --type put
+thetanuts pricing all --underlying ETH                                  # all quotes, sorted
+thetanuts pricing ticker --ticker ETH-16FEB26-1800-P                    # single quote
+thetanuts pricing position --ticker ETH-16FEB26-1800-P --contracts 6 \
+                          --collateral-token USDC --long                # premium + collateral cost
+thetanuts pricing spread    --underlying ETH --strikes 1800,2000      --expiry 1771228800 --type put
 thetanuts pricing butterfly --underlying ETH --strikes 1700,1800,1900 --expiry 1771228800 --type call
-thetanuts pricing parse-ticker ETH-16FEB26-1800-P
-thetanuts pricing build-ticker --underlying ETH --expiry 1771228800 --strike 1800 --type put
-```
-
-### `util` — pure conversions, payout math, validators
-
-```sh
-thetanuts util to-price --value 2000               # → 200000000000  (8 dp)
-thetanuts util to-usdc --value 100                 # → 100000000     (6 dp)
-thetanuts util from-usdc --value 100000000         # → 100
-thetanuts util payout --type call --strikes 2000 --price 2150 --contracts 1
-thetanuts util validate-address 0x4200000000000000000000000000000000000006
-thetanuts util validate-expiry 1771228800
+thetanuts pricing condor    --underlying ETH --strikes 1600,1700,1800,1900 --expiry 1771228800 --type iron
 ```
 
 ### `book` — OptionBook orderflow
@@ -327,32 +294,15 @@ thetanuts book preview --order-index 0 --collateral 1
 thetanuts book max-contracts --order-index 0
 thetanuts book check --underlying ETH --type PUT --strike 2200 --expiry 1778832000 --direction sell
 
-# Writes (broadcast — use --dry-run first)
+# Write (broadcast — use --dry-run first)
 thetanuts book fill --order-index 0 --collateral 1 --dry-run
-thetanuts book cancel --order-index 0 --dry-run
-thetanuts book claim --token USDC
-thetanuts book claim-all
-
-# Static reflection (no broadcast)
-thetanuts book static-fill --order-index 0 --num-contracts 1
-thetanuts book static-cancel --order-index 0
-
-# Order metadata
-thetanuts book hash-order --order-index 0
-thetanuts book compute-nonce
-thetanuts book eip712-domain
-
-# Referrer accounting
-thetanuts book fees --token USDC
-thetanuts book claimable-fees
-thetanuts book referrer-fee-split
 ```
 
 `book check` is a deterministic port of OpenClaw's pre-trade liquidity
 analyzer. It returns matching orderbook orders + best price + available
 size + partial-fill availability + nearby strikes within 5% + a
 recommendation (`orderbook` vs `rfq`) with reason. Useful before a
-`book fill` or (once Phase 3 lands) an `rfq request`.
+`book fill` or (once the `rfq` group lands) an `rfq request`.
 
 Flags for `book fill`:
 
@@ -375,11 +325,7 @@ transactions without first granting an allowance on-chain.
 thetanuts position list
 thetanuts position info --address 0x...
 thetanuts position full --address 0x...
-thetanuts position payout-at --address 0x... --price 2100
-thetanuts position simulate-payout --address 0x...
-thetanuts position close --address 0x... --dry-run
-thetanuts position split --address 0x... --collateral 1 --dry-run
-thetanuts position transfer --address 0x... --to 0x... --dry-run
+thetanuts position payout --address 0x... --dry-run
 thetanuts position calc-payout --type call --strikes 2000 --price 2150 --contracts 1
 ```
 
@@ -388,6 +334,10 @@ Flags for `position info`:
 | Flag                | Meaning                                                          |
 | ------------------- | ---------------------------------------------------------------- |
 | `--address <addr>`  | Option contract address.                                         |
+
+Groups still entirely unimplemented: `keys`, `rfq`, `loan`, `ranger`,
+`events`, `watch`, `wheel`, `vault`. The keys + rfq groups land in a
+follow-up commit; the others are deferred per design.
 
 ## Common Workflows
 
@@ -406,7 +356,7 @@ thetanuts book preview --order-index 0 --collateral 1
 # Pick one — all three end up with a wallet in ~/.config/thetanuts/config.json
 thetanuts wallet create        # generate fresh, paper-backup the mnemonic
 thetanuts wallet import        # paste an existing private key
-thetanuts setup                # guided wizard: wallet + chain + RPC in one flow
+thetanuts setup                # guided wizard: wallet + RPC in one flow
 
 thetanuts wallet show
 thetanuts wallet balance
@@ -426,17 +376,17 @@ thetanuts book fill --order-index 0 --collateral 1
 ```sh
 thetanuts position list
 thetanuts position info --address 0xYourOption...
-thetanuts position simulate-payout --address 0xYourOption...
+thetanuts position full --address 0xYourOption...
 ```
 
 ### 5. Pipe JSON output to scripts
 
 ```sh
-thetanuts -o json market orders --underlying ETH \
+thetanuts -o json book orders --underlying ETH \
   | jq '.[].pricePerContract'
 
 thetanuts -o json pricing all --underlying ETH \
-  | jq 'to_entries | map({ticker: .key, ask: .value.rawAskPrice})'
+  | jq '.[] | {ticker, bid, ask, mark}'
 ```
 
 ## Safety
@@ -468,25 +418,21 @@ cli/src/
 ├── output.ts                   table / json / csv / yaml renderers; BigInt-safe
 ├── confirm.ts                  Preview + confirm() + dry-run plumbing (dry-run > yes)
 ├── options.ts                  Shared Commander option declarations
-├── warn.ts                     Shared safety-warning helpers (stderr)
 └── commands/
     ├── registry.ts             Wires every group's register(program)
     ├── setup.ts                Interactive first-run wizard (create | import | skip)
     ├── config.ts               Inspect/edit persisted config
     ├── chain.ts                Chain metadata
-    ├── wallet.ts               Create/import wallets, balances, allowances, transfers
+    ├── wallet.ts               Create/import wallets, balances, approvals
     ├── market.ts               Live market reads
-    ├── pricing.ts              MM pricing + ticker math
-    ├── util.ts                 Pure conversions and validators
+    ├── pricing.ts              MM pricing for vanilla and multi-leg options
     ├── book.ts                 OptionBook orderflow + pre-trade liquidity check
     └── position.ts             Owned option management
 ```
 
-Roadmap groups still to land: `keys`, `rfq`, `loan`, `ranger`, `events`,
-`watch`, `wheel`, `vault`. See `cli/rfq_design.md` for the next major
-feature (RFQ) and `todo_cli.md` §5 / §13 for the full pending-work map.
-
-For the full spec, see `cli/PRD.md` (working doc, gitignored).
+Roadmap: `keys` and `rfq` groups land in a follow-up commit. Beyond that:
+`loan`, `ranger`, `events`, `watch`, `wheel`, `vault` remain
+unimplemented (the last three are deferred per design).
 
 ## License
 

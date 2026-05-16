@@ -5,7 +5,6 @@ import * as chain from './chain.js';
 import * as wallet from './wallet.js';
 import * as market from './market.js';
 import * as pricing from './pricing.js';
-import * as util from './util.js';
 import * as book from './book.js';
 import * as position from './position.js';
 
@@ -21,7 +20,6 @@ export function registerCommands(program: Command): void {
   wallet.register(program);
   market.register(program);
   pricing.register(program);
-  util.register(program);
   book.register(program);
   position.register(program);
 }

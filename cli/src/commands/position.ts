@@ -1,8 +1,7 @@
 import type { Command } from 'commander';
-import { Contract } from 'ethers';
 import type { PayoutType } from '@thetanuts-finance/thetanuts-client';
 import { getGlobalOpts } from '../options.js';
-import { getClient, requireSigner, type GetClientResult } from '../client.js';
+import { getClient, requireSigner } from '../client.js';
 import { render, renderError } from '../output.js';
 import { confirm } from '../confirm.js';
 
@@ -26,22 +25,6 @@ function renderOpts(opts: Globals): RenderOpts {
   };
 }
 
-/**
- * Look up collateral-token decimals from the option contract, falling back to
- * 6 if the chain config does not list the token (e.g. an unusual deployment).
- */
-async function getCollateralDecimals(
-  client: GetClientResult['client'],
-  optionAddress: string
-): Promise<number> {
-  const tokenAddr = await client.option.getCollateralToken(optionAddress);
-  const lower = tokenAddr.toLowerCase();
-  for (const cfg of Object.values(client.chainConfig.tokens)) {
-    if (cfg.address.toLowerCase() === lower) return cfg.decimals;
-  }
-  return 6;
-}
-
 // ---------------------------------------------------------------------------
 // register()
 // ---------------------------------------------------------------------------
@@ -49,7 +32,7 @@ async function getCollateralDecimals(
 export function register(program: Command): void {
   const grp = program
     .command('position')
-    .description('Owned options: list positions, inspect, close, split, transfer, payout');
+    .description('Owned options: list positions, inspect, claim payout');
 
   registerReads(grp);
   registerWrites(grp);
@@ -165,324 +148,6 @@ function registerReads(grp: Command): void {
         process.exit(1);
       }
     });
-
-  grp
-    .command('strikes')
-    .description('Get the strike prices of an option')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const strikes = await client.option.getStrikes(local.address);
-        render(
-          { strikes: strikes.map((s) => s.toString()) },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('expiry')
-    .description('Get the option expiry (Unix ts + ISO)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const expiry = await client.option.getExpiry(local.address);
-        const expiryNum = Number(expiry);
-        const iso = Number.isFinite(expiryNum)
-          ? new Date(expiryNum * 1000).toISOString()
-          : null;
-        render({ expiry: expiry.toString(), iso }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('type')
-    .description('Get the unpacked option type struct')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        // PRD: position type --address ... -> unpackOptionType(await getOptionType(addr)).
-        // The SDK's unpackOptionType pulls directly from the contract (no input arg),
-        // which is equivalent — and avoids a redundant RPC round-trip.
-        const unpacked = await client.option.unpackOptionType(local.address);
-        render(
-          {
-            isQuoteCollateral: unpacked.isQuoteCollateral,
-            isPhysicallySettled: unpacked.isPhysicallySettled,
-            optionStyle: unpacked.optionStyle,
-            optionStructure: unpacked.optionStructure,
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('buyer')
-    .description('Get the buyer address')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const buyer = await client.option.getBuyer(local.address);
-        render({ buyer }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('seller')
-    .description('Get the seller address')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const seller = await client.option.getSeller(local.address);
-        render({ seller }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('collateral-token')
-    .description('Get the collateral token address')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const token = await client.option.getCollateralToken(local.address);
-        render({ collateralToken: token }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('collateral-amount')
-    .description('Get the collateral amount held in the option')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const amount = await client.option.getCollateralAmount(local.address);
-        render({ collateralAmount: amount.toString() }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('num-contracts')
-    .description('Get the number of contracts in the option')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const n = await client.option.getNumContracts(local.address);
-        render({ numContracts: n.toString() }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('payout-at')
-    .description('Calculate payout at a given settlement price (on-chain calculatePayout)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .requiredOption('--price <n>', 'human-readable settlement price (8-decimal scaling applied)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string; price: string }>();
-      try {
-        const { client } = getClient(opts);
-        const price = client.utils.toPriceDecimals(local.price);
-        const result = await client.option.calculatePayout(local.address, price);
-        render(
-          {
-            payout: result.payout.toString(),
-            settlementPrice: result.settlementPrice.toString(),
-            optionAddress: result.optionAddress,
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('simulate-payout')
-    .description('Simulate payout on-chain (uses TWAP when --price is omitted)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .option('--price <n>', 'human-readable settlement price (defaults to TWAP)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string; price?: string }>();
-      try {
-        const { client } = getClient(opts);
-        const price =
-          local.price !== undefined
-            ? client.utils.toPriceDecimals(local.price)
-            : await client.option.getTWAP(local.address);
-        const strikes = await client.option.getStrikes(local.address);
-        const numContracts = await client.option.getNumContracts(local.address);
-        const payout = await client.option.simulatePayout(
-          local.address,
-          price,
-          strikes,
-          numContracts
-        );
-        render(
-          {
-            payout: payout.toString(),
-            settlementPrice: price.toString(),
-            strikes: strikes.map((s) => s.toString()),
-            numContracts: numContracts.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('required-collateral')
-    .description('Calculate required collateral for the option')
-    .requiredOption('--address <addr>', 'option contract address')
-    .option('--strike <n>', 'human-readable single strike to override (otherwise uses on-chain strikes)')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string; strike?: string }>();
-      try {
-        const { client } = getClient(opts);
-        const strikes = local.strike
-          ? [client.utils.toPriceDecimals(local.strike)]
-          : await client.option.getStrikes(local.address);
-        const numContracts = await client.option.getNumContracts(local.address);
-        const required = await client.option.calculateRequiredCollateral(
-          local.address,
-          strikes,
-          numContracts
-        );
-        render(
-          {
-            requiredCollateral: required.toString(),
-            strikes: strikes.map((s) => s.toString()),
-            numContracts: numContracts.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('twap')
-    .description('Get the current TWAP (8-decimal price)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const twap = await client.option.getTWAP(local.address);
-        render({ twap: twap.toString() }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('chainlink-feed')
-    .description('Get the Chainlink price feed address for the option')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const feed = await client.option.getChainlinkPriceFeed(local.address);
-        render({ chainlinkFeed: feed }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('is-expired')
-    .description('Check whether an option has expired')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const expired = await client.option.isExpired(local.address);
-        render({ expired }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('is-settled')
-    .description('Check whether an option has been settled')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const { client } = getClient(opts);
-        const settled = await client.option.isSettled(local.address);
-        render({ settled }, renderOpts(opts));
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -490,205 +155,6 @@ function registerReads(grp: Command): void {
 // ---------------------------------------------------------------------------
 
 function registerWrites(grp: Command): void {
-  grp
-    .command('close')
-    .description('Bilaterally close an option position (both parties)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-
-        // Preview
-        const [buyer, seller, strikes, expiry] = await Promise.all([
-          client.option.getBuyer(local.address),
-          client.option.getSeller(local.address),
-          client.option.getStrikes(local.address),
-          client.option.getExpiry(local.address),
-        ]);
-        render(
-          {
-            optionAddress: local.address,
-            buyer,
-            seller,
-            strikes: strikes.map((s) => s.toString()),
-            expiry: expiry.toString(),
-          },
-          renderOpts(opts)
-        );
-
-        if (opts.dryRun) {
-          render({ dryRun: true, action: 'close', optionAddress: local.address }, renderOpts(opts));
-          process.exit(0);
-        }
-
-        const ok = await confirm('Proceed with close?', {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const result = await client.option.close(local.address);
-        const receipt = await result.wait();
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('split')
-    .description('Split an option position by collateral amount (payable in r12 — fee forwarded by SDK)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .requiredOption('--collateral <n>', 'human-readable collateral amount to split off')
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string; collateral: string }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-
-        const decimals = await getCollateralDecimals(client, local.address);
-        const splitAmount = client.utils.toBigInt(local.collateral, decimals);
-
-        // r12: split is payable; surface the split fee in the preview so the
-        // user sees what's being forwarded as msg.value.
-        const optionContract = new Contract(
-          local.address,
-          ['function getSplitFee() view returns (uint256)'],
-          client.provider
-        );
-        let splitFee: bigint | null = null;
-        try {
-          splitFee = (await optionContract['getSplitFee']!()) as bigint;
-        } catch {
-          // older deployments may not have getSplitFee(); leave null
-        }
-
-        render(
-          {
-            optionAddress: local.address,
-            splitCollateralAmount: splitAmount.toString(),
-            collateralDecimals: decimals,
-            splitFeeWei: splitFee?.toString() ?? 'unknown (pre-r12?)',
-          },
-          renderOpts(opts)
-        );
-
-        if (opts.dryRun) {
-          render(
-            {
-              dryRun: true,
-              action: 'split',
-              optionAddress: local.address,
-              splitCollateralAmount: splitAmount.toString(),
-            },
-            renderOpts(opts)
-          );
-          process.exit(0);
-        }
-
-        const ok = await confirm('Proceed with split?', {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const result = await client.option.split(local.address, splitAmount);
-        const receipt = await result.wait();
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
-  grp
-    .command('transfer')
-    .description('Transfer a position to another address (or approve via --approved)')
-    .requiredOption('--address <addr>', 'option contract address')
-    .requiredOption('--to <addr>', 'recipient address')
-    .option('--approved', 'set transfer approval instead of executing the transfer', false)
-    .action(async (_local: unknown, cmd: Command) => {
-      const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ address: string; to: string; approved?: boolean }>();
-      try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
-
-        const signerAddr = await client.signer!.getAddress();
-        const [buyer, seller] = await Promise.all([
-          client.option.getBuyer(local.address),
-          client.option.getSeller(local.address),
-        ]);
-        const isBuyer = signerAddr.toLowerCase() === buyer.toLowerCase();
-        const isSeller = signerAddr.toLowerCase() === seller.toLowerCase();
-        if (!isBuyer && !isSeller) {
-          throw new Error(
-            `Signer ${signerAddr} is neither buyer nor seller on option ${local.address}.`
-          );
-        }
-
-        render(
-          {
-            optionAddress: local.address,
-            from: signerAddr,
-            to: local.to,
-            role: isBuyer ? 'buyer' : 'seller',
-            mode: local.approved ? 'approveTransfer' : 'transfer',
-          },
-          renderOpts(opts)
-        );
-
-        if (opts.dryRun) {
-          render({ dryRun: true, action: local.approved ? 'approveTransfer' : 'transfer' }, renderOpts(opts));
-          process.exit(0);
-        }
-
-        const ok = await confirm(
-          `Proceed with ${local.approved ? 'approveTransfer' : 'transfer'}?`,
-          { yes: opts.yes, dryRun: opts.dryRun }
-        );
-        if (!ok) process.exit(3);
-
-        const result = local.approved
-          ? await client.option.approveTransfer(local.address, isBuyer, local.to, true)
-          : await client.option.transfer(local.address, isBuyer, local.to);
-        const receipt = await result.wait();
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
-        );
-      } catch (err) {
-        renderError(err, renderOpts(opts));
-        process.exit(1);
-      }
-    });
-
   grp
     .command('payout')
     .description('Claim post-expiry payout for an option')
@@ -764,6 +230,11 @@ function registerLocal(grp: Command): void {
     .requiredOption('--strikes <list>', 'comma-separated strikes (human-readable, e.g. 2000 or 1800,2000)')
     .requiredOption('--price <n>', 'human-readable settlement price')
     .requiredOption('--contracts <n>', 'human-readable number of contracts')
+    .option(
+      '--size-decimals <n>',
+      'contract-size scale (default 18 = SDK default; use 6 for USDC-scaled positions on-chain)',
+      '18'
+    )
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts<{
@@ -771,6 +242,7 @@ function registerLocal(grp: Command): void {
         strikes: string;
         price: string;
         contracts: string;
+        sizeDecimals: string;
       }>();
       try {
         const { client } = getClient(opts);
@@ -781,20 +253,27 @@ function registerLocal(grp: Command): void {
             `Invalid --type "${local.type}". Allowed: ${allowed.join(', ')}.`
           );
         }
+        const sizeDecimals = Number.parseInt(local.sizeDecimals, 10);
+        if (!Number.isFinite(sizeDecimals) || sizeDecimals < 0) {
+          throw new Error(`--size-decimals must be a non-negative integer (got "${local.sizeDecimals}")`);
+        }
+        // SDK's calculatePayout treats strikes[0] as lower and strikes[1] as
+        // upper for *_spread. Sort ascending so user input order doesn't
+        // silently zero out the payout for descending PUT-style ordering.
         const strikes = local.strikes
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean)
-          .map((s) => client.utils.toPriceDecimals(s));
+          .map((s) => client.utils.toPriceDecimals(s))
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         const settlementPrice = client.utils.toPriceDecimals(local.price);
-        // Match util.ts convention: numContracts is denominated in 18 decimals
-        // (size decimals), matching the SDK defaults in utils.calculatePayout.
-        const numContracts = client.utils.toBigInt(local.contracts, 18);
-        const payout = client.utils.calculatePayout({
+        const numContracts = client.utils.toBigInt(local.contracts, sizeDecimals);
+        const payoutBn = client.utils.calculatePayout({
           type: t,
           strikes,
           settlementPrice,
           numContracts,
+          sizeDecimals,
         });
         render(
           {
@@ -802,7 +281,8 @@ function registerLocal(grp: Command): void {
             strikes: strikes.map((s) => s.toString()),
             settlementPrice: settlementPrice.toString(),
             numContracts: numContracts.toString(),
-            payout: payout.toString(),
+            payout: client.utils.fromBigInt(payoutBn, 6),
+            payoutRaw: payoutBn.toString(),
           },
           renderOpts(opts)
         );
