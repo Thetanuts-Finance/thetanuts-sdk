@@ -43,13 +43,20 @@ export function register(program: Command): void {
   // ------------------------------------------------------------- stats
   grp
     .command('stats')
-    .description('Combined protocol stats (book + factory)')
+    .description('Combined protocol stats (book + factory). Defaults to JSON output because the payload is deeply nested.')
     .action(async (_opts, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       try {
         const { client } = getClient(opts);
         const stats = await client.api.getProtocolStats();
-        render(stats, { output: opts.output, noColor: !opts.color });
+        // Stats is a deeply nested aggregate (totals + 24h/7d/30d + byImplementationType).
+        // Table rendering crams the whole blob into a single cell; force JSON unless
+        // the user explicitly asked for something else.
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(stats, {
+          output: explicitOutput ? opts.output : 'json',
+          noColor: !opts.color,
+        });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);

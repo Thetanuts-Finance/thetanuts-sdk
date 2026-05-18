@@ -7,6 +7,10 @@ export interface RenderOptions {
   output?: OutputFormat;
   /** When true, ANSI color escapes are suppressed even if stdout is a TTY. */
   noColor?: boolean;
+  /**
+   * When true (table mode only), collapse long string cells
+   */
+  truncate?: boolean;
 }
 
 export interface RenderErrorOptions {
@@ -41,30 +45,83 @@ function toCellString(v: unknown): string {
   return String(v);
 }
 
-function renderArrayTable(rows: unknown[]): string {
+/**
+ * Recursively shorten long 0x-hex strings inside an object/array for table
+ * display. Keeps everything else intact. The original (untruncated) value is
+ * preserved for -o json since this helper is only invoked from the table
+ * renderer. Threshold matches roughly two terminal columns of useful preview.
+ *
+ * Encoded fill / approve / settle calldata routinely exceeds 4 KB on
+ * multi-leg structures and renders as 50+ wrapped rows otherwise.
+ */
+const TRUNCATE_HEX_THRESHOLD = 64; // 4-byte selector + a couple words
+const TRUNCATE_STRING_THRESHOLD = 80;
+
+function truncateForCell(s: string): string {
+  if (s.length <= TRUNCATE_STRING_THRESHOLD) return s;
+  // Hex calldata: show selector (0x + 8 chars) + ellipsis + tail (8 chars) +
+  // length suffix so the user can sanity-check the size.
+  if (/^0x[0-9a-fA-F]+$/.test(s) && s.length > TRUNCATE_HEX_THRESHOLD) {
+    const head = s.slice(0, 10); // 0x + 4-byte selector
+    const tail = s.slice(-8);
+    return `${head}…${tail} (${s.length} chars)`;
+  }
+  return `${s.slice(0, TRUNCATE_STRING_THRESHOLD - 1)}…`;
+}
+
+function truncateValue(v: unknown): unknown {
+  if (typeof v === 'string') return truncateForCell(v);
+  if (v === null || v === undefined) return v;
+  if (typeof v === 'bigint' || typeof v === 'number' || typeof v === 'boolean') {
+    return v;
+  }
+  if (Array.isArray(v)) return v.map(truncateValue);
+  if (isPlainObject(v)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v)) {
+      out[k] = truncateValue(val);
+    }
+    return out;
+  }
+  return v;
+}
+
+function toCellStringTruncated(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'bigint') return v.toString();
+  if (typeof v === 'string') return truncateForCell(v);
+  if (typeof v === 'object') {
+    return JSON.stringify(truncateValue(v), jsonReplacer);
+  }
+  return String(v);
+}
+
+function renderArrayTable(rows: unknown[], truncate = false): string {
   if (rows.length === 0) return '(empty)';
   // Use first row's keys as the column ordering. Implementer commands that
   // need stable columns should normalize their output before calling render.
   const first = rows[0];
+  const cell = truncate ? toCellStringTruncated : toCellString;
   if (!isPlainObject(first)) {
-    return rows.map((r) => toCellString(r)).join('\n');
+    return rows.map((r) => cell(r)).join('\n');
   }
   const headers = Object.keys(first);
   const table = new Table({ head: headers });
   for (const row of rows) {
     if (isPlainObject(row)) {
-      table.push(headers.map((h) => toCellString(row[h])));
+      table.push(headers.map((h) => cell(row[h])));
     } else {
-      table.push([toCellString(row)]);
+      table.push([cell(row)]);
     }
   }
   return table.toString();
 }
 
-function renderObjectTable(obj: Record<string, unknown>): string {
+function renderObjectTable(obj: Record<string, unknown>, truncate = false): string {
   const table = new Table({ head: ['key', 'value'] });
+  const cell = truncate ? toCellStringTruncated : toCellString;
   for (const [k, v] of Object.entries(obj)) {
-    table.push([k, toCellString(v)]);
+    table.push([k, cell(v)]);
   }
   return table.toString();
 }
@@ -157,16 +214,110 @@ export function render(data: unknown, opts: RenderOptions = {}): void {
     process.stdout.write('\n');
     return;
   }
+  const truncate = Boolean(opts.truncate);
   if (Array.isArray(data)) {
-    process.stdout.write(renderArrayTable(data) + '\n');
+    process.stdout.write(renderArrayTable(data, truncate) + '\n');
     return;
   }
   if (isPlainObject(data)) {
-    process.stdout.write(renderObjectTable(data) + '\n');
+    process.stdout.write(renderObjectTable(data, truncate) + '\n');
     return;
   }
   // primitive
   process.stdout.write(toCellString(data) + '\n');
+}
+
+// ---------------------------------------------------------------------------
+// Tx receipt rendering helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Best-effort ETH/USD spot fetch from the Odette market data API. Returns
+ * `null` (never throws) on any failure — gas-cost USD is a nice-to-have, not
+ * worth tanking a write command for. Caller should treat `null` as "skip the
+ * feeUsd field gracefully".
+ *
+ * Structurally typed against the SDK's `client.api.getMarketData()` so we
+ * don't have to drag in the full ThetanutsClient type here.
+ */
+export async function fetchEthUsdSafe(
+  api: { getMarketData(): Promise<{ prices?: { ETH?: number } }> }
+): Promise<number | null> {
+  try {
+    const md = await api.getMarketData();
+    const eth = md?.prices?.ETH;
+    if (typeof eth === 'number' && Number.isFinite(eth) && eth > 0) return eth;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Minimal subset of ethers v6 TransactionReceipt that this helper consumes.
+ * Different SDK call sites typecheck against varying receipt types (raw
+ * ethers vs the SDK's narrower aliases), so we accept a structural shape
+ * with optional gas fields — never throw if anything is missing.
+ */
+export interface TxReceiptLike {
+  hash: string;
+  status?: number | null;
+  blockNumber?: number;
+  gasUsed?: bigint | null;
+  // ethers v6 collapses effectiveGasPrice into `gasPrice` on the receipt
+  gasPrice?: bigint | null;
+  effectiveGasPrice?: bigint | null;
+}
+
+/**
+ * Build the post-broadcast receipt payload with gas cost enrichments.
+ *
+ * `gasUsed` units are useless on their own — surface the effective gas price
+ * (gwei), the total tx fee in ETH, and the USD equivalent when an ETH/USD
+ * spot price is available. Any missing field is omitted rather than zeroed
+ * so the table doesn't show misleading "0.000000 ETH" rows on chains where
+ * the receipt doesn't expose gas pricing (some L2 RPCs).
+ */
+export function buildTxReceiptPayload(
+  receipt: TxReceiptLike,
+  ethUsdPrice?: number | null,
+  extra?: Record<string, unknown>
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    txHash: receipt.hash,
+    status: receipt.status === 1 ? 'success' : receipt.status === 0 ? 'failed' : receipt.status ?? 'unknown',
+  };
+  if (receipt.blockNumber !== undefined && receipt.blockNumber !== null) {
+    payload.blockNumber = receipt.blockNumber;
+  }
+  if (receipt.gasUsed !== undefined && receipt.gasUsed !== null) {
+    payload.gasUsed = receipt.gasUsed.toString();
+  }
+  // ethers v6 names the post-mining effective price `gasPrice`; tolerate
+  // either field name to stay forward/back-compat with SDK helper changes.
+  const gp = receipt.effectiveGasPrice ?? receipt.gasPrice ?? null;
+  if (gp && receipt.gasUsed) {
+    try {
+      const gwei = Number(gp) / 1e9;
+      const feeWei = receipt.gasUsed * gp;
+      const feeEth = Number(feeWei) / 1e18;
+      payload.gasPriceGwei = gwei.toFixed(3);
+      payload.feeEth = feeEth.toFixed(6);
+      if (typeof ethUsdPrice === 'number' && Number.isFinite(ethUsdPrice) && ethUsdPrice > 0) {
+        payload.feeUsd = `$${(feeEth * ethUsdPrice).toFixed(4)}`;
+      }
+    } catch {
+      // Defensive — never let the receipt render throw. If the math fails
+      // (e.g. somebody passes a string instead of a bigint), just omit the
+      // enriched fields.
+    }
+  }
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      payload[k] = v;
+    }
+  }
+  return payload;
 }
 
 /**

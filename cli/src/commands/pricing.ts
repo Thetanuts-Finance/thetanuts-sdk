@@ -61,7 +61,11 @@ export function register(program: Command): void {
       try {
         const { client } = getClient(opts);
         const pricing = await client.mmPricing.getTickerPricing(ticker);
-        render(pricing, { output: opts.output, noColor: !opts.color });
+        // Pricing response has deeply-nested byCollateral object — table mode
+        // crams it into one cell. Auto-switch to JSON unless user explicitly
+        // asked for table (same pattern as market stats / rfq build).
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(pricing, { output: explicitOutput ? opts.output : 'json', noColor: !opts.color });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -97,7 +101,8 @@ export function register(program: Command): void {
           numContracts: Number(local.contracts),
           collateralToken,
         });
-        render(pricing, { output: opts.output, noColor: !opts.color });
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(pricing, { output: explicitOutput ? opts.output : 'json', noColor: !opts.color });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -140,7 +145,8 @@ export function register(program: Command): void {
           expiry: Number(local.expiry),
           isCall,
         });
-        render(pricing, { output: opts.output, noColor: !opts.color });
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(pricing, { output: explicitOutput ? opts.output : 'json', noColor: !opts.color });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -191,7 +197,8 @@ export function register(program: Command): void {
           expiry: Number(local.expiry),
           isCall,
         });
-        render(pricing, { output: opts.output, noColor: !opts.color });
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(pricing, { output: explicitOutput ? opts.output : 'json', noColor: !opts.color });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -242,7 +249,8 @@ export function register(program: Command): void {
           expiry: Number(local.expiry),
           type,
         });
-        render(pricing, { output: opts.output, noColor: !opts.color });
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(pricing, { output: explicitOutput ? opts.output : 'json', noColor: !opts.color });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
