@@ -54,12 +54,32 @@ function resolveRpcUrl(opts: OptionValues, cfg: Config | null, _chainId: number)
   return cfg?.rpcUrl ?? DEFAULT_RPC_URL;
 }
 
+// Defined inline (not imported) to avoid pulling a command module into client bootstrap
+const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
+
 function resolvePrivateKey(opts: OptionValues, cfg: Config | null): string | undefined {
+  let key: string | undefined;
+  let source: string | undefined;
   const fromFlag = opts.privateKey as string | undefined;
-  if (fromFlag) return fromFlag;
-  const fromEnv = process.env.THETANUTS_PRIVATE_KEY;
-  if (fromEnv) return fromEnv;
-  return cfg?.privateKey;
+  if (fromFlag) {
+    key = fromFlag;
+    source = '--private-key flag';
+  } else {
+    const fromEnv = process.env.THETANUTS_PRIVATE_KEY;
+    if (fromEnv) {
+      key = fromEnv;
+      source = 'THETANUTS_PRIVATE_KEY env var';
+    } else if (cfg?.privateKey) {
+      key = cfg.privateKey;
+      source = 'config file';
+    }
+  }
+  if (key === undefined) return undefined;
+  // Validate BEFORE handing to ethers — a malformed key would otherwise be echoed verbatim in ethers' "invalid BytesLike value" error message
+  if (!PRIVATE_KEY_REGEX.test(key)) {
+    throw new Error(`Invalid private key from ${source}. Expected 0x-prefixed 64-char hex string.`);
+  }
+  return key;
 }
 
 /**
