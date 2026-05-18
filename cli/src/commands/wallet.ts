@@ -5,7 +5,7 @@ import { ethers } from 'ethers';
 import type { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner, type GetClientResult } from '../client.js';
-import { render, renderError } from '../output.js';
+import { render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
 import {
   defaultConfigPath,
@@ -257,26 +257,25 @@ export function register(program: Command): void {
     .command('allowance')
     .description('Show ERC20 allowance for a spender')
     .requiredOption('--token <symbol>', 'token symbol or address')
-    .requiredOption('--spender <addr>', 'spender address')
+    .option('--spender <addr>', 'spender address')
+    .option('--for <name>', 'preset spender: optionBook | optionFactory')
     .option('--owner <addr>', 'owner address (defaults to signer)')
     .action(async (_localOpts: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ token: string; spender: string; owner?: string }>();
+      const local = cmd.opts<{ token: string; spender?: string; for?: string; owner?: string }>();
       try {
         const result = getClient(opts);
         const { client } = result;
         const tokenAddr = resolveToken(client, local.token);
-        if (!ADDRESS_REGEX.test(local.spender)) {
-          throw new Error('--spender must be a 0x-prefixed 40-char hex address');
-        }
+        const spender = resolveSpender(client, local.spender, local.for);
         const owner = await resolveOwner(client, result, local.owner);
-        const allowance = await client.erc20.getAllowance(tokenAddr, owner, local.spender);
+        const allowance = await client.erc20.getAllowance(tokenAddr, owner, spender);
         const decimals = Number(await client.erc20.getDecimals(tokenAddr));
         render(
           {
             token: tokenAddr,
             owner,
-            spender: local.spender,
+            spender,
             allowance: client.utils.fromBigInt(allowance, decimals),
             raw: allowance.toString(),
           },
@@ -553,7 +552,10 @@ export function register(program: Command): void {
 
         if (opts.dryRun) {
           const encoded = client.erc20.encodeApprove(tokenAddr, spender, amount);
-          render({ dryRun: true, ...encoded }, { output: opts.output, noColor: !opts.color });
+          render(
+            { dryRun: true, ...encoded },
+            { output: opts.output, noColor: !opts.color, truncate: true }
+          );
           return;
         }
 
@@ -564,8 +566,9 @@ export function register(program: Command): void {
         if (!ok) process.exit(3);
 
         const receipt = await client.erc20.approve(tokenAddr, spender, amount);
+        const ethUsd = await fetchEthUsdSafe(client.api);
         render(
-          { txHash: receipt.hash, status: receipt.status === 1 ? 'success' : 'failed' },
+          buildTxReceiptPayload(receipt, ethUsd),
           { output: opts.output, noColor: !opts.color }
         );
       } catch (err) {

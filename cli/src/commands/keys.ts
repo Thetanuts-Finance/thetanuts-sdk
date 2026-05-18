@@ -89,6 +89,43 @@ export function register(program: Command): void {
     });
 
   // ----------------------------------------------------------------------
+  // keys ensure — load existing key, or generate-and-persist a new one
+  // ----------------------------------------------------------------------
+  grp
+    .command('ensure')
+    .description(
+      'Ensure an ECDH keypair is persisted for this chain. Loads the existing one if present, ' +
+        'or generates a fresh keypair and stores it under <config-dir>/rfq-keys/. ' +
+        'Use this before `rfq request` so the requester public key can be stamped.'
+    )
+    .action(async (_local: unknown, cmd: Command) => {
+      const opts = getGlobalOpts(cmd);
+      try {
+        const result = getClient(opts);
+        const hadKey = await result.client.rfqKeys.hasStoredKey();
+        const kp = await result.client.rfqKeys.getOrCreateKeyPair();
+        render(
+          {
+            publicKey: kp.compressedPublicKey,
+            chainId: result.chainId,
+            storageFile: storageFilePath(result),
+            created: !hadKey,
+          },
+          { output: opts.output, noColor: !opts.color }
+        );
+        if (!hadKey) {
+          process.stderr.write(
+            `New RFQ keypair persisted for chain ${result.chainId}. ` +
+              'Back it up with `thetanuts keys export --out <path>` — losing it strands every prior RFQ.\n'
+          );
+        }
+      } catch (err) {
+        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
+        process.exit(1);
+      }
+    });
+
+  // ----------------------------------------------------------------------
   // keys show — print stored public key + storage path. Never prints private.
   // ----------------------------------------------------------------------
   grp
@@ -114,7 +151,7 @@ export function register(program: Command): void {
           if (err instanceof KeyNotFoundError) {
             renderError(
               new Error(
-                `No RFQ key stored for chain ${result.chainId}. Run \`thetanuts keys generate\` to generate one.`
+                `No RFQ key stored for chain ${result.chainId}. Run \`thetanuts keys ensure\` to generate and persist one.`
               ),
               { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color }
             );
@@ -123,7 +160,7 @@ export function register(program: Command): void {
           if (err instanceof InvalidKeyError) {
             renderError(
               new Error(
-                `Stored RFQ key is invalid for chain ${result.chainId}. Restore from backup or run \`thetanuts keys remove --force && thetanuts keys generate\` (will lose access to existing encrypted offers).`
+                `Stored RFQ key is invalid for chain ${result.chainId}. Restore from backup or run \`thetanuts keys remove --force && thetanuts keys ensure\` (will lose access to existing encrypted offers).`
               ),
               { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color }
             );

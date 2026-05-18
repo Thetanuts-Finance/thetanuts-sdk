@@ -1,13 +1,20 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { Contract, MaxUint256 } from 'ethers';
-import { OPTION_FACTORY_ABI } from '@thetanuts-finance/thetanuts-client';
-import type { QuotationParameters, RFQRequest } from '@thetanuts-finance/thetanuts-client';
+import { Contract, Interface, MaxUint256 } from 'ethers';
+import {
+  OPTION_FACTORY_ABI,
+  calculateNumContracts,
+  validateButterfly,
+  validateCondor,
+  validateIronCondor,
+} from '@thetanuts-finance/thetanuts-client';
+import type { ProductName, QuotationParameters, RFQRequest } from '@thetanuts-finance/thetanuts-client';
 import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner, type GetClientResult } from '../client.js';
-import { jsonReplacer, render, renderError } from '../output.js';
+import { jsonReplacer, render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
+import { computePayoutSummary, computeScenarios } from '../payout.js';
 
 // ----------------------------------------------------------------------------
 // RFQ Constants
@@ -134,6 +141,269 @@ function defaultCollateral(type: OptionType, strikeCount: number): 'USDC' | 'WET
   return type === 'CALL' && strikeCount === 1 ? 'WETH' : 'USDC';
 }
 
+/**
+ * Map the CLI's display-only StructureType + collateralToken to the SDK's
+ * ProductName enum used by `calculateNumContracts` / `calculateCollateralRequired`.
+ *
+ * Only the INVERSE_CALL family swings with collateral choice:
+ *   single-strike CALL + WETH  → INVERSE_CALL  (1:1 underlying collateral)
+ *   single-strike CALL + USDC  → LINEAR_CALL   (capped-at-2×-strike, USDC collat)
+ *   two-strike CALL  + WETH  → INVERSE_CALL_SPREAD
+ *   everything else passes straight through.
+ */
+function toProductName(
+  structureType: StructureType,
+  collateralToken: 'USDC' | 'WETH'
+): ProductName {
+  if (structureType === 'INVERSE_CALL') {
+    return collateralToken === 'WETH' ? 'INVERSE_CALL' : 'LINEAR_CALL';
+  }
+  if (structureType === 'CALL_SPREAD' && collateralToken === 'WETH') {
+    return 'INVERSE_CALL_SPREAD';
+  }
+  return structureType;
+}
+
+/**
+ * Map collateral token (USDC/WETH) to the asset key used in
+ * `MMVanillaPricing.byCollateral`. The SDK keys vanilla pricing by collateral
+ * ASSET ('USD' for USDC, the underlying symbol for native), so we have to
+ * translate the user-facing token name here.
+ */
+function collateralAssetKey(
+  collateralToken: 'USDC' | 'WETH',
+  underlying: Underlying
+): string {
+  if (collateralToken === 'USDC') return 'USD';
+  // WETH: only valid for ETH-collateralized inverse CALL family; the SDK still
+  // keys it by the underlying symbol though, so propagate that.
+  return underlying;
+}
+
+/**
+ * Is the structure base-collateralized? (matches dApp's `isBaseCollateral`,
+ * which controls whether `premiumPerContract = mmPrice` (BASE) or
+ * `mmPrice * spot` (QUOTE/USDC). Anything quoted in WETH is BASE; USDC is QUOTE.
+ */
+function isBaseCollateral(collateralToken: 'USDC' | 'WETH'): boolean {
+  return collateralToken === 'WETH';
+}
+
+/**
+ * Fetch the MM ask price per contract (in underlying terms for vanilla, or
+ * underlying-denominated net price for multi-leg) for a build that the user
+ * left without an explicit `--reserve-price`. Matches the dApp's
+ * `useRfqPricing.fetchPricing` dispatch (vanilla → getTickerPricing,
+ * 2-leg → getSpreadPricing, 3-leg → getButterflyPricing, 4-leg → getCondorPricing).
+ *
+ * Returns `{ mmAsk, spot }` where:
+ *   - `mmAsk` is in underlying terms (fraction of underlying)
+ *   - `spot` is the underlying USD price (for quote-collateral conversions)
+ *
+ * Throws with exitCode=4 if the live MM API doesn't have a quote for this
+ * structure (e.g. strike not listed, multi-leg leg missing from feed). The
+ * user can pass `--reserve-price` explicitly to skip this.
+ */
+async function fetchMmAskForBuild(args: {
+  client: GetClientResult['client'];
+  structureType: StructureType;
+  underlying: Underlying;
+  optionType: OptionType;
+  strikes: number[];
+  expiry: number;
+  collateralToken: 'USDC' | 'WETH';
+  isIronCondor: boolean;
+}): Promise<{ mmAsk: number; spot: number }> {
+  const { client, structureType, underlying, optionType, strikes, expiry, collateralToken, isIronCondor } = args;
+
+  const wrapErr = (e: unknown, hint: string): never => {
+    const msg = (e as Error)?.message ?? String(e);
+    const err = new Error(
+      `No live MM quote for this ${structureType} (${hint}). ` +
+        `Pass --reserve-price explicitly, or pick strikes/expiry that the MM is actively pricing. ` +
+        `Underlying error: ${msg}`
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  };
+
+  // Vanilla: single-strike call/put
+  if (strikes.length === 1) {
+    try {
+      const v = await client.mmPricing.getTickerPricing(
+        formatTicker(underlying, expiry, strikes, optionType)
+      );
+      const assetKey = collateralAssetKey(collateralToken, underlying);
+      const coll = v.byCollateral[assetKey];
+      // Prefer buffered (matches dApp); fall back to feeAdjustedAsk only if the
+      // per-collateral branch is missing (shouldn't happen for USD/native).
+      const mmAsk = coll?.mmAskPriceBuffered ?? v.feeAdjustedAsk;
+      if (!Number.isFinite(mmAsk) || mmAsk <= 0) {
+        wrapErr(new Error(`Got non-positive ask price ${mmAsk}`), 'vanilla');
+      }
+      return { mmAsk, spot: v.underlyingPrice };
+    } catch (e) {
+      wrapErr(e, 'vanilla');
+    }
+  }
+
+  // Multi-leg: strikes in human units → bigints (8 decimals) per dApp convention.
+  const toBig8 = (s: number): bigint => BigInt(Math.round(s * 1e8));
+  const isCall = optionType === 'CALL';
+
+  try {
+    if (strikes.length === 2) {
+      const r = await client.mmPricing.getSpreadPricing({
+        underlying,
+        strikes: [toBig8(strikes[0]!), toBig8(strikes[1]!)],
+        expiry,
+        isCall,
+      });
+      const spot = r.nearLeg.underlyingPrice;
+      const mmAsk = r.netMmAskPrice;
+      if (!Number.isFinite(mmAsk) || mmAsk <= 0) {
+        wrapErr(new Error(`Got non-positive net ask ${mmAsk}`), 'spread');
+      }
+      return { mmAsk, spot };
+    }
+
+    if (strikes.length === 3) {
+      const r = await client.mmPricing.getButterflyPricing({
+        underlying,
+        strikes: [toBig8(strikes[0]!), toBig8(strikes[1]!), toBig8(strikes[2]!)],
+        expiry,
+        isCall,
+      });
+      const spot = r.legs[0].underlyingPrice;
+      const mmAsk = r.netMmAskPrice;
+      if (!Number.isFinite(mmAsk) || mmAsk <= 0) {
+        wrapErr(new Error(`Got non-positive net ask ${mmAsk}`), 'butterfly');
+      }
+      return { mmAsk, spot };
+    }
+
+    if (strikes.length === 4) {
+      // For condor/iron-condor, the dApp passes ascending strikes. We re-sort
+      // here defensively since the SDK validates the order anyway.
+      const sorted = [...strikes].sort((a, b) => a - b);
+      const condorType: 'call' | 'put' | 'iron' = isIronCondor ? 'iron' : isCall ? 'call' : 'put';
+      const r = await client.mmPricing.getCondorPricing({
+        underlying,
+        strikes: [toBig8(sorted[0]!), toBig8(sorted[1]!), toBig8(sorted[2]!), toBig8(sorted[3]!)],
+        expiry,
+        type: condorType,
+      });
+      const spot = r.legs[0].underlyingPrice;
+      const mmAsk = r.netMmAskPrice;
+      if (!Number.isFinite(mmAsk) || mmAsk <= 0) {
+        wrapErr(new Error(`Got non-positive net ask ${mmAsk}`), `condor (${condorType})`);
+      }
+      return { mmAsk, spot };
+    }
+
+    wrapErr(new Error(`Unsupported strike count ${strikes.length}`), structureType);
+  } catch (e) {
+    // Re-throw if already wrapped, otherwise wrap.
+    if ((e as Error & { exitCode?: number }).exitCode === 4) throw e;
+    wrapErr(e, structureType);
+  }
+
+  // Unreachable — wrapErr always throws.
+  throw new Error('unreachable');
+}
+
+/**
+ * Derive `--contracts` from `--collateral-amount` for both directions.
+ *
+ *   BUY (with --reserve-price)    — contracts = budget / reservePrice (pure division)
+ *   BUY (no --reserve-price)      — fetch fresh MM quote, set reservePrice =
+ *                                   mmAskPriceBuffered (vanilla) or netMmAskPrice
+ *                                   (multi-leg), then divide. Matches the dApp.
+ *   SELL — contracts = collateral / maxLossPerContract  (SDK structure-aware,
+ *                                                       offline)
+ *
+ * On BUY without a user-supplied price ceiling, this hits the MM pricing API.
+ * Returns the derived contracts AND (when fetched) the per-contract reservePrice
+ * so the caller can stamp it into the build inputs.
+ */
+async function deriveContractsFromCollateral(args: {
+  collateralAmount: number;
+  direction: 'buy' | 'sell';
+  structureType: StructureType;
+  collateralToken: 'USDC' | 'WETH';
+  strikes: number[];
+  reservePrice?: number;
+  // Required only when the BUY branch needs to fetch MM pricing:
+  client: GetClientResult['client'];
+  underlying: Underlying;
+  optionType: OptionType;
+  expiry: number;
+  isIronCondor: boolean;
+}): Promise<{ contracts: number; derivedReservePrice?: number }> {
+  const { collateralAmount, direction, structureType, collateralToken, strikes, reservePrice } = args;
+  if (collateralAmount <= 0) {
+    throw new Error(`--collateral-amount must be > 0 (got ${collateralAmount})`);
+  }
+  if (direction === 'buy') {
+    // Explicit user-supplied reserve price wins — no oracle call.
+    if (reservePrice !== undefined && reservePrice > 0) {
+      return { contracts: collateralAmount / reservePrice };
+    }
+
+    // No reserve-price → fetch live MM ask and derive both contracts AND
+    // reservePrice. This mirrors the dApp's auto-fill of `reservePrice` from
+    // `mmAskPriceBuffered * numContracts` (then split back per-contract for
+    // the SDK builder, which re-multiplies internally).
+    const { mmAsk, spot } = await fetchMmAskForBuild({
+      client: args.client,
+      structureType,
+      underlying: args.underlying,
+      optionType: args.optionType,
+      strikes,
+      expiry: args.expiry,
+      collateralToken,
+      isIronCondor: args.isIronCondor,
+    });
+
+    // premiumPerContract in collateral-token units:
+    //   BASE collateral (WETH on CALL): premium = mmAsk (already in underlying)
+    //   QUOTE collateral (USDC):        premium = mmAsk * spot (USD per contract)
+    const baseColl = isBaseCollateral(collateralToken);
+    const premiumPerContract = baseColl ? mmAsk : mmAsk * spot;
+    if (!Number.isFinite(premiumPerContract) || premiumPerContract <= 0) {
+      const err = new Error(
+        `Derived premiumPerContract=${premiumPerContract} from MM quote (mmAsk=${mmAsk}, spot=${spot}). ` +
+          'Pass --reserve-price explicitly to override.'
+      );
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+    const contracts = collateralAmount / premiumPerContract;
+    return { contracts, derivedReservePrice: premiumPerContract };
+  }
+
+  // SELL path: unchanged. Structure-aware contracts from SDK, reservePrice stays
+  // wherever the user put it (typically unset → 0 at submit time).
+  const product = toProductName(structureType, collateralToken);
+  const contracts = calculateNumContracts({
+    tradeAmount: collateralAmount,
+    product,
+    strikes,
+    isBuy: false,
+  });
+  if (!Number.isFinite(contracts) || contracts <= 0) {
+    throw new Error(
+      `Could not derive --contracts from --collateral-amount ${collateralAmount} for ${structureType} ` +
+        `(got ${contracts}). Pass --contracts directly, or check that strikes describe a valid structure.`
+    );
+  }
+  return { contracts };
+}
+
+// `computePayoutSummary` moved to `../payout.ts` so book.ts can reuse the
+// same shape. Local `toProductName` is still used elsewhere in this file
+// (e.g. `deriveContractsFromCollateral`).
+
 function formatTicker(underlying: string, expirySec: number, strikes: number[], type: OptionType): string {
   const d = new Date(expirySec * 1000);
   const day = d.getUTCDate();
@@ -219,10 +489,6 @@ async function buildFromFlags(
 
   const strikes = parseStrikes(local.strike, local.strikes);
   const expiry = parseUnsignedInt('--expiry', local.expiry);
-  const contractsNum = Number.parseFloat(local.contracts ?? '');
-  if (!Number.isFinite(contractsNum) || contractsNum <= 0) {
-    throw new Error(`--contracts must be a positive number (got "${local.contracts}")`);
-  }
   const direction = (local.direction ?? '').toLowerCase();
   if (!['buy', 'sell'].includes(direction)) throw new Error('--direction must be buy or sell');
 
@@ -239,11 +505,54 @@ async function buildFromFlags(
   }
 
   const structureType = getStructureType(strikes.length, type as OptionType, isIronCondor);
+
+  // Structure-specific strike validation — the on-chain implementations
+  // require equidistant butterfly wings and equal condor spread widths.
+  // Catching it client-side beats the silent on-chain revert + the SDK's
+  // wider-than-needed numContracts derivation in the collateral-amount path.
+  if (isIronCondor) {
+    const ic = validateIronCondor(strikes);
+    if (!ic.valid) {
+      const err = new Error(ic.error ?? 'Invalid iron condor strikes');
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+  } else if (strikes.length === 3) {
+    const fly = validateButterfly(strikes);
+    if (!fly.valid) {
+      const err = new Error(`${fly.error ?? 'Invalid butterfly strikes'}. Got: [${strikes.join(', ')}]`);
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+  } else if (strikes.length === 4) {
+    const cnd = validateCondor(strikes);
+    if (!cnd.valid) {
+      const err = new Error(`${cnd.error ?? 'Invalid condor strikes'}. Got: [${strikes.join(', ')}]`);
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+  }
   const collateralToken =
     (local.collateralToken?.toUpperCase() as 'USDC' | 'WETH' | undefined) ??
     defaultCollateral(type as OptionType, strikes.length);
   if (!['USDC', 'WETH'].includes(collateralToken)) {
     throw new Error('--collateral-token must be USDC or WETH');
+  }
+
+  // WETH is only valid as collateral for the inverse-CALL family — single-strike
+  // CALL (INVERSE_CALL impl) and 2-strike CALL (INVERSE_CALL_SPREAD impl). Other
+  // structures have no INVERSE_* implementation deployed and would revert on
+  // submit. Catch it now so the user doesn't get a clean-looking build artifact.
+  if (collateralToken === 'WETH') {
+    const wethOk = type === 'CALL' && (strikes.length === 1 || strikes.length === 2);
+    if (!wethOk) {
+      const err = new Error(
+        `--collateral-token WETH is only supported for single-strike or 2-strike CALL ` +
+          `(got ${structureType}). Use USDC collateral, or rebuild as a CALL structure.`
+      );
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
   }
 
   const deadlineMinutes = local.deadlineMinutes !== undefined && local.deadlineMinutes !== ''
@@ -258,6 +567,61 @@ async function buildFromFlags(
     : undefined;
   if (reservePrice !== undefined && (!Number.isFinite(reservePrice) || reservePrice < 0)) {
     throw new Error(`--reserve-price must be >= 0 (got "${local.reservePrice}")`);
+  }
+
+  // Resolve contract count from EITHER --contracts (direct) OR --collateral-amount
+  // (derived from USDC budget for buy, or collateral deposit for sell). Mutex.
+  const rawContracts = local.contracts !== undefined && local.contracts !== ''
+    ? local.contracts
+    : undefined;
+  const rawCollateralAmount = local.collateralAmount !== undefined && local.collateralAmount !== ''
+    ? local.collateralAmount
+    : undefined;
+  if (rawContracts !== undefined && rawCollateralAmount !== undefined) {
+    const err = new Error(
+      '--contracts and --collateral-amount are mutually exclusive. Pass exactly one ' +
+        '(--collateral-amount derives --contracts from your spend budget).'
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+  if (rawContracts === undefined && rawCollateralAmount === undefined) {
+    throw new Error(
+      'Must pass either --contracts (direct contract count) or --collateral-amount (USDC spend; CLI derives contracts).'
+    );
+  }
+  let contractsNum: number;
+  // Mutated when BUY+--collateral-amount triggered an MM fetch and we picked
+  // up a fresh per-contract reservePrice from the live ask. Stamped into the
+  // build inputs below so the SDK builder receives it.
+  let effectiveReservePrice: number | undefined = reservePrice;
+  if (rawContracts !== undefined) {
+    contractsNum = Number.parseFloat(rawContracts);
+    if (!Number.isFinite(contractsNum) || contractsNum <= 0) {
+      throw new Error(`--contracts must be a positive number (got "${rawContracts}")`);
+    }
+  } else {
+    const budget = Number.parseFloat(rawCollateralAmount!);
+    if (!Number.isFinite(budget) || budget <= 0) {
+      throw new Error(`--collateral-amount must be a positive number (got "${rawCollateralAmount}")`);
+    }
+    const derived = await deriveContractsFromCollateral({
+      collateralAmount: budget,
+      direction: direction as 'buy' | 'sell',
+      structureType,
+      collateralToken,
+      strikes,
+      reservePrice,
+      client: result.client,
+      underlying: underlying as Underlying,
+      optionType: type as OptionType,
+      expiry,
+      isIronCondor,
+    });
+    contractsNum = derived.contracts;
+    if (derived.derivedReservePrice !== undefined) {
+      effectiveReservePrice = derived.derivedReservePrice;
+    }
   }
 
   const referralId = local.referralId !== undefined && local.referralId !== ''
@@ -283,7 +647,7 @@ async function buildFromFlags(
     requester,
     collateralToken,
     deadlineMinutes,
-    ...(reservePrice !== undefined ? { reservePrice } : {}),
+    ...(effectiveReservePrice !== undefined ? { reservePrice: effectiveReservePrice } : {}),
     ...(referralId !== undefined ? { referralId } : {}),
     isIronCondor,
     ...(requesterPublicKey !== undefined ? { requesterPublicKey } : {}),
@@ -339,7 +703,6 @@ function attachBuildFlags(cmd: Command, { allFlagsOptional = false }: { allFlags
   const requireUnderlying = allFlagsOptional ? cmd.option.bind(cmd) : cmd.requiredOption.bind(cmd);
   const requireType = allFlagsOptional ? cmd.option.bind(cmd) : cmd.requiredOption.bind(cmd);
   const requireExpiry = allFlagsOptional ? cmd.option.bind(cmd) : cmd.requiredOption.bind(cmd);
-  const requireContracts = allFlagsOptional ? cmd.option.bind(cmd) : cmd.requiredOption.bind(cmd);
   const requireDirection = allFlagsOptional ? cmd.option.bind(cmd) : cmd.requiredOption.bind(cmd);
 
   requireUnderlying('--underlying <asset>', 'ETH or BTC');
@@ -347,7 +710,13 @@ function attachBuildFlags(cmd: Command, { allFlagsOptional = false }: { allFlags
   cmd.option('--strike <n>', 'single strike (vanilla only)');
   cmd.option('--strikes <csv>', 'comma-separated strikes (2-4 values for spread/butterfly/condor)');
   requireExpiry('--expiry <ts>', 'unix expiry timestamp');
-  requireContracts('--contracts <n>', 'contract count (human-readable)');
+  // --contracts and --collateral-amount are mutex; runtime enforces "exactly one"
+  cmd.option('--contracts <n>', 'contract count (human-readable). Mutually exclusive with --collateral-amount.');
+  cmd.option(
+    '--collateral-amount <n>',
+    'USDC budget for BUY (requires --reserve-price as price ceiling) OR collateral deposit for SELL. ' +
+      'CLI derives --contracts automatically. Mutually exclusive with --contracts.'
+  );
   requireDirection('--direction <buy|sell>', 'buy = long position, sell = short position');
   return cmd
 
@@ -389,6 +758,7 @@ export function register(program: Command): void {
     );
 
   registerBuild(grp);
+  registerQuote(grp);
   registerViews(grp);
   registerRequest(grp);
   registerCancel(grp);
@@ -396,6 +766,122 @@ export function register(program: Command): void {
   registerAccept(grp);
   registerSettle(grp);
   registerStatus(grp);
+}
+
+// ----- rfq quote -----------------------------------------------------------
+//
+// Discovery surface for the dApp's "available expiries / strikes" picker. Hits
+// `client.mmPricing.getPricingArray(underlying)` (the same source the dApp's
+// useRfqPricing.ts:45 uses), optionally filters by type/expiry, and projects
+// the flat row shape a trader needs to pick strikes for a follow-up
+// `rfq build` / `rfq request`.
+//
+// Empty-result path (`getPricingArray` → []) prints an info line to stderr and
+// exits 0 — there's nothing wrong with the CLI, the MM just isn't quoting.
+
+function registerQuote(grp: Command): void {
+  grp
+    .command('quote')
+    .description(
+      'List live MM quotes for an underlying (ETH or BTC). VANILLA (single-strike) only — ' +
+        'the MM publishes a single-strike grid, not multi-leg structures. ' +
+        'For multi-leg pricing (spread, butterfly, condor, iron condor), use `pricing spread`, ' +
+        '`pricing butterfly`, or `pricing condor` with explicit --strikes. ' +
+        'Use these single-strike results to pick the legs for a multi-leg `rfq build`.'
+    )
+    .requiredOption('--underlying <asset>', 'ETH or BTC')
+    .option('--type <type>', 'filter to PUT or CALL only (vanilla only — see description above for multi-leg)')
+    .option('--expiry <ts>', 'filter to one expiry (unix seconds)')
+    .action(async (_local: unknown, cmd: Command) => {
+      const opts = getGlobalOpts(cmd);
+      const local = cmd.opts<{ underlying: string; type?: string; expiry?: string }>();
+      try {
+        const underlying = local.underlying.toUpperCase();
+        if (!['ETH', 'BTC'].includes(underlying)) {
+          throw new Error('--underlying must be ETH or BTC');
+        }
+        let typeFilter: 'PUT' | 'CALL' | undefined;
+        if (local.type !== undefined && local.type !== '') {
+          const t = local.type.toUpperCase();
+          if (t !== 'PUT' && t !== 'CALL' && t !== 'P' && t !== 'C') {
+            // Detect common multi-leg attempts so the error is actionable, not
+            // a dead-end. The MM doesn't publish multi-leg structures in a
+            // grid — they're constructed on-demand from vanilla strikes.
+            const isMultiLegAttempt = /SPREAD|FLY|CONDOR|IRON|BUTTERFLY/i.test(t);
+            if (isMultiLegAttempt) {
+              throw new Error(
+                `--type "${local.type}" is a multi-leg structure. \`rfq quote\` lists VANILLA strikes only ` +
+                  `(that's what the MM grid contains). For ${t.toLowerCase()} pricing, use the dedicated commands:\n` +
+                  `  thetanuts pricing spread    --underlying ${underlying} --strikes <s1,s2>          --expiry <ts> --type put\n` +
+                  `  thetanuts pricing butterfly --underlying ${underlying} --strikes <s1,s2,s3>       --expiry <ts> --type call\n` +
+                  `  thetanuts pricing condor    --underlying ${underlying} --strikes <s1,s2,s3,s4>   --expiry <ts> --type iron\n` +
+                  `Pick legs from \`rfq quote --underlying ${underlying} --type put\` (vanilla strikes), then build your structure.`
+              );
+            }
+            throw new Error('--type must be PUT or CALL (vanilla only). Use `pricing spread/butterfly/condor` for multi-leg.');
+          }
+          typeFilter = t === 'P' || t === 'PUT' ? 'PUT' : 'CALL';
+        }
+        let expiryFilter: number | undefined;
+        if (local.expiry !== undefined && local.expiry !== '') {
+          expiryFilter = parseUnsignedInt('--expiry', local.expiry);
+        }
+
+        const { client } = getClient(opts);
+        const pricing = await client.mmPricing.getPricingArray(underlying as 'ETH' | 'BTC');
+
+        let filtered = pricing;
+        if (typeFilter !== undefined) {
+          const wantCall = typeFilter === 'CALL';
+          filtered = filtered.filter((p) => p.isCall === wantCall);
+        }
+        if (expiryFilter !== undefined) {
+          filtered = filtered.filter((p) => p.expiry === expiryFilter);
+        }
+
+        if (filtered.length === 0) {
+          const noteParts: string[] = [`underlying=${underlying}`];
+          if (typeFilter) noteParts.push(`type=${typeFilter}`);
+          if (expiryFilter) noteParts.push(`expiry=${expiryFilter}`);
+          process.stderr.write(
+            `No live MM quotes for ${underlying} right now (filters: ${noteParts.join(', ')}). ` +
+              `Try without filters, or check again later — the MM bot may be idle.\n`
+          );
+          render([], { output: opts.output, noColor: !opts.color });
+          return;
+        }
+
+        // Already sorted by getPricingArray (filterExpired → sortByExpiryAndStrike).
+        // For JSON output, dump the full rows so scripts can pick whatever fields they want.
+        const wantJson = (opts.output ?? 'table') === 'json';
+        if (wantJson) {
+          render(filtered, { output: opts.output, noColor: !opts.color });
+          return;
+        }
+
+        // Table output: project to the columns the dApp's picker uses.
+        const rows = filtered.map((p) => ({
+          expiry: p.expiry,
+          date: new Date(p.expiry * 1000).toISOString().split('T')[0],
+          strike: p.strike,
+          type: p.isCall ? 'C' : 'P',
+          ticker: p.ticker,
+          bid: Number(p.feeAdjustedBid.toFixed(8)),
+          ask: Number(p.feeAdjustedAsk.toFixed(8)),
+          mark: Number(p.markPrice.toFixed(8)),
+          usdcAsk: p.byCollateral['USD']?.mmAskPriceBuffered !== undefined
+            ? Number(p.byCollateral['USD']!.mmAskPriceBuffered.toFixed(8))
+            : null,
+          wethAsk: p.byCollateral[underlying]?.mmAskPriceBuffered !== undefined
+            ? Number(p.byCollateral[underlying]!.mmAskPriceBuffered.toFixed(8))
+            : null,
+        }));
+        render(rows, { output: opts.output, noColor: !opts.color });
+      } catch (err) {
+        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
+        process.exit(1);
+      }
+    });
 }
 
 // ----- rfq build ------------------------------------------------------------
@@ -410,13 +896,32 @@ function registerBuild(grp: Command): void {
       )
   )
     .option('--out <path>', 'also save the build artifact to this JSON file')
+    .option(
+      '--scenarios',
+      'print a 5-row table of (spot at expiry, payout, net P&L) after the main output'
+    )
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
-      const local = cmd.opts() as Record<string, string | undefined>;
+      const localRaw = cmd.opts() as Record<string, string | boolean | undefined>;
+      // commander represents `--scenarios` as boolean; strip it before passing
+      // the rest to `buildFromFlags`, which only handles string flag values.
+      const scenarios = Boolean(localRaw.scenarios);
+      const { scenarios: _omit, ...localStrings } = localRaw as Record<string, unknown>;
+      const local = localStrings as Record<string, string | undefined>;
       try {
         const result = getClient(opts);
         const built = await buildFromFlags(result, local, opts);
         const encoded = result.client.optionFactory.encodeRequestForQuotation(built.rfqRequest);
+
+        const payoutArgs = {
+          structureType: built.structureType,
+          collateralToken: built.inputs.collateralToken,
+          strikes: built.inputs.strikes,
+          direction: built.inputs.direction,
+          contracts: built.inputs.contracts,
+          ...(built.inputs.reservePrice !== undefined ? { reservePrice: built.inputs.reservePrice } : {}),
+        };
+        const payout = computePayoutSummary(payoutArgs);
 
         const payload = {
           rfq: {
@@ -436,6 +941,7 @@ function registerBuild(grp: Command): void {
             referralId: built.inputs.referralId?.toString() ?? '0',
             isIronCondor: built.inputs.isIronCondor,
           },
+          payout,
           ...serializeRfqRequest(built.rfqRequest),
           transaction: {
             to: encoded.to,
@@ -450,7 +956,27 @@ function registerBuild(grp: Command): void {
           process.stderr.write(`Build artifact written to ${dest}\n`);
         }
 
-        render(payload, { output: opts.output, noColor: !opts.color });
+        // `payload` mixes flat rfq summary fields with deeply nested sub-objects
+        // (`payout`, `params`, `tracking`, `transaction.data` calldata blob).
+        // Rendering as a 2-col table crams 2KB+ of JSON into single cells; the
+        // result wraps off-screen and is unreadable. Default to pretty JSON
+        // when the user didn't explicitly pick a format — mirrors the
+        // auto-switch in `market stats`. Explicit `-o table` still works for
+        // anyone who really wants the legacy view.
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(payload, {
+          output: explicitOutput ? opts.output : 'json',
+          noColor: !opts.color,
+        });
+
+        // Optional follow-up: per-spot scenarios table. Opt-in via --scenarios;
+        // rendered as a separate array so table mode actually formats it as a
+        // 4-column table (the main payload renders as JSON by default).
+        if (scenarios) {
+          const rows = computeScenarios(payoutArgs);
+          process.stdout.write('\nScenarios at expiry:\n');
+          render(rows, { output: 'table', noColor: !opts.color });
+        }
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         const exit = (err as { exitCode?: number }).exitCode ?? 1;
@@ -473,7 +999,14 @@ function registerViews(grp: Command): void {
         const { client } = getClient(opts);
         const id = parseBigIntStrict('--id', local.id);
         const quotation = await client.optionFactory.getQuotation(id);
-        render(quotation, { output: opts.output, noColor: !opts.color });
+        // `getQuotation` returns nested params (strikes[], tracking{}, state)
+        // — same readability problem as `rfq build`. Auto-switch to JSON when
+        // the user didn't pick a format explicitly.
+        const explicitOutput = process.argv.includes('-o') || process.argv.includes('--output');
+        render(quotation, {
+          output: explicitOutput ? opts.output : 'json',
+          noColor: !opts.color,
+        });
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         process.exit(1);
@@ -583,6 +1116,54 @@ async function loadOrBuildRequest(
   return { request: built.rfqRequest, fromFile: false, structureType: built.structureType, ticker: built.ticker };
 }
 
+/**
+ * Parse the on-chain quotationId from a `requestForQuotation` receipt.
+ *
+ * Strategy (most reliable → fallback):
+ *   1. Look for `CollateralDeposited(uint256 indexed quotationId, address, uint256)`
+ *      via ABI parse. Always emitted for BUY (the requester's reservePrice
+ *      escrow). The SDK's OPTION_FACTORY_ABI includes this event.
+ *   2. Fall back to the first OptionFactory log with ≥2 topics — topic[1] of
+ *      the QuotationRequested event is the quotationId. The on-chain event's
+ *      topic[0] hash currently differs from the ABI definition (likely a
+ *      stale ABI on the SDK side), so we can't ABI-parse it directly.
+ *
+ * Returns undefined if neither pattern matches. Caller treats as soft miss —
+ * the tx itself succeeded; user just won't see the convenience ID printed.
+ */
+function extractQuotationIdFromReceipt(
+  logs: ReadonlyArray<{ topics: readonly string[]; data: string; address: string }>,
+  factoryAddress: string
+): string | undefined {
+  const iface = new Interface(OPTION_FACTORY_ABI);
+  const factoryLower = factoryAddress.toLowerCase();
+
+  // Pass 1: ABI parse for CollateralDeposited (reliable when emitted).
+  for (const log of logs) {
+    try {
+      const parsed = iface.parseLog({ topics: [...log.topics], data: log.data });
+      if (parsed?.name === 'CollateralDeposited' && parsed.args?.quotationId !== undefined) {
+        return (parsed.args.quotationId as bigint).toString();
+      }
+    } catch {
+      // Not a recognized event — skip
+    }
+  }
+
+  // Pass 2: first OptionFactory log with ≥2 topics — topic[1] of
+  // QuotationRequested is the indexed quotationId.
+  for (const log of logs) {
+    if (log.address?.toLowerCase() !== factoryLower) continue;
+    if (log.topics.length < 2) continue;
+    try {
+      return BigInt(log.topics[1]!).toString();
+    } catch {
+      // Malformed topic — skip
+    }
+  }
+  return undefined;
+}
+
 async function ensureRequesterPublicKey(result: GetClientResult, req: RFQRequest): Promise<RFQRequest> {
   if (req.requesterPublicKey && req.requesterPublicKey.length > 0 && req.requesterPublicKey !== '0x') {
     return req;
@@ -626,29 +1207,35 @@ function checkOfferDeadlineFuture(req: RFQRequest): void {
 }
 
 /**
- * Soft allowance advisory for SHORT (sell) RFQs. At REQUEST time the
- * OptionFactory does not pull collateral, but the contract WILL draw it at
- * settle. We surface that on stderr now so a SHORT user knows to approve
- * before settle — without blocking the request itself
+ * Allowance check for both BUY and SHORT (sell) RFQs.
  *
- * If `--ensure-allowance` is passed, confirm
- * prompt for the approval, then `ensureAllowance(MaxUint256)` (or the user's
- * `--approve-amount`)
+ *   BUY  — OptionFactory escrows `reservePrice` at REQUEST time. If the
+ *          requester's allowance is below that, the contract reverts with a
+ *          cryptic ERC20 message. We hard-block here when --ensure-allowance
+ *          isn't passed, with a clear actionable error.
+ *   SHORT — OptionFactory pulls collateral at SETTLE (after maker fills).
+ *          The user has time to approve between request and settle, so this
+ *          path stays a soft stderr advisory and proceeds with the request.
+ *
+ * With `--ensure-allowance`, confirm prompt for the approval, then
+ * `ensureAllowance(MaxUint256)` (or the user's `--approve-amount`).
  */
 async function maybeEnsureCollateralAllowance(
   result: GetClientResult,
   req: RFQRequest,
   flags: { ensureAllowance?: boolean; approveAmount?: string; yes?: boolean; dryRun?: boolean }
 ): Promise<{ approveEncoded: { to: string; data: string } | null }> {
-  if (req.params.isRequestingLongPosition) {
-    return { approveEncoded: null };
-  }
   const { client } = result;
   const signerAddr = await client.getSignerAddress();
   const spender = client.optionFactory.contractAddress;
   const current = await client.erc20.getAllowance(req.params.collateral, signerAddr, spender);
 
-  // Compute target allowance amount
+  const isBuy = req.params.isRequestingLongPosition;
+  // BUY: contract escrows reservePrice at request. SHORT: nothing pulled now.
+  const minRequired = isBuy ? req.reservePrice : 0n;
+  const directionLabel = isBuy ? 'BUY' : 'SHORT';
+
+  // Compute target allowance amount (what we approve TO, if --ensure-allowance is set)
   let target: bigint;
   let isMax = false;
   if (flags.approveAmount === undefined || flags.approveAmount === 'max') {
@@ -657,6 +1244,12 @@ async function maybeEnsureCollateralAllowance(
   } else {
     const decimals = Number(await client.erc20.getDecimals(req.params.collateral));
     target = client.utils.toBigInt(flags.approveAmount, decimals);
+  }
+  if (target < minRequired) {
+    throw new Error(
+      `--approve-amount (${target.toString()}) is less than the contract's required ` +
+        `escrow at request time (${minRequired.toString()}). Increase --approve-amount or omit it (defaults to MaxUint256).`
+    );
   }
 
   if (flags.dryRun) {
@@ -667,7 +1260,6 @@ async function maybeEnsureCollateralAllowance(
 
   if (current >= target) {
     if (!flags.ensureAllowance) {
-      // No-op path, but a one-liner advisory so SHORT users know we checked
       process.stderr.write(
         `Allowance for ${req.params.collateral} → ${spender} is already ${current.toString()} (sufficient).\n`
       );
@@ -675,13 +1267,26 @@ async function maybeEnsureCollateralAllowance(
     return { approveEncoded: null };
   }
 
-  // Insufficient allowance.
+  // BUY: hard-block when the contract WILL revert (allowance < reservePrice).
+  if (isBuy && current < minRequired && !flags.ensureAllowance) {
+    const err = new Error(
+      `BUY RFQ: current allowance on ${req.params.collateral} → OptionFactory (${spender}) ` +
+        `is ${current.toString()}, but the contract will escrow ${minRequired.toString()} ` +
+        `(your reserve-price total) at request time. Either:\n` +
+        `  • Pass --ensure-allowance to approve in-flow (uses MaxUint256 by default), or\n` +
+        `  • Pre-approve manually: thetanuts wallet approve --token <SYM> --for optionFactory --amount 5`
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+
+  // SHORT (or BUY with reservePrice=0) and not --ensure-allowance: soft advisory.
   if (!flags.ensureAllowance) {
     process.stderr.write(
-      `⚠ SHORT RFQ: current allowance on ${req.params.collateral} → ${spender} is ${current.toString()}, ` +
+      `⚠ ${directionLabel} RFQ: current allowance on ${req.params.collateral} → ${spender} is ${current.toString()}, ` +
         'which may be insufficient when the contract draws collateral at settle.\n' +
         '  Pass --ensure-allowance to approve before submitting, or run\n' +
-        `  thetanuts wallet ensure-allowance --token <SYM> --spender ${spender} --amount max\n`
+        `  thetanuts wallet approve --token <SYM> --for optionFactory --amount <n>\n`
     );
     return { approveEncoded: null };
   }
@@ -752,9 +1357,11 @@ function registerRequest(grp: Command): void {
 
         if (opts.dryRun) {
           const encoded = result.client.optionFactory.encodeRequestForQuotation(requestWithPk);
+          // Truncate the hex calldata in table mode — see book fill --dry-run
+          // for the rationale. JSON consumers still receive the full payload.
           render(
             { dryRun: true, request: { to: encoded.to, data: encoded.data, value: '0' } },
-            { output: opts.output, noColor: !opts.color }
+            { output: opts.output, noColor: !opts.color, truncate: true }
           );
           return;
         }
@@ -766,14 +1373,25 @@ function registerRequest(grp: Command): void {
         if (!ok) process.exit(3);
 
         const receipt = await result.client.optionFactory.requestForQuotation(requestWithPk);
+        const quotationId = extractQuotationIdFromReceipt(
+          receipt.logs,
+          result.client.optionFactory.contractAddress
+        );
+        const ethUsd = await fetchEthUsdSafe(result.client.api);
         render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status === 1 ? 'success' : 'failed',
-            blockNumber: receipt.blockNumber,
-          },
+          buildTxReceiptPayload(
+            receipt,
+            ethUsd,
+            quotationId !== undefined ? { quotationId } : undefined
+          ),
           { output: opts.output, noColor: !opts.color }
         );
+        if (quotationId !== undefined) {
+          process.stderr.write(
+            `\nRFQ ${quotationId} submitted. Watch offers: thetanuts rfq offers --id ${quotationId}\n` +
+              `Cancel before deadline:           thetanuts rfq cancel --id ${quotationId}\n`
+          );
+        }
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         const exit = (err as { exitCode?: number }).exitCode ?? 1;
@@ -806,7 +1424,7 @@ function registerCancel(grp: Command): void {
           const encoded = result.client.optionFactory.encodeCancelQuotation(id);
           render(
             { dryRun: true, transaction: { to: encoded.to, data: encoded.data, value: '0' } },
-            { output: opts.output, noColor: !opts.color }
+            { output: opts.output, noColor: !opts.color, truncate: true }
           );
           return;
         }
@@ -818,12 +1436,9 @@ function registerCancel(grp: Command): void {
         if (!ok) process.exit(3);
 
         const receipt = await result.client.optionFactory.cancelQuotation(id);
+        const ethUsd = await fetchEthUsdSafe(result.client.api);
         render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status === 1 ? 'success' : 'failed',
-            blockNumber: receipt.blockNumber,
-          },
+          buildTxReceiptPayload(receipt, ethUsd),
           { output: opts.output, noColor: !opts.color }
         );
       } catch (err) {
@@ -860,6 +1475,10 @@ interface DecodedOfferRow {
   offerAmountHuman?: string;
   nonce?: string;
   error?: string;
+  /** New: status from indexer ('accepted' | 'rejected' | 'revealed' | 'pending' | 'encrypted'). Absent when sourced from logs only. */
+  status?: string;
+  /** New: source of the offerAmount value ('indexer' = revealedAmount field; 'decrypted' = local ECDH decrypt; 'logs' = legacy fallback). */
+  amountSource?: 'indexer' | 'decrypted' | 'logs';
 }
 
 async function readQuotationCollateralDecimals(
@@ -908,6 +1527,78 @@ async function queryOfferMadeRaw(
   return out;
 }
 
+/**
+ * Fetch offers from the indexer's RFQ detail endpoint instead of scanning
+ * eth_getLogs from genesis. The indexer already exposes:
+ *   - offeror, signingKey, signature, signedOfferForRequester (the ECDH blob)
+ *   - createdAt / createdTx / createdBlock
+ *   - status: 'accepted' | 'rejected' | 'revealed' | 'pending'
+ *   - revealedAmount: present for accepted/rejected/revealed offers (decrypted on-chain by the settle flow)
+ *
+ * For offers still in the unrevealed/pending state, we fall back to local
+ * ECDH decrypt via client.rfqKeys.decryptOffer using signedOfferForRequester
+ * — same path decodeOfferEvents() uses.
+ *
+ * Throws if the indexer call fails or the response is malformed; caller is
+ * responsible for falling back to the on-chain log scan.
+ */
+async function fetchOffersFromIndexer(
+  result: GetClientResult,
+  id: bigint
+): Promise<{ rows: DecodedOfferRow[]; collateral: string; decimals: number }> {
+  const { client } = result;
+  const rfq = await client.api.getRfq(id.toString());
+  const collateralAddress = rfq.collateral;
+  const decimals = Number(await client.erc20.getDecimals(collateralAddress));
+
+  const offers = rfq.offers ?? {};
+  const rows: DecodedOfferRow[] = [];
+  for (const offer of Object.values(offers)) {
+    const row: DecodedOfferRow = {
+      offeror: offer.offeror,
+      signingKey: offer.signingKey,
+      offerSignature: offer.signature,
+      blockNumber: offer.createdBlock,
+      transactionHash: offer.createdTx,
+      status: offer.status,
+    };
+    if (offer.revealedAmount !== undefined && offer.revealedAmount !== null && offer.revealedAmount !== '') {
+      // Indexer already has the on-chain reveal — no local decrypt needed.
+      try {
+        const amount = BigInt(offer.revealedAmount);
+        row.offerAmount = amount.toString();
+        row.offerAmountHuman = client.utils.fromBigInt(amount, decimals);
+        row.amountSource = 'indexer';
+      } catch (err) {
+        row.error = `bad revealedAmount: ${(err as Error).message ?? String(err)}`;
+      }
+    } else if (offer.signedOfferForRequester) {
+      // Unrevealed — attempt local ECDH decrypt with the requester's keystore.
+      try {
+        const decrypted = await client.rfqKeys.decryptOffer(
+          offer.signedOfferForRequester,
+          offer.signingKey
+        );
+        row.offerAmount = decrypted.offerAmount.toString();
+        row.offerAmountHuman = client.utils.fromBigInt(decrypted.offerAmount, decimals);
+        row.nonce = decrypted.nonce.toString();
+        row.amountSource = 'decrypted';
+        // Mark unrevealed offers that we could open locally as 'encrypted' if
+        // the indexer didn't already tag them (e.g. null/unknown status).
+        if (!row.status) row.status = 'encrypted';
+      } catch (err) {
+        row.error = (err as Error).message?.split('\n')[0] ?? 'decryption failed';
+      }
+    } else {
+      row.error = 'no revealedAmount and no encrypted blob';
+    }
+    rows.push(row);
+  }
+  // Sort by createdBlock asc (stable, matches the on-chain log order).
+  rows.sort((a, b) => a.blockNumber - b.blockNumber);
+  return { rows, collateral: collateralAddress, decimals };
+}
+
 async function decodeOfferEvents(
   result: GetClientResult,
   id: bigint,
@@ -946,8 +1637,10 @@ function registerOffers(grp: Command): void {
   grp
     .command('offers')
     .description(
-      'REQUESTER: list every offer submitted to an RFQ from the OfferMade log, ' +
-        'with decrypted amounts where the local keystore can open them. ' +
+      'REQUESTER: list every offer submitted to an RFQ. Reads from the indexer ' +
+        '(includes status + revealedAmount for accepted/rejected/revealed offers); ' +
+        'falls back to local ECDH decrypt for still-encrypted offers, and to an ' +
+        'on-chain OfferMade log scan if the indexer is unreachable. ' +
         'Marks undecryptable rows so you can spot key-mismatch / wrong-chain offers.'
     )
     .requiredOption('--id <quotationId>', 'quotation ID')
@@ -959,24 +1652,92 @@ function registerOffers(grp: Command): void {
         const { client } = result;
         const id = parseBigIntStrict('--id', local.id);
 
-        const hasKey = await client.rfqKeys.hasStoredKey();
-        if (!hasKey) {
-          const err = new Error(
-            `No RFQ keystore for chain ${result.chainId}. Run \`thetanuts keys generate\` first, ` +
-              'or restore from backup with `thetanuts keys import --in <file>`.'
+        let rows: DecodedOfferRow[] | undefined;
+
+        // ----- Primary path: indexer detail endpoint -----
+        // The indexer has revealedAmount for accepted/rejected/revealed
+        // offers, and the encrypted blob for unrevealed ones, so we can
+        // serve the full set without scanning eth_getLogs from genesis.
+        try {
+          const fromIndexer = await fetchOffersFromIndexer(result, id);
+          rows = fromIndexer.rows;
+
+          // If any unrevealed offer is present, we'll need the local keystore
+          // to decrypt it. fetchOffersFromIndexer attempts decryptOffer for
+          // those — surface a hint if it failed because no keystore exists.
+          const needsKey = rows.some((r) => !r.offerAmount && r.error && !r.amountSource);
+          if (needsKey) {
+            const hasKey = await client.rfqKeys.hasStoredKey();
+            if (!hasKey) {
+              process.stderr.write(
+                `Note: some offers are still encrypted and need your local RFQ keystore to decrypt. ` +
+                  `Run \`thetanuts keys ensure\` (or \`thetanuts keys import --in <file>\`) for chain ${result.chainId} to reveal them.\n`
+              );
+            }
+          }
+        } catch (indexerErr) {
+          const msg = (indexerErr as Error).message ?? String(indexerErr);
+          // Pass through clean not-found errors from the indexer directly.
+          if (/not found|404/i.test(msg)) {
+            const wrapped = new Error(
+              `RFQ ${id.toString()} not found at the indexer. Check the quotation ID and the chain (current: ${result.chainId}).`
+            );
+            (wrapped as Error & { exitCode?: number }).exitCode = 4;
+            throw wrapped;
+          }
+          // Otherwise log and fall back to the on-chain log scan below.
+          process.stderr.write(
+            `Indexer offers fetch failed (${msg.split('\n')[0]}); falling back to on-chain OfferMade log scan...\n`
           );
-          (err as Error & { exitCode?: number }).exitCode = 6;
-          throw err;
         }
 
-        const { decimals } = await readQuotationCollateralDecimals(result, id);
-        const rows = await decodeOfferEvents(result, id, decimals);
+        // ----- Fallback path: eth_getLogs OfferMade scan -----
+        if (!rows) {
+          const hasKey = await client.rfqKeys.hasStoredKey();
+          if (!hasKey) {
+            const err = new Error(
+              `Indexer fetch failed and no RFQ keystore for chain ${result.chainId} to decrypt log-sourced offers. ` +
+                `Run \`thetanuts keys ensure\` first, or restore from backup with \`thetanuts keys import --in <file>\`.`
+            );
+            (err as Error & { exitCode?: number }).exitCode = 6;
+            throw err;
+          }
+          const { decimals } = await readQuotationCollateralDecimals(result, id);
+          try {
+            rows = await decodeOfferEvents(result, id, decimals);
+            for (const r of rows) {
+              if (r.offerAmount && !r.amountSource) r.amountSource = 'logs';
+            }
+          } catch (logsErr) {
+            // Catch the common "eth_getLogs range too wide" failure from
+            // public RPC tier-1 limits. Re-emit with an actionable message
+            // rather than leaking ethers' coalesced error string.
+            const msg = (logsErr as Error).message ?? String(logsErr);
+            if (/eth_getLogs|getLogs|10,?000 range|block range|10000 block/i.test(msg)) {
+              const wrapped = new Error(
+                `Could not query OfferMade logs — indexer was unavailable and your RPC limits eth_getLogs block range.\n` +
+                  `Workarounds:\n` +
+                  `  • You can skip watching offers entirely. RFQs auto-settle when the deadline expires — anyone can call\n` +
+                  `      thetanuts rfq settle --id <ID>\n` +
+                  `    after offerEndTimestamp. If a maker quoted at or below your reserve-price, you'll get the option; otherwise your escrow is refunded.\n` +
+                  `  • Retry — the indexer may be transiently down.\n` +
+                  `  • Set THETANUTS_RPC_URL to a tier-1 provider (Alchemy / Infura / QuickNode / dRPC) and retry.\n` +
+                  `  • Pass --rpc-url <url> on the same command.\n` +
+                  `Original RPC error: ${msg.split('\n')[0]}`
+              );
+              (wrapped as Error & { exitCode?: number }).exitCode = 1;
+              throw wrapped;
+            }
+            throw logsErr;
+          }
+        }
+
         if (rows.length === 0) {
           render(
             { quotationId: id.toString(), offers: [] },
             { output: opts.output, noColor: !opts.color }
           );
-          process.stderr.write(`No OfferMade events found for quotation ${id.toString()} on chain ${result.chainId}.\n`);
+          process.stderr.write(`No offers found for quotation ${id.toString()} on chain ${result.chainId}.\n`);
           return;
         }
         render(rows, { output: opts.output, noColor: !opts.color });
@@ -995,8 +1756,10 @@ function registerAccept(grp: Command): void {
     .command('accept')
     .description(
       'REQUESTER: accept an offer (broadcasts settleQuotationEarly). ' +
-        'By default, decrypts the OfferMade event for --offeror to recover offerAmount + nonce. ' +
-        'Use --offer-amount + --nonce to skip the decrypt step.'
+        'By default, fetches the offer from the indexer for --offeror and decrypts ' +
+        'signedOfferForRequester locally to recover offerAmount + nonce ' +
+        '(falls back to an on-chain OfferMade log scan if the indexer is unreachable). ' +
+        'Use --offer-amount + --nonce to skip the decrypt step entirely.'
     )
     .requiredOption('--id <quotationId>', 'quotation ID')
     .requiredOption('--offeror <addr>', 'address of the offeror you want to accept')
@@ -1021,7 +1784,7 @@ function registerAccept(grp: Command): void {
 
         let offerAmount: bigint;
         let nonce: bigint;
-        let source: 'decrypted' | 'flags';
+        let source: 'decrypted' | 'flags' | 'decrypted-logs';
 
         if (local.offerAmount !== undefined && local.nonce !== undefined) {
           offerAmount = parseBigIntStrict('--offer-amount', local.offerAmount);
@@ -1032,27 +1795,93 @@ function registerAccept(grp: Command): void {
           if (!hasKey) {
             const err = new Error(
               `No RFQ keystore for chain ${result.chainId}. Either pass --offer-amount + --nonce, ` +
-                'or run `thetanuts keys generate` (will only work if you originally requested this RFQ with the current keystore).'
+                'or run `thetanuts keys ensure` (will only work if you originally requested this RFQ with the current keystore).'
             );
             (err as Error & { exitCode?: number }).exitCode = 6;
             throw err;
           }
 
-          const raws = await queryOfferMadeRaw(result, id);
-          const match = raws.find((r) => r.offeror.toLowerCase() === local.offeror.toLowerCase());
-          if (!match) {
-            const err = new Error(
-              `No OfferMade event found from offeror ${local.offeror} for quotation ${id.toString()}. ` +
-                'Run `thetanuts rfq offers --id <id>` to inspect available offers.'
-            );
-            (err as Error & { exitCode?: number }).exitCode = 4;
-            throw err;
+          // ----- Primary path: indexer RFQ detail endpoint -----
+          // Avoids eth_getLogs from genesis (public Base RPC caps the range at
+          // 10k blocks). Same shape as `rfq offers`: rfq.offers[offeror] has
+          // signedOfferForRequester + signingKey for local ECDH decrypt.
+          interface SettleSource {
+            signedOfferForRequester: string;
+            signingKey: string;
           }
+          let settleSource: SettleSource | undefined;
+          let usedFallback = false;
+
           try {
-            const decrypted = await client.rfqKeys.decryptOffer(match.signedOfferForRequester, match.signingKey);
+            const rfq = await client.api.getRfq(id.toString());
+            const offers = rfq.offers ?? {};
+            // Indexer keys offers by offeror address; try exact + case-insensitive match.
+            const target = local.offeror.toLowerCase();
+            const match = Object.values(offers).find(
+              (o) => o.offeror?.toLowerCase() === target
+            );
+            if (!match) {
+              const err = new Error(
+                `No offer from ${local.offeror} on RFQ ${id.toString()}. ` +
+                  'Run `thetanuts rfq offers --id <id>` to inspect available offers.'
+              );
+              (err as Error & { exitCode?: number }).exitCode = 4;
+              throw err;
+            }
+            if (!match.signedOfferForRequester || !match.signingKey) {
+              const err = new Error(
+                `Indexer record for offer from ${local.offeror} on RFQ ${id.toString()} is missing ` +
+                  'signedOfferForRequester / signingKey. Cannot decrypt — pass --offer-amount + --nonce manually.'
+              );
+              (err as Error & { exitCode?: number }).exitCode = 4;
+              throw err;
+            }
+            settleSource = {
+              signedOfferForRequester: match.signedOfferForRequester,
+              signingKey: match.signingKey,
+            };
+          } catch (indexerErr) {
+            // Don't fall back for our own structured exits (not-found, malformed).
+            const exitCode = (indexerErr as { exitCode?: number }).exitCode;
+            if (exitCode === 4) throw indexerErr;
+            const msg = (indexerErr as Error).message ?? String(indexerErr);
+            // Clean 404 from the indexer == RFQ doesn't exist there. Surface as exit 4.
+            if (/not found|404/i.test(msg)) {
+              const err = new Error(
+                `RFQ ${id.toString()} not found at the indexer. Check the quotation ID and the chain (current: ${result.chainId}).`
+              );
+              (err as Error & { exitCode?: number }).exitCode = 4;
+              throw err;
+            }
+            // Otherwise log and fall back to the on-chain OfferMade log scan.
+            process.stderr.write(
+              `Indexer offer fetch failed (${msg.split('\n')[0]}); falling back to on-chain OfferMade log scan...\n`
+            );
+            const raws = await queryOfferMadeRaw(result, id);
+            const match = raws.find((r) => r.offeror.toLowerCase() === local.offeror.toLowerCase());
+            if (!match) {
+              const err = new Error(
+                `No OfferMade event found from offeror ${local.offeror} for quotation ${id.toString()}. ` +
+                  'Run `thetanuts rfq offers --id <id>` to inspect available offers.'
+              );
+              (err as Error & { exitCode?: number }).exitCode = 4;
+              throw err;
+            }
+            settleSource = {
+              signedOfferForRequester: match.signedOfferForRequester,
+              signingKey: match.signingKey,
+            };
+            usedFallback = true;
+          }
+
+          try {
+            const decrypted = await client.rfqKeys.decryptOffer(
+              settleSource.signedOfferForRequester,
+              settleSource.signingKey
+            );
             offerAmount = decrypted.offerAmount;
             nonce = decrypted.nonce;
-            source = 'decrypted';
+            source = usedFallback ? 'decrypted-logs' : 'decrypted';
           } catch (err) {
             const e = new Error(
               `RFQ_KEY_MISMATCH: Decryption failed for offer from ${local.offeror}. ` +
@@ -1081,7 +1910,7 @@ function registerAccept(grp: Command): void {
           const encoded = client.optionFactory.encodeSettleQuotationEarly(id, offerAmount, nonce, local.offeror);
           render(
             { dryRun: true, transaction: { to: encoded.to, data: encoded.data, value: '0' } },
-            { output: opts.output, noColor: !opts.color }
+            { output: opts.output, noColor: !opts.color, truncate: true }
           );
           return;
         }
@@ -1093,12 +1922,9 @@ function registerAccept(grp: Command): void {
         if (!ok) process.exit(3);
 
         const receipt = await client.optionFactory.settleQuotationEarly(id, offerAmount, nonce, local.offeror);
+        const ethUsd = await fetchEthUsdSafe(client.api);
         render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status === 1 ? 'success' : 'failed',
-            blockNumber: receipt.blockNumber,
-          },
+          buildTxReceiptPayload(receipt, ethUsd),
           { output: opts.output, noColor: !opts.color }
         );
       } catch (err) {
@@ -1140,7 +1966,7 @@ function registerSettle(grp: Command): void {
           const encoded = result.client.optionFactory.encodeSettleQuotation(id);
           render(
             { dryRun: true, transaction: { to: encoded.to, data: encoded.data, value: '0' } },
-            { output: opts.output, noColor: !opts.color }
+            { output: opts.output, noColor: !opts.color, truncate: true }
           );
           return;
         }
@@ -1152,12 +1978,9 @@ function registerSettle(grp: Command): void {
         if (!ok) process.exit(3);
 
         const receipt = await result.client.optionFactory.settleQuotation(id);
+        const ethUsd = await fetchEthUsdSafe(result.client.api);
         render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status === 1 ? 'success' : 'failed',
-            blockNumber: receipt.blockNumber,
-          },
+          buildTxReceiptPayload(receipt, ethUsd),
           { output: opts.output, noColor: !opts.color }
         );
       } catch (err) {
