@@ -3,8 +3,14 @@ import { MaxUint256 } from 'ethers';
 import type { OrderWithSignature } from '@thetanuts-finance/thetanuts-client';
 import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner, type GetClientResult } from '../client.js';
-import { render, renderError } from '../output.js';
+import { render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
+import {
+  computePayoutSummary,
+  computeScenarios,
+  type StructureType,
+  type CollateralToken,
+} from '../payout.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — kept module-local; do not export
@@ -39,12 +45,50 @@ async function fetchOrdersOnce(
   return _ordersCache;
 }
 
+/**
+ * Force-refetch live orders, bypassing the cache. Used by `book fill` right
+ * before broadcast to close the staleness window between confirm prompt and
+ * tx submission — mirrors the dApp's 30s React Query refetch behaviour
+ * (see thetanuts-1840 audit, `useOrders.ts`).
+ */
+async function fetchOrdersFresh(
+  client: GetClientResult['client']
+): Promise<OrderWithSignature[]> {
+  const fresh = await client.api.fetchOrders();
+  _ordersCache = fresh;
+  return fresh;
+}
+
+/**
+ * Canonical EIP-712 identity for a signed order: (maker, nonce) is unique by
+ * construction — the maker signs each order with a monotonically distinct
+ * nonce, and the OptionBook contract uses it for replay protection. Indices
+ * are NOT stable (they shift as orders fill/cancel) so this is what we match
+ * on when re-resolving an order against a fresh book.
+ */
+function findOrderByIdentity(
+  orders: OrderWithSignature[],
+  ref: OrderWithSignature
+): OrderWithSignature | undefined {
+  const refMaker = ref.order.maker.toLowerCase();
+  const refNonce = ref.order.nonce;
+  return orders.find(
+    (o) => o.order.maker.toLowerCase() === refMaker && o.order.nonce === refNonce
+  );
+}
+
 function resolveOrderByIndex(
   orders: OrderWithSignature[],
   rawIndex: string | number | undefined
 ): OrderWithSignature {
   if (rawIndex === undefined || rawIndex === null || rawIndex === '') {
     throw new Error('--order-index is required');
+  }
+  if (typeof rawIndex === 'string' && rawIndex.startsWith('--')) {
+    throw new Error(
+      `Invalid --order-index: "${rawIndex}" looks like a flag, not a number. ` +
+        'Did the value resolve to empty (e.g. an unset shell variable like $INDEX)?'
+    );
   }
   const idx = typeof rawIndex === 'number' ? rawIndex : Number.parseInt(String(rawIndex), 10);
   if (Number.isNaN(idx) || idx < 0) {
@@ -60,34 +104,22 @@ function resolveOrderByIndex(
 
 /**
  * Compute the collateral amount (in raw token units) the user wants to spend
- * on a fill. Two flag paths:
+ * on a fill.
  *   --collateral <human>           e.g. 10 USDC -> 10 * 10^decimals
- *   --num-contracts <human> +      derive from order's pricePerContract
  *
- * Returns `undefined` when neither flag was passed; the SDK then fills max.
+ * Returns `undefined` when the flag wasn't passed; the SDK then fills max.
+ * Number-of-contracts is computed automatically by the SDK from this amount
+ * and the order's price-per-contract.
  */
 function computeCollateralAmount(
   order: OrderWithSignature,
   client: GetClientResult['client'],
-  flags: { collateral?: string; numContracts?: string }
+  flags: { collateral?: string }
 ): bigint | undefined {
   const hasCollateral = flags.collateral !== undefined && flags.collateral !== '';
-  const hasNumContracts = flags.numContracts !== undefined && flags.numContracts !== '';
-  if (hasCollateral && hasNumContracts) {
-    throw new Error(
-      '--collateral and --num-contracts are mutually exclusive. Pass exactly one'
-    );
-  }
   if (hasCollateral) {
     const decimals = collateralDecimalsFromOrder(order, client);
     return client.utils.toBigInt(flags.collateral!, decimals);
-  }
-  if (hasNumContracts) {
-    // numContracts is denominated in collateral decimals,
-    // pricePerContract is 8-decimal. premium = numContracts * price / 1e8
-    const decimals = collateralDecimalsFromOrder(order, client);
-    const numContractsRaw = client.utils.toBigInt(flags.numContracts!, decimals);
-    return (numContractsRaw * order.order.price) / 100000000n;
   }
   return undefined;
 }
@@ -122,6 +154,101 @@ function assertUsdcCollateral(
         `WETH and cbBTC fill support will roll out in a future release.`
     );
   }
+}
+
+/**
+ * Map (strikeCount, isCall) to a CLI structure label.
+ *
+ * Mirrors `getStructureType` in commands/rfq.ts but for the book side — books
+ * never mark a 4-strike order as iron-condor (the indexer doesn't expose that
+ * distinction on the order), so 4-strike CALL/PUT here falls back to the
+ * matching CONDOR variant. If a maker actually signed an iron-condor order
+ * we'll mis-label as CALL_CONDOR / PUT_CONDOR; payout math is identical at
+ * the SDK `calculateCollateralRequired` level for the dApp-supported cases,
+ * so payout fields stay sound — only the structureType label drifts.
+ *
+ * IRON_CONDOR detection: dApp-side orders for iron-condor would surface as
+ * `isCall=true` with 4 strikes (the SDK treats it as a CALL family for
+ * implementation lookup); we still default to CALL_CONDOR labelling. If the
+ * indexer ever adds a `structureKind` field this is the place to plumb it.
+ */
+function deriveStructureType(strikeCount: number, isCall: boolean): StructureType {
+  switch (strikeCount) {
+    case 1:
+      return isCall ? 'INVERSE_CALL' : 'PUT';
+    case 2:
+      return isCall ? 'CALL_SPREAD' : 'PUT_SPREAD';
+    case 3:
+      return isCall ? 'CALL_FLY' : 'PUT_FLY';
+    case 4:
+      return isCall ? 'CALL_CONDOR' : 'PUT_CONDOR';
+    default:
+      throw new Error(`Unsupported strike count from preview: ${strikeCount}`);
+  }
+}
+
+/**
+ * Map collateral token address → CollateralToken symbol the payout helper
+ * understands. Anything that isn't WETH falls back to 'USDC' (the only other
+ * collateral OptionBook fills currently support is USDC; book fills enforce
+ * USDC-only via `assertUsdcCollateral` anyway).
+ */
+function collateralTokenSymbol(
+  collateralAddress: string,
+  client: GetClientResult['client']
+): CollateralToken {
+  const addr = collateralAddress.toLowerCase();
+  const weth = client.chainConfig.tokens.WETH?.address.toLowerCase();
+  if (weth && addr === weth) return 'WETH';
+  return 'USDC';
+}
+
+/**
+ * Build the payout-helper arg bag from a fill preview + order. Book fills are
+ * always BUYS from the taker's perspective (taker pays premium, gains long
+ * intrinsic). `reservePrice` is the order's fixed `pricePerContract` — book
+ * orders are firm quotes, not ceilings, so we always pass it through.
+ *
+ * Returns null when the preview lacks the data we need (defensive — never
+ * crash a render path over payout enrichment).
+ */
+function buildPayoutArgsFromPreview(
+  preview: {
+    numContracts: bigint;
+    pricePerContract: bigint;
+    collateralToken: string;
+    strikes: bigint[];
+    isCall: boolean;
+  },
+  order: OrderWithSignature,
+  client: GetClientResult['client']
+): {
+  structureType: StructureType;
+  collateralToken: CollateralToken;
+  strikes: number[];
+  direction: 'buy';
+  contracts: number;
+  reservePrice: number;
+} | null {
+  if (preview.strikes.length === 0 || preview.numContracts === 0n) return null;
+  const collTokenSym = collateralTokenSymbol(preview.collateralToken, client);
+  const collDec = collateralDecimalsFromOrder(order, client);
+
+  // Strikes from the OptionBook ABI are 8-decimal scaled bigints.
+  const strikesHuman = preview.strikes.map((s) => Number(s) / 1e8);
+  // numContracts: 8-decimal scaled bigint per OdetteRawOrderData / SDK.
+  const contractsHuman = Number(preview.numContracts) / 1e8;
+  // pricePerContract is in collateral-token decimals (USDC = 6).
+  const reservePriceHuman = Number(preview.pricePerContract) / 10 ** collDec;
+
+  return {
+    structureType: deriveStructureType(preview.strikes.length, preview.isCall),
+    collateralToken: collTokenSym,
+    strikes: strikesHuman,
+    direction: 'buy',
+    contracts: contractsHuman,
+    reservePrice: reservePriceHuman,
+  };
 }
 
 function summarizeOrder(
@@ -525,18 +652,36 @@ function registerReads(grp: Command): void {
     .command('preview')
     .description('Preview a fill against an order without sending a transaction')
     .requiredOption('--order-index <n>', 'index into the live orders array')
-    .option('--collateral <n>', 'human-readable collateral amount to spend (e.g. 10 for 10 USDC)')
-    .option('--num-contracts <n>', 'human-readable number of contracts to fill')
+    .option('--collateral <n>', 'USDC amount to spend on premium (e.g. 1 for $1). Number of contracts is auto-derived from the order price. Omit to preview a max fill.')
+    .option(
+      '--scenarios',
+      'print a 5-row table of (spot at expiry, payout, net P&L) after the preview'
+    )
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string; collateral?: string; numContracts?: string }>();
+      const local = cmd.opts<{ orderIndex: string; collateral?: string; scenarios?: boolean }>();
       try {
         const { client } = getClient(opts);
         const orders = await fetchOrdersOnce(client);
         const order = resolveOrderByIndex(orders, local.orderIndex);
         const collateralAmount = computeCollateralAmount(order, client, local);
         const preview = client.optionBook.previewFillOrder(order, collateralAmount);
-        render(preview, renderOpts(opts));
+
+        // Enrich with the same payout block `rfq build` emits. Book fills are
+        // always BUY from the taker's perspective; the order's pricePerContract
+        // is a fixed firm quote so we always have a concrete totalPremium.
+        const payoutArgs = buildPayoutArgsFromPreview(preview, order, client);
+        const payload: Record<string, unknown> =
+          payoutArgs !== null
+            ? { ...preview, payout: computePayoutSummary(payoutArgs) }
+            : { ...preview };
+        render(payload, renderOpts(opts));
+
+        if (local.scenarios && payoutArgs !== null) {
+          const rows = computeScenarios(payoutArgs);
+          process.stdout.write('\nScenarios at expiry:\n');
+          render(rows, { output: 'table', noColor: !opts.color });
+        }
       } catch (err) {
         renderError(err, renderOpts(opts));
         process.exit(1);
@@ -572,19 +717,22 @@ function registerWrites(grp: Command): void {
     .command('fill')
     .description('Fill an order (preview → allowance check → confirm → send)')
     .requiredOption('--order-index <n>', 'index into the live orders array')
-    .option('--collateral <n>', 'human-readable collateral amount to spend')
-    .option('--num-contracts <n>', 'human-readable number of contracts to fill')
+    .option('--collateral <n>', 'USDC amount to spend on premium (e.g. 1 for $1). Number of contracts is auto-derived from the order price. Omit to fill the maximum available.')
     .option(
       '--approve-amount <max|n>',
       'approval amount when allowance is insufficient: "max" for unlimited (MaxUint256), or a decimal token amount. Defaults to exactly preview.totalCollateral.'
+    )
+    .option(
+      '--scenarios',
+      'on --dry-run, also print a 5-row (spot, payout, net P&L) table after the preview'
     )
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts<{
         orderIndex: string;
         collateral?: string;
-        numContracts?: string;
         approveAmount?: string;
+        scenarios?: boolean;
       }>();
       try {
         const res = getClient(opts);
@@ -596,9 +744,16 @@ function registerWrites(grp: Command): void {
         assertUsdcCollateral(order, client);
         const collateralAmount = computeCollateralAmount(order, client, local);
 
-        // 1+2+3: build preview, render it
+        // 1+2+3: build preview, render it. Enrich with the same payout block
+        // emitted by `book preview` (and `rfq build`) so dry-runs surface
+        // max-loss / max-gain alongside the calldata.
         const preview = client.optionBook.previewFillOrder(order, collateralAmount);
-        render(preview, renderOpts(opts));
+        const payoutArgs = buildPayoutArgsFromPreview(preview, order, client);
+        const previewWithPayout: Record<string, unknown> =
+          payoutArgs !== null
+            ? { ...preview, payout: computePayoutSummary(payoutArgs) }
+            : { ...preview };
+        render(previewWithPayout, renderOpts(opts));
 
         const collateralAddr = preview.collateralToken;
         const spender = client.optionBook.contractAddress;
@@ -639,14 +794,34 @@ function registerWrites(grp: Command): void {
               approveAmount
             );
           }
+          // In table mode the raw fill calldata (often 4 KB+) crushes the
+          // terminal; flag the renderer to truncate hex blobs. JSON/CSV/YAML
+          // output is untouched so machine consumers still receive the full
+          // payload. For the table path we substitute an explicit marker on
+          // null-approve so the user doesn't see a confusing empty cell;
+          // JSON consumers still get `approve: null` via the json branch.
+          const ro = renderOpts(opts);
+          const isTable = (ro.output ?? 'table') === 'table';
+          const approveCell = isTable && approveEncoded === null
+            ? '(none — allowance sufficient)'
+            : approveEncoded;
           render(
             {
               dryRun: true,
-              approve: approveEncoded,
+              approve: approveCell,
               fill: fillEncoded,
             },
-            renderOpts(opts)
+            { ...ro, truncate: true }
           );
+
+          // Optional follow-up: per-spot scenarios table. Opt-in via
+          // --scenarios; same shape as `rfq build --scenarios`. Renders only
+          // when we successfully derived payout args (otherwise silent).
+          if (local.scenarios && payoutArgs !== null) {
+            const rows = computeScenarios(payoutArgs);
+            process.stdout.write('\nScenarios at expiry:\n');
+            render(rows, { output: 'table', noColor: !opts.color });
+          }
           process.exit(0);
         }
 
@@ -686,16 +861,56 @@ function registerWrites(grp: Command): void {
         });
         if (!ok) process.exit(3);
 
-        // 7+8: send + render receipt
-        const receipt = await client.optionBook.fillOrder(order, collateralAmount);
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
+        // Refetch the live book RIGHT before broadcast to close the staleness
+        // window: the user may have paused on the confirm prompt, during which
+        // someone else could have filled/cancelled the order. Match by the
+        // canonical (maker, nonce) identity — indices shift, so we cannot
+        // re-use the original --order-index here. This safety check runs even
+        // under --yes; only --dry-run skips it (handled above).
+        const freshOrders = await fetchOrdersFresh(client);
+        const freshOrder = findOrderByIdentity(freshOrders, order);
+        if (!freshOrder) {
+          process.stderr.write(
+            'Order no longer in the live book — fully filled or cancelled. Aborting.\n'
+          );
+          process.exit(1);
+        }
+        // Recompute the preview against the fresh order. The signed order is
+        // immutable, so numContracts/totalCollateral should match exactly when
+        // `availableAmount` is still sufficient; any drift is a defensive
+        // signal (e.g. partial fill) and we abort rather than risk a revert.
+        const freshPreview = client.optionBook.previewFillOrder(
+          freshOrder,
+          collateralAmount
         );
+        if (freshOrder.availableAmount < freshPreview.numContracts) {
+          process.stderr.write(
+            `Order has been partially filled since preview. ` +
+              `Available: ${freshOrder.availableAmount.toString()}, ` +
+              `requested: ${freshPreview.numContracts.toString()}. ` +
+              `Aborting — re-run \`book fill\` to pick a fresh order.\n`
+          );
+          process.exit(1);
+        }
+        if (
+          freshPreview.numContracts !== preview.numContracts ||
+          freshPreview.totalCollateral !== preview.totalCollateral
+        ) {
+          process.stderr.write(
+            `Fresh preview drifted from original: ` +
+              `numContracts ${preview.numContracts.toString()} -> ${freshPreview.numContracts.toString()}, ` +
+              `totalCollateral ${preview.totalCollateral.toString()} -> ${freshPreview.totalCollateral.toString()}. ` +
+              `Aborting — re-run \`book fill\` to confirm the new terms.\n`
+          );
+          process.exit(1);
+        }
+
+        // 7+8: send + render receipt — broadcast against the FRESH order.
+        const receipt = await client.optionBook.fillOrder(freshOrder, collateralAmount);
+        // Best-effort spot fetch for USD-equivalent gas cost. Never blocks
+        // success rendering — `fetchEthUsdSafe` swallows API failures.
+        const ethUsd = await fetchEthUsdSafe(client.api);
+        render(buildTxReceiptPayload(receipt, ethUsd), renderOpts(opts));
       } catch (err) {
         renderError(err, renderOpts(opts));
         process.exit(1);
