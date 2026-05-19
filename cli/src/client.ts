@@ -48,10 +48,34 @@ function resolveChainId(opts: OptionValues, cfg: Config | null): number {
 
 function resolveRpcUrl(opts: OptionValues, cfg: Config | null, _chainId: number): string {
   const fromFlag = opts.rpcUrl as string | undefined;
-  if (fromFlag) return fromFlag;
-  const fromEnv = process.env.THETANUTS_RPC_URL;
-  if (fromEnv) return fromEnv;
-  return cfg?.rpcUrl ?? DEFAULT_RPC_URL;
+  let rpcUrl: string;
+  if (fromFlag) {
+    rpcUrl = fromFlag;
+  } else {
+    const fromEnv = process.env.THETANUTS_RPC_URL;
+    if (fromEnv) {
+      rpcUrl = fromEnv;
+    } else {
+      rpcUrl = cfg?.rpcUrl ?? DEFAULT_RPC_URL;
+    }
+  }
+  // Reject non-https RPC URLs unless the host is localhost. Signed tx
+  // broadcasts over plain http are vulnerable to MITM tampering of gas /
+  // nonce / data. Localhost is the only sane dev escape hatch.
+  let parsed: URL;
+  try {
+    parsed = new URL(rpcUrl);
+  } catch {
+    throw new Error(`thetanuts: RPC URL is not a valid URL (got ${rpcUrl})`);
+  }
+  const host = parsed.hostname;
+  const isLocal = host === 'localhost' || host === '127.0.0.1';
+  if (parsed.protocol !== 'https:' && !isLocal) {
+    throw new Error(
+      `thetanuts: RPC URL must use https:// (got ${rpcUrl}); pass an https URL or use a localhost RPC for dev`
+    );
+  }
+  return rpcUrl;
 }
 
 // Defined inline (not imported) to avoid pulling a command module into client bootstrap

@@ -305,6 +305,16 @@ export function register(program: Command): void {
     .action(async (_localOpts: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts<{ force?: boolean; revealKey?: boolean }>();
+      // Refuse --yes + --reveal-key: --yes blanket-consents the most dangerous
+      // render in the CLI (key + mnemonic to stdout). The reveal prompt is
+      // intentionally gated by a TTY confirm so the user has one last chance
+      // to back out before secrets land in scrollback or pipe targets.
+      if (local.revealKey && opts.yes) {
+        process.stderr.write(
+          '`--reveal-key` cannot be combined with `--yes`; the reveal prompt is intentionally gated by a TTY confirm to prevent accidental key disclosure in scrollback or pipe targets.\n'
+        );
+        process.exit(2);
+      }
       try {
         const path = (opts.config as string | undefined) ?? defaultConfigPath();
         const existing = loadConfig(path);

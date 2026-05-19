@@ -321,20 +321,43 @@ export function buildTxReceiptPayload(
 }
 
 /**
+ * Strip secrets that ethers and other transitively-thrown errors routinely
+ * embed in their `.message`. We redact:
+ *   - `Bearer <token>` Authorization values (any caller hand-formatting an
+ *     HTTP header into a thrown error).
+ *   - Alchemy/Infura-style `/v<N>/<API_KEY>` path segments where the key is
+ *     20+ chars of safe URL chars — the standard shape for hosted RPCs.
+ *   - `apiKey=<KEY>` query params (16+ chars) — generic key-in-querystring
+ *     pattern used by several JSON-RPC providers.
+ * Intentionally narrow: we don't try to redact every possible secret, just
+ * the ones we know reliably leak into ethers' error surface.
+ */
+function redactSecrets(s: string): string {
+  return s
+    .replace(/Bearer\s+[A-Za-z0-9_\-\.=]+/g, 'Bearer <redacted>')
+    .replace(/\/v[0-9]+\/[A-Za-z0-9_\-]{20,}/g, (m) => {
+      const v = m.split('/')[1];
+      return `/${v}/<redacted>`;
+    })
+    .replace(/apiKey=[A-Za-z0-9_\-]{16,}/g, 'apiKey=<redacted>');
+}
+
+/**
  * Print an error to stderr. When `jsonErrors` is set, emits a single-line
  * JSON object so scripts can parse failure modes.
  */
 export function renderError(err: unknown, opts: RenderErrorOptions = {}): void {
   const e = err as { message?: string; code?: string; stack?: string } | null;
+  const rawMsg = e?.message ?? String(err);
+  const msg = redactSecrets(rawMsg);
   if (opts.jsonErrors) {
     const payload = {
-      error: e?.message ?? String(err),
+      error: msg,
       code: e?.code,
     };
     process.stderr.write(JSON.stringify(payload, jsonReplacer) + '\n');
     return;
   }
-  const msg = e?.message ?? String(err);
   const useColor = !opts.noColor && process.stderr.isTTY;
   const prefix = useColor ? pc.red('Error:') : 'Error:';
   process.stderr.write(`${prefix} ${msg}\n`);

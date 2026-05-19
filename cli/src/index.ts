@@ -30,12 +30,12 @@ registerCommands(program);
 
 program.parseAsync(process.argv).catch((err) => {
   // Try to use the structured error renderer if we can detect --json-errors,
-  // otherwise dump the stack to stderr.
+  // otherwise print just the message — never the stack
   const jsonErrors = process.argv.includes('--json-errors');
   try {
     renderError(err, { jsonErrors });
   } catch {
-    process.stderr.write(String((err as Error)?.stack || err) + '\n');
+    process.stderr.write(((err as Error)?.message ?? String(err)) + '\n');
   }
   process.exit(1);
 });
