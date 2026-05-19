@@ -796,11 +796,11 @@ function registerCheck(grp: Command): void {
             partialSize = totalAvailable;
             recommendation = 'orderbook';
             reason = `Found ${totalAvailable.toFixed(4)} contracts at strike $${params.strike} (you requested ${params.size}). Partial fill available via orderbook, or use RFQ for full amount.`;
-            nextStep = `Preview fill: thetanuts book preview --order-index ${exactMatches[0].index} --collateral <amount>`;
+            nextStep = `Preview fill: thetanuts book preview --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --collateral <amount>`;
           } else {
             recommendation = 'orderbook';
             reason = `Found orderbook liquidity at strike $${params.strike}. Best ${params.direction === 'buy' ? 'ask' : 'bid'} price: $${bestPrice?.toFixed(2)}. Available: ${totalAvailable.toFixed(4)} contracts. This will execute instantly.`;
-            nextStep = `Preview fill: thetanuts book preview --order-index ${exactMatches[0].index} --collateral <amount>`;
+            nextStep = `Preview fill: thetanuts book preview --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --collateral <amount>`;
           }
         } else if (nearbyStrikes.length > 0) {
           recommendation = 'rfq';

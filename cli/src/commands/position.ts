@@ -1495,6 +1495,22 @@ function registerWrites(grp: Command): void {
         requireSigner(res);
         const { client } = res;
 
+        // Pre-check expiry before reading TWAP — pre-expiry the contract reverts
+        // with "TWAP calculation failed", which surfaces as a wall of ethers
+        // calldata in the error output. Catch the common case up front with a
+        // clean message that tells the user when payout becomes available.
+        const expiry = await client.option.getExpiry(local.address);
+        const nowSec = BigInt(Math.floor(Date.now() / 1000));
+        if (expiry > nowSec) {
+          const expiryIso = new Date(Number(expiry) * 1000).toISOString();
+          const err = new Error(
+            `Option ${local.address} has not expired yet. Payout is settled from the post-expiry TWAP, ` +
+              `which becomes available after ${expiry} (${expiryIso}). Re-run after expiry to claim.`
+          );
+          (err as Error & { exitCode?: number }).exitCode = 4;
+          throw err;
+        }
+
         // Preview the simulated payout at TWAP so the user sees what they'll claim.
         const [twap, strikes, numContracts] = await Promise.all([
           client.option.getTWAP(local.address),
