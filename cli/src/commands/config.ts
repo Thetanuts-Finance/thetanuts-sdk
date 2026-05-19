@@ -156,7 +156,7 @@ export function register(program: Command): void {
         //   - `-`        → read the key from stdin (pipe / heredoc / here-string)
         //   - anything else → hard refusal
         // The plain-argv path was the same footgun TODO §8 cited when it
-        // chose to ship import-only over BIP-39 wallet generation in v0.1.
+        // chose to ship import-only over BIP-39 wallet generation in v0.1.0.
         let effectiveValue = value;
         if (key === 'privateKey') {
           if (value !== '-') {

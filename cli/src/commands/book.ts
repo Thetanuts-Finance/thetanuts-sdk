@@ -11,6 +11,14 @@ import {
   type StructureType,
   type CollateralToken,
 } from '../payout.js';
+import {
+  formatTicker,
+  formatStrikeUsd,
+  formatUsd,
+  formatExpiry,
+  tokenSymbolByAddress,
+  underlyingSymbolByPriceFeed,
+} from '../format.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — kept module-local; do not export
@@ -268,6 +276,261 @@ function summarizeOrder(
     collateral: order.rawApiData?.collateral,
     orderExpiryTimestamp: order.rawApiData?.orderExpiryTimestamp,
   };
+}
+
+/**
+ * Table-mode rendering of an order: replaces raw on-chain decimals with
+ * humanized columns. JSON output continues to call `summarizeOrder` so
+ * scripted consumers see the same byte-stable raw values as before.
+ *
+ * Columns: index | maker | ticker | strike | premium | expiry | available
+ * Plus a derived collateralSymbol when we can resolve it.
+ */
+function summarizeOrderHuman(
+  order: OrderWithSignature,
+  client: GetClientResult['client'],
+  index?: number
+): Record<string, unknown> {
+  const rawStrikes = order.rawApiData?.strikes ?? [];
+  const strikesUsd = rawStrikes.map((s) => Number(s) / 1e8);
+  const isCall = order.rawApiData?.isCall ?? true;
+  const type: 'PUT' | 'CALL' = isCall ? 'CALL' : 'PUT';
+  const expiry = Number(order.order.expiry);
+  const underlyingSym =
+    underlyingSymbolByPriceFeed(order.rawApiData?.priceFeed, client.chainConfig.priceFeeds) ??
+    'UNKNOWN';
+  // pricePerContract is in 8 decimals on the order, but for USDC fills the
+  // SDK surfaces it as a USDC-decimal quantity (6 dec) when consumed via
+  // `previewFillOrder`. For the `book orders` list we humanize against USDC
+  // (6 dec) to match what the user actually pays per contract. Multiply by
+  // 1 if the maker fills in raw USDC; here we follow the user spec verbatim.
+  const premiumHuman = Number(order.order.price) / 1e6;
+  const availableHuman = Number(order.availableAmount) / 1e6;
+  const collSym =
+    tokenSymbolByAddress(order.rawApiData?.collateral, client.chainConfig.tokens) ?? 'UNKNOWN';
+
+  return {
+    ...(index !== undefined ? { index } : {}),
+    maker: order.order.maker,
+    ticker: formatTicker(underlyingSym, expiry, strikesUsd, type),
+    strike: formatStrikeUsd(strikesUsd),
+    premium: formatUsd(premiumHuman),
+    expiry: formatExpiry(expiry),
+    available: formatUsd(availableHuman),
+    collateralSymbol: collSym,
+  };
+}
+
+/**
+ * Humanized header for `book preview`: rebuilds the SDK preview shape with
+ * dollar-formatted strings and a derived ticker. Used only in table mode;
+ * JSON output preserves the raw SDK preview object.
+ */
+function humanizePreview(
+  preview: {
+    numContracts: bigint;
+    maxContracts: bigint;
+    collateralToken: string;
+    pricePerContract: bigint;
+    totalCollateral: bigint;
+    referrer: string;
+    maker: string;
+    expiry: bigint;
+    isCall: boolean;
+    strikes: bigint[];
+  },
+  order: OrderWithSignature,
+  client: GetClientResult['client']
+): Record<string, unknown> {
+  const strikesUsd = preview.strikes.map((s) => Number(s) / 1e8);
+  const type: 'PUT' | 'CALL' = preview.isCall ? 'CALL' : 'PUT';
+  const expiry = Number(preview.expiry);
+  const underlyingSym =
+    underlyingSymbolByPriceFeed(order.rawApiData?.priceFeed, client.chainConfig.priceFeeds) ??
+    'UNKNOWN';
+  const collDec = collateralDecimalsFromOrder(order, client);
+  const collSym =
+    tokenSymbolByAddress(preview.collateralToken, client.chainConfig.tokens) ?? 'UNKNOWN';
+  // numContracts / maxContracts are 8-dec scaled per the existing payout
+  // helper convention in this file (see buildPayoutArgsFromPreview).
+  const numContractsHuman = Number(preview.numContracts) / 1e8;
+  const maxContractsHuman = Number(preview.maxContracts) / 1e8;
+  const pricePerContractHuman = Number(preview.pricePerContract) / 10 ** collDec;
+  const totalCollateralHuman = Number(preview.totalCollateral) / 10 ** collDec;
+
+  return {
+    ticker: formatTicker(underlyingSym, expiry, strikesUsd, type),
+    maker: preview.maker,
+    referrer: preview.referrer,
+    collateralToken: preview.collateralToken,
+    collateralSymbol: collSym,
+    numContracts: numContractsHuman.toString(),
+    maxContracts: maxContractsHuman.toString(),
+    strikes: formatStrikeUsd(strikesUsd),
+    pricePerContract: formatUsd(pricePerContractHuman, 4),
+    totalCollateral: formatUsd(totalCollateralHuman),
+    expiry: formatExpiry(expiry),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Selector helper — Fix 3: pick an order by (underlying, type, strike(s),
+// expiry) instead of a volatile index. The legacy --order-index path still
+// works as an escape hatch (with a stderr deprecation hint).
+// ---------------------------------------------------------------------------
+
+interface SelectorFlags {
+  orderIndex?: string;
+  underlying?: string;
+  type?: string;
+  strike?: string;
+  strikes?: string;
+  expiry?: string;
+  strict?: boolean;
+}
+
+/**
+ * Resolve an order from either --order-index OR the
+ * (--underlying/--type/--strike(s)/--expiry) selector group. Exactly one path
+ * must be specified.
+ *
+ * Exit codes:
+ *   - 2 when no selector args at all (or both paths supplied)
+ *   - 4 when zero live orders match the selector
+ *
+ * For multi-match, picks the cheapest pricePerContract (book fills always
+ * BUY per CLAUDE.md). `--strict` turns multi-match into a hard error instead.
+ */
+function resolveOrderBySelector(
+  orders: OrderWithSignature[],
+  client: GetClientResult['client'],
+  flags: SelectorFlags
+): OrderWithSignature {
+  const hasIndex = flags.orderIndex !== undefined && flags.orderIndex !== '';
+  const hasSelectorBits =
+    (flags.underlying !== undefined && flags.underlying !== '') ||
+    (flags.type !== undefined && flags.type !== '') ||
+    (flags.strike !== undefined && flags.strike !== '') ||
+    (flags.strikes !== undefined && flags.strikes !== '') ||
+    (flags.expiry !== undefined && flags.expiry !== '');
+
+  if (!hasIndex && !hasSelectorBits) {
+    const err = new Error(
+      'Pick an order: pass either --order-index <n>, or the selector group ' +
+        '(--underlying <ETH|BTC> --type <PUT|CALL> --strike <usd> --expiry <unix-seconds>). ' +
+        'The selector group is preferred — --order-index is volatile across calls.'
+    );
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+  if (hasIndex && hasSelectorBits) {
+    const err = new Error(
+      '--order-index is mutually exclusive with --underlying/--type/--strike(s)/--expiry. Pick one path.'
+    );
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+
+  if (hasIndex) {
+    process.stderr.write(
+      'Note: --order-index is volatile across calls. Prefer --underlying/--type/--strike/--expiry for stable selection.\n'
+    );
+    return resolveOrderByIndex(orders, flags.orderIndex);
+  }
+
+  // Selector path — validate.
+  const missing: string[] = [];
+  if (!flags.underlying) missing.push('--underlying');
+  if (!flags.type) missing.push('--type');
+  if (!flags.strike && !flags.strikes) missing.push('--strike (or --strikes)');
+  if (!flags.expiry) missing.push('--expiry');
+  if (missing.length > 0) {
+    const err = new Error(
+      `Selector path is incomplete — missing: ${missing.join(', ')}. ` +
+        'Pass all of --underlying, --type, --strike (or --strikes), --expiry.'
+    );
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+
+  const underlying = flags.underlying!.toUpperCase();
+  const type = flags.type!.toUpperCase();
+  if (type !== 'PUT' && type !== 'CALL') {
+    const err = new Error(`Invalid --type "${flags.type}". Expected PUT or CALL.`);
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+  const wantStrikesUsd: number[] = flags.strikes
+    ? flags.strikes.split(',').map((s) => Number.parseFloat(s.trim()))
+    : [Number.parseFloat(flags.strike!)];
+  if (wantStrikesUsd.some((n) => Number.isNaN(n) || n <= 0)) {
+    const err = new Error(
+      `Invalid strikes: ${flags.strikes ?? flags.strike}. Expected positive USD numbers.`
+    );
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+  const wantStrikesRaw = wantStrikesUsd.map((s) => BigInt(Math.round(s * 1e8)));
+  const wantExpiry = Number.parseInt(flags.expiry!, 10);
+  if (Number.isNaN(wantExpiry) || wantExpiry <= 0) {
+    const err = new Error(`Invalid --expiry "${flags.expiry}". Expected unix seconds.`);
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+
+  // Resolve underlying -> price feed for matching.
+  const wantPriceFeed = client.chainConfig.priceFeeds[underlying]?.toLowerCase();
+  if (!wantPriceFeed) {
+    const known = Object.keys(client.chainConfig.priceFeeds).join(', ');
+    const err = new Error(`Unknown --underlying "${flags.underlying}". Known: ${known}.`);
+    (err as { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+
+  const matches = orders.filter((o) => {
+    const raw = o.rawApiData;
+    if (!raw) return false;
+    const orderType: 'PUT' | 'CALL' = raw.isCall ? 'CALL' : 'PUT';
+    if (orderType !== type) return false;
+    if (raw.priceFeed?.toLowerCase() !== wantPriceFeed) return false;
+    if (Number(o.order.expiry) !== wantExpiry) return false;
+    const orderStrikes = raw.strikes ?? [];
+    if (orderStrikes.length !== wantStrikesRaw.length) return false;
+    for (let i = 0; i < orderStrikes.length; i++) {
+      if (BigInt(orderStrikes[i]!) !== wantStrikesRaw[i]) return false;
+    }
+    return true;
+  });
+
+  if (matches.length === 0) {
+    const strikeLabel = wantStrikesUsd.join('/');
+    const err = new Error(
+      `No live order matches underlying=${underlying} type=${type} strike=${strikeLabel} expiry=${wantExpiry}. ` +
+        `Run 'thetanuts book orders --underlying ${underlying} --type ${type}' to see what's listed.`
+    );
+    (err as { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+
+  if (matches.length === 1) {
+    return matches[0]!;
+  }
+
+  // Multi-match. --strict: hard error. Default: cheapest BUY (lowest price).
+  if (flags.strict) {
+    const err = new Error(
+      `${matches.length} live orders match the selector. Pass --order-index to disambiguate, or drop --strict.`
+    );
+    (err as { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+  const chosen = matches.reduce((best, curr) =>
+    curr.order.price < best.order.price ? curr : best
+  );
+  process.stderr.write(
+    `Selected order from maker ${chosen.order.maker} (cheapest of ${matches.length} matching).\n`
+  );
+  return chosen;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,8 +903,15 @@ function registerReads(grp: Command): void {
           return true;
         });
 
-        const rows = filtered.map((o, i) => summarizeOrder(o, i));
-        render(rows, renderOpts(opts));
+        // Table mode gets humanized columns (ticker, $-formatted strike/
+        // premium/available, ISO expiry). JSON/CSV/YAML stay byte-stable with
+        // the raw on-chain decimals scripts depend on.
+        const ro = renderOpts(opts);
+        const isTable = (ro.output ?? 'table') === 'table';
+        const rows = isTable
+          ? filtered.map((o, i) => summarizeOrderHuman(o, client, i))
+          : filtered.map((o, i) => summarizeOrder(o, i));
+        render(rows, ro);
       } catch (err) {
         renderError(err, renderOpts(opts));
         process.exit(1);
@@ -651,7 +921,13 @@ function registerReads(grp: Command): void {
   grp
     .command('preview')
     .description('Preview a fill against an order without sending a transaction')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
+    .option('--order-index <n>', 'index into the live orders array (legacy — prefer the selector flags below)')
+    .option('--underlying <asset>', 'ETH or BTC (use with --type/--strike/--expiry instead of --order-index)')
+    .option('--type <type>', 'PUT or CALL (use with --underlying/--strike/--expiry)')
+    .option('--strike <usd>', 'single strike in USD (vanilla)')
+    .option('--strikes <csv>', 'comma-separated strikes in USD (multi-leg)')
+    .option('--expiry <ts>', 'unix expiry seconds')
+    .option('--strict', 'when multiple orders match the selector, error instead of picking the cheapest')
     .option('--collateral <n>', 'USDC amount to spend on premium (e.g. 1 for $1). Number of contracts is auto-derived from the order price. Omit to preview a max fill.')
     .option(
       '--scenarios',
@@ -659,11 +935,21 @@ function registerReads(grp: Command): void {
     )
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string; collateral?: string; scenarios?: boolean }>();
+      const local = cmd.opts<{
+        orderIndex?: string;
+        underlying?: string;
+        type?: string;
+        strike?: string;
+        strikes?: string;
+        expiry?: string;
+        strict?: boolean;
+        collateral?: string;
+        scenarios?: boolean;
+      }>();
       try {
         const { client } = getClient(opts);
         const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
+        const order = resolveOrderBySelector(orders, client, local);
         const collateralAmount = computeCollateralAmount(order, client, local);
         const preview = client.optionBook.previewFillOrder(order, collateralAmount);
 
@@ -671,11 +957,16 @@ function registerReads(grp: Command): void {
         // always BUY from the taker's perspective; the order's pricePerContract
         // is a fixed firm quote so we always have a concrete totalPremium.
         const payoutArgs = buildPayoutArgsFromPreview(preview, order, client);
+        const ro = renderOpts(opts);
+        const isTable = (ro.output ?? 'table') === 'table';
+        const headerPayload: Record<string, unknown> = isTable
+          ? humanizePreview(preview, order, client)
+          : { ...preview };
         const payload: Record<string, unknown> =
           payoutArgs !== null
-            ? { ...preview, payout: computePayoutSummary(payoutArgs) }
-            : { ...preview };
-        render(payload, renderOpts(opts));
+            ? { ...headerPayload, payout: computePayoutSummary(payoutArgs) }
+            : headerPayload;
+        render(payload, ro);
 
         if (local.scenarios && payoutArgs !== null) {
           const rows = computeScenarios(payoutArgs);
@@ -684,26 +975,42 @@ function registerReads(grp: Command): void {
         }
       } catch (err) {
         renderError(err, renderOpts(opts));
-        process.exit(1);
+        const exit = (err as { exitCode?: number }).exitCode ?? 1;
+        process.exit(exit);
       }
     });
 
   grp
     .command('max-contracts')
     .description('Compute the maximum fillable contracts for an order')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
+    .option('--order-index <n>', 'index into the live orders array (legacy)')
+    .option('--underlying <asset>', 'ETH or BTC')
+    .option('--type <type>', 'PUT or CALL')
+    .option('--strike <usd>', 'single strike in USD')
+    .option('--strikes <csv>', 'comma-separated strikes in USD')
+    .option('--expiry <ts>', 'unix expiry seconds')
+    .option('--strict', 'when multiple orders match, error instead of picking the cheapest')
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
-      const local = cmd.opts<{ orderIndex: string }>();
+      const local = cmd.opts<{
+        orderIndex?: string;
+        underlying?: string;
+        type?: string;
+        strike?: string;
+        strikes?: string;
+        expiry?: string;
+        strict?: boolean;
+      }>();
       try {
         const { client } = getClient(opts);
         const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
+        const order = resolveOrderBySelector(orders, client, local);
         const maxContracts = client.optionBook.calculateMaxContracts(order);
         render({ maxContracts: maxContracts.toString() }, renderOpts(opts));
       } catch (err) {
         renderError(err, renderOpts(opts));
-        process.exit(1);
+        const exit = (err as { exitCode?: number }).exitCode ?? 1;
+        process.exit(exit);
       }
     });
 }
@@ -716,7 +1023,13 @@ function registerWrites(grp: Command): void {
   grp
     .command('fill')
     .description('Fill an order (preview → allowance check → confirm → send)')
-    .requiredOption('--order-index <n>', 'index into the live orders array')
+    .option('--order-index <n>', 'index into the live orders array (legacy — prefer the selector flags below)')
+    .option('--underlying <asset>', 'ETH or BTC (use with --type/--strike/--expiry instead of --order-index)')
+    .option('--type <type>', 'PUT or CALL')
+    .option('--strike <usd>', 'single strike in USD (vanilla)')
+    .option('--strikes <csv>', 'comma-separated strikes in USD (multi-leg)')
+    .option('--expiry <ts>', 'unix expiry seconds')
+    .option('--strict', 'when multiple orders match the selector, error instead of picking the cheapest')
     .option('--collateral <n>', 'USDC amount to spend on premium (e.g. 1 for $1). Number of contracts is auto-derived from the order price. Omit to fill the maximum available.')
     .option(
       '--approve-amount <max|n>',
@@ -729,7 +1042,13 @@ function registerWrites(grp: Command): void {
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts<{
-        orderIndex: string;
+        orderIndex?: string;
+        underlying?: string;
+        type?: string;
+        strike?: string;
+        strikes?: string;
+        expiry?: string;
+        strict?: boolean;
         collateral?: string;
         approveAmount?: string;
         scenarios?: boolean;
@@ -740,7 +1059,7 @@ function registerWrites(grp: Command): void {
         const { client } = res;
 
         const orders = await fetchOrdersOnce(client);
-        const order = resolveOrderByIndex(orders, local.orderIndex);
+        const order = resolveOrderBySelector(orders, client, local);
         assertUsdcCollateral(order, client);
         const collateralAmount = computeCollateralAmount(order, client, local);
 
@@ -749,11 +1068,16 @@ function registerWrites(grp: Command): void {
         // max-loss / max-gain alongside the calldata.
         const preview = client.optionBook.previewFillOrder(order, collateralAmount);
         const payoutArgs = buildPayoutArgsFromPreview(preview, order, client);
+        const ro = renderOpts(opts);
+        const isTable = (ro.output ?? 'table') === 'table';
+        const previewHeader: Record<string, unknown> = isTable
+          ? humanizePreview(preview, order, client)
+          : { ...preview };
         const previewWithPayout: Record<string, unknown> =
           payoutArgs !== null
-            ? { ...preview, payout: computePayoutSummary(payoutArgs) }
-            : { ...preview };
-        render(previewWithPayout, renderOpts(opts));
+            ? { ...previewHeader, payout: computePayoutSummary(payoutArgs) }
+            : previewHeader;
+        render(previewWithPayout, ro);
 
         const collateralAddr = preview.collateralToken;
         const spender = client.optionBook.contractAddress;
@@ -913,7 +1237,8 @@ function registerWrites(grp: Command): void {
         render(buildTxReceiptPayload(receipt, ethUsd), renderOpts(opts));
       } catch (err) {
         renderError(err, renderOpts(opts));
-        process.exit(1);
+        const exit = (err as { exitCode?: number }).exitCode ?? 1;
+        process.exit(exit);
       }
     });
 }

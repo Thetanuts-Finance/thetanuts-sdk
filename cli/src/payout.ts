@@ -45,7 +45,7 @@ function toProductName(
   structureType: StructureType,
   collateralToken: CollateralToken
 ): ProductName {
-  // 'CALL' is the v0.1 CLI label for single-strike call with USDC collateral
+  // 'CALL' is the v0.1.0 CLI label for single-strike call with USDC collateral
   // (book.ts no longer routes through 'INVERSE_CALL' for the USDC-only book
   // surface). It always maps to LINEAR_CALL on the SDK side.
   if (structureType === 'CALL') {
