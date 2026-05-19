@@ -2137,7 +2137,7 @@ interface RfqOptionPositionShape {
   [k: string]: unknown;
 }
 
-function normalizeRfqOptionPosition(raw: RfqOptionPositionShape): NormalizedPosition {
+function normalizeRfqOptionPosition(raw: RfqOptionPositionShape, accountAddress?: string): NormalizedPosition {
   const strikes = (raw.strikes ?? []).map((s) => {
     const n = toNumberLoose(s);
     return n !== null ? n / 1e8 : 0;
@@ -2152,8 +2152,22 @@ function normalizeRfqOptionPosition(raw: RfqOptionPositionShape): NormalizedPosi
   const ticker = underlying && expiry > 0 && type !== 'UNKNOWN'
     ? formatTicker(underlying, expiry, strikes, type)
     : 'UNKNOWN';
-  // RFQ id from /factory carries -buyer/-seller suffix; match position.ts behavior.
-  const side = raw.buyer ? 'BUYER' : raw.seller ? 'SELLER' : 'UNKNOWN';
+  // The RFQ-side indexer response carries both `buyer` and `seller` address
+  // fields on the same record. Determining whether the queried user is on the
+  // BUYER or SELLER side requires comparing against accountAddress — checking
+  // for field presence alone always picked BUYER. Mirrors position.ts:355-365.
+  const buyer = String(raw.buyer ?? '').toLowerCase();
+  const seller = String(raw.seller ?? '').toLowerCase();
+  const wanted = (accountAddress ?? '').toLowerCase();
+  const side: string = wanted && buyer === wanted
+    ? 'BUYER'
+    : wanted && seller === wanted
+      ? 'SELLER'
+      : raw.buyer
+        ? 'BUYER'
+        : raw.seller
+          ? 'SELLER'
+          : 'UNKNOWN';
   return {
     id: raw.address,
     optionAddress: raw.address,
@@ -2243,7 +2257,7 @@ function registerStatus(grp: Command): void {
           normalizeIndexerPosition(r as IndexerPositionShape)
         );
         const rfqNormalized = (Array.isArray(rfqRaws) ? rfqRaws : []).map((r) =>
-          normalizeRfqOptionPosition(r as RfqOptionPositionShape)
+          normalizeRfqOptionPosition(r as RfqOptionPositionShape, address)
         );
         const merged = [...bookNormalized, ...rfqNormalized].filter((p) => p.ticker !== 'UNKNOWN');
         const match = merged.find((p) => p.ticker.toUpperCase() === targetTicker);
