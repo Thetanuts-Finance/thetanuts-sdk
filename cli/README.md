@@ -4,7 +4,7 @@ TypeScript CLI for [Thetanuts Finance V4](https://thetanuts.finance) options on 
 
 > **Warning:** This is early, experimental software. Use at your own risk and do not use with large amounts of funds. APIs, commands, and behavior may change without notice. Always run `--dry-run` first, start with a dedicated wallet (not your main funds wallet), and verify transactions before confirming.
 
-> **v0.1 — USDC collateral only.** All trading (book fills, RFQ requests) is denominated in USDC. WETH and cbBTC collateral are planned for a future release.
+> **v0.1.0 — USDC collateral only.** All trading (book fills, RFQ requests) is denominated in USDC. WETH and cbBTC collateral are planned for a future release.
 
 ## Install
 
@@ -138,7 +138,7 @@ thetanuts -o json market data
 
 Piping works cleanly — EPIPE is handled, so `thetanuts ... | head` exits silently with status 0. Errors emit on stderr by default; pass `--json-errors` for a structured JSON error on stderr. Either way the exit code is non-zero.
 
-> **v0.1 display note.** A few list endpoints (`book orders`, `book preview` header, indexer raw fields) emit on-chain values in their **raw token decimals** in table mode — e.g. a strike of `$2100` appears as `210000000000` (8-decimal Chainlink scale) and a USDC premium as `177432100` (6-decimal USDC). Humanized values are always available under `-o json` (the `payout` sub-block is already humanized in table mode too). End-to-end humanization of every list endpoint is on the v0.1.1 polish list.
+> **v0.1.0 display note.** `book orders` and `book preview` now render humanized columns (ticker, $-formatted strike/premium/available, ISO expiry) in table mode. JSON output stays byte-stable with the raw on-chain decimals scripts depend on. A few other indexer-backed list endpoints still surface raw decimals in table mode; end-to-end humanization is on the v0.1.1 polish list.
 
 ### Exit codes
 
@@ -261,19 +261,20 @@ thetanuts wallet approve --token USDC --for optionBook --amount 0.5
 thetanuts book orders --underlying ETH --type PUT
 ```
 
-In table mode, v0.1 emits the order fields **as the indexer returns them** — raw token decimals, no ticker column. Divide `strikes` and `pricePerContract` by `10^8` for USD; divide `availableAmount` by `10^6` for USDC; `expiry` is a Unix timestamp.
+In table mode, v0.1.0 renders humanized columns — a derived `ticker`, $-formatted `strike` / `premium` / `available`, ISO-stamped `expiry`, and `collateralSymbol`. Under `-o json` the raw on-chain decimals are preserved (8-decimal strikes / prices, 6-decimal USDC amounts) so scripts stay byte-stable.
 
 ```
-┌───────┬────────────────────────────────────────────┬────────┬────────┬──────────────┬──────────────────┬────────────┬─────────────────┬────────────────────────────────────────────┬──────────────────────┐
-│ index │ maker                                      │ isCall │ isLong │ strikes      │ pricePerContract │ expiry     │ availableAmount │ collateral                                 │ orderExpiryTimestamp │
-├───────┼────────────────────────────────────────────┼────────┼────────┼──────────────┼──────────────────┼────────────┼─────────────────┼────────────────────────────────────────────┼──────────────────────┤
-│ 0     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ false  │ false  │ 210000000000 │ 177432100        │ 1779177600 │ 10000000000     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 1779160920           │
-│ 1     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ false  │ false  │ 212500000000 │ 681784895        │ 1779177600 │ 10000000000     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 1779160920           │
-│ 2     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ false  │ false  │ 202500000000 │ 241469222        │ 1779264000 │ 10000000000     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 1779160920           │
-└───────┴────────────────────────────────────────────┴────────┴────────┴──────────────┴──────────────────┴────────────┴─────────────────┴────────────────────────────────────────────┴──────────────────────┘
+┌───────┬────────────────────────────────────────────┬─────────────────────┬────────┬──────────┬────────────────────────────────┬───────────┬──────────────────┐
+│ index │ maker                                      │ ticker              │ strike │ premium  │ expiry                         │ available │ collateralSymbol │
+├───────┼────────────────────────────────────────────┼─────────────────────┼────────┼──────────┼────────────────────────────────┼───────────┼──────────────────┤
+│ 0     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-19MAY26-2100-P  │ $2,100 │ $149.37  │ 1779177600 (2026-05-19T08:00Z) │ $10,000   │ USDC             │
+│ 1     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-19MAY26-2125-P  │ $2,125 │ $493.84  │ 1779177600 (2026-05-19T08:00Z) │ $10,000   │ USDC             │
+│ 2     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20MAY26-2025-P  │ $2,025 │ $214.86  │ 1779264000 (2026-05-20T08:00Z) │ $10,000   │ USDC             │
+│ 3     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20MAY26-2050-P  │ $2,050 │ $366.89  │ 1779264000 (2026-05-20T08:00Z) │ $10,000   │ USDC             │
+└───────┴────────────────────────────────────────────┴─────────────────────┴────────┴──────────┴────────────────────────────────┴───────────┴──────────────────┘
 ```
 
-Reading row 0: `isCall: false` → PUT, `strikes: 210000000000` → $2100 strike, `pricePerContract: 177432100` → ~$1.77 per contract (the SDK normalizes premium-per-contract relative to the strike denominator — `book preview` will tell you the actual USDC cost), `expiry: 1779177600` → 2026-05-19T08:00:00Z.
+Reading row 0: a PUT struck at `$2,100` with a per-contract premium of `$149.37`, expiring `2026-05-19T08:00Z`, with `$10,000` USDC of maker collateral available. The `premium` column is the per-contract USDC cost the SDK normalizes relative to the strike denominator — `book preview` will show the total USDC cost for the size you want.
 
 For machine-friendly output, use `-o json` and `jq`:
 
@@ -281,14 +282,14 @@ For machine-friendly output, use `-o json` and `jq`:
 thetanuts -o json book orders --underlying ETH --type PUT | jq '.[] | {index, strike: (.strikes[0] | tonumber / 1e8), expiry, pricePerContract}'
 ```
 
-> **Polishing this output for human eyes (ticker column, humanized strikes/prices) is on the v0.1.1 list.**
+> Need to disambiguate at fill time? Use `--underlying ETH --type PUT --strike 2100 --expiry <ts>` instead of `--order-index <n>`. The selector group is stable across calls; `--order-index` is not.
 
 ### Step 5 — Preview the fill
 
-In v0.1 the `book preview` table includes a nested `payout` JSON blob — it's easier to read in JSON mode. Pass `--scenarios` to also render a payoff table at expiry (humanized USD values):
+Use the stable selector flags (`--underlying / --type / --strike / --expiry`) instead of `--order-index` — the live book reshuffles between commands and indices move. The `book preview` table renders humanized top-level fields (ticker, $-formatted strikes/premium/totalCollateral); the nested `payout` block is easier to read in JSON mode. Pass `--scenarios` for the payoff table at expiry:
 
 ```bash
-thetanuts -o json book preview --order-index 0 --collateral 0.01 --scenarios
+thetanuts -o json book preview --underlying ETH --type PUT --strike 2075 --expiry 1779177600 --collateral 0.01 --scenarios
 ```
 
 ```json
@@ -331,14 +332,14 @@ Followed by the scenarios table:
 
 Reading the payout: 0.01 USDC buys 0.00011516 contracts of a $2075 PUT at $86.83 per contract; max loss is the $0.01 premium if ETH stays above $2075 at expiry; max gain is $0.229 if ETH crashes to zero.
 
-> **Order-index quirk to know.** `--order-index N` resolves to whatever order is at index N **at the moment of broadcast**. The order book moves quickly — fresh fills shift indices. If absolute identity matters for scripting, capture `maker` + `availableAmount` from `book orders -o json` and re-resolve manually, or pin to a less-volatile order in the list.
+> **Why the selector flags?** `--order-index N` resolves to whatever order sits at N **at the moment of broadcast**. The book reshuffles when fresh fills land — between your `--dry-run` and the actual broadcast, index 0 can become a different option entirely. The selector flags (`--underlying / --type / --strike / --expiry`) are stable across calls; when multiple orders match, the CLI picks the cheapest for BUY (pass `--strict` to error instead).
 
 ### Step 6 — Dry-run the fill
 
 Always run `--dry-run` first to see the actual calldata.
 
 ```bash
-thetanuts book fill --order-index 0 --collateral 0.01 --dry-run
+thetanuts book fill --underlying ETH --type PUT --strike 2075 --expiry 1779177600 --collateral 0.01 --dry-run
 ```
 
 The command prints the same preview table from Step 5, then a dry-run block:
@@ -358,7 +359,7 @@ If the wallet doesn't have enough allowance, the `approve` cell shows the approv
 ### Step 7 — Broadcast the real fill
 
 ```bash
-thetanuts book fill --order-index 0 --collateral 0.01
+thetanuts book fill --underlying ETH --type PUT --strike 2075 --expiry 1779177600 --collateral 0.01
 # Interactive prompt: Confirm fill? (y/N)
 # Or non-interactively: add --yes
 ```
@@ -379,7 +380,7 @@ After confirmation, the CLI prints the same preview table once more (for the aud
 └──────────────┴────────────────────────────────────────────────────────────────────┘
 ```
 
-The CLI re-fetches the order book between the confirm prompt and broadcast. The fill resolves to whatever order sits at `--order-index N` at broadcast time — if the live book has shifted (a fresher order took index 0, the original moved or was filled), you'll fill the **current** order at that index, not the one shown in the preview. Always inspect the second preview that prints after confirmation; abort with Ctrl-C if anything material has changed.
+With the selector flags (`--underlying / --type / --strike / --expiry`), the fill resolves by structure identity — the CLI re-fetches the live book at broadcast time and matches the same `(underlying, type, strike, expiry)` combination, picking the cheapest match if multiple makers are quoting it. Stable across calls. (The legacy `--order-index N` path still works but resolves to whatever order sits at index `N` *at broadcast time*; the book reshuffles when fresh fills land, so you may end up filling a different option than your dry-run quoted.)
 
 ### Step 8 — Inspect your new position
 
@@ -479,7 +480,7 @@ thetanuts rfq quote --underlying ETH --type put
 └────────────┴────────────┴────────┴──────┴─────────────────────┴───────────┴───────────┴──────────┴────────────┴────────────┘
 ```
 
-`bid` / `ask` / `mark` are MM-quoted prices per unit of underlying. `usdcAsk` is the implied USDC premium per contract (what you'd pay if you BUY this strike). `wethAsk` is the parallel WETH-collateral price — informational only for v0.1 since the CLI is USDC-only.
+`bid` / `ask` / `mark` are MM-quoted prices per unit of underlying. `usdcAsk` is the implied USDC premium per contract (what you'd pay if you BUY this strike). `wethAsk` is the parallel WETH-collateral price — informational only for v0.1.0 since the CLI is USDC-only.
 
 > The CLI enforces this grid. If a (strike, expiry) is not listed, `rfq build` and `rfq request` refuse it with exit 4 and point you back at `rfq quote`.
 
@@ -518,104 +519,140 @@ The CLI auto-fetches the MM's live ask price (here $44.80) and derives `contract
 ### Step 5 — Submit on-chain (dry-run first)
 
 ```bash
-thetanuts rfq request --underlying ETH --type PUT --strike 2000 \
-  --expiry 1779177600 --collateral-amount 0.5 --direction buy --dry-run
+thetanuts rfq request --underlying ETH --type PUT --strike 2050 \
+  --expiry 1779177600 --collateral-amount 0.005 --direction buy --dry-run
 ```
 
-```
-preview: requestForQuotation (BUY PUT ETH-29MAY26-2000-P)
-  contracts:         0.01116
-  reservePrice:      0.5 USDC (escrowed at submission)
-  deadline:          45 seconds from submission
-  requesterPubKey:   0x02f1a4...b9d2 (from keystore)
+The dry-run shows the full request body and the encoded transaction calldata:
 
-allowance check: OK (10.0 USDC ≥ 0.5 USDC)
-calldata:        0x4a8b1c2d…00000045 (1024 chars)
+```
+┌──────────────────────────┬──────────────────────────────────────────────────────────────────────┐
+│ key                      │ value                                                                │
+├──────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+│ action                   │ requestForQuotation                                                  │
+│ ticker                   │ ETH-19MAY26-2050-P                                                   │
+│ structureType            │ PUT                                                                  │
+│ strikes                  │ ["205000000000"]                                                     │
+│ numContracts             │ 8915                                                                 │
+│ reservePrice             │ 5000                                                                 │
+│ expiryTimestamp          │ 1779177600                                                           │
+│ offerEndTimestamp        │ 1779163303                                                           │
+│ isRequestingLongPosition │ true                                                                 │
+│ requesterPublicKey       │ 0x0307a613c6224e7aa34874960d13e4f1589ee26005afdca7d123b8df39e544c29c │
+└──────────────────────────┴──────────────────────────────────────────────────────────────────────┘
+┌─────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ key     │ value                                                                                                     │
+├─────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ dryRun  │ true                                                                                                      │
+│ request │ {"to":"0x8118daD971dEbffB49B9280047659174128A8B94","data":"0xb5da63e3…00000000 (1674 chars)","value":"0"} │
+└─────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Submit for real:
+Drop `--dry-run` to broadcast:
 
 ```bash
-thetanuts rfq request --underlying ETH --type PUT --strike 2000 \
-  --expiry 1779177600 --collateral-amount 0.5 --direction buy
+thetanuts rfq request --underlying ETH --type PUT --strike 2050 \
+  --expiry 1779177600 --collateral-amount 0.005 --direction buy --yes
 ```
 
 ```
-? Submit RFQ (BUY PUT ETH-29MAY26-2000-P, reserve 0.5 USDC, 45s deadline)? Yes
-✓ broadcast
-  tx: 0x1234...abcd
-  quotationId: 42
-  gasUsed: 198432  gasPriceGwei: 0.05  feeEth: 0.0000099  feeUsd: $0.021
+┌──────────────┬────────────────────────────────────────────────────────────────────┐
+│ key          │ value                                                              │
+├──────────────┼────────────────────────────────────────────────────────────────────┤
+│ txHash       │ 0xbd81e834369110267409e3740d731cb5a89c104d62ac94d835ccac875d7bcfc4 │
+│ status       │ success                                                            │
+│ blockNumber  │ 46186965                                                           │
+│ gasUsed      │ 438900                                                             │
+│ gasPriceGwei │ 0.006                                                              │
+│ feeEth       │ 0.000003                                                           │
+│ feeUsd       │ $0.0056                                                            │
+│ quotationId  │ 25                                                                 │
+└──────────────┴────────────────────────────────────────────────────────────────────┘
+
+RFQ 25 submitted. Watch offers: thetanuts rfq offers --id 25
+Cancel before deadline:           thetanuts rfq cancel --id 25
+Tip: you usually don't need to call rfq accept or rfq offers — the protocol
+auto-settles after the offer deadline (~45 seconds). Check fill status with:
+  thetanuts rfq status --ticker ETH-19MAY26-2050-P --since 1779163272
+  thetanuts position list --source rfq
 ```
 
-### Step 6 — Wait for fill (the protocol auto-settles)
+### Step 6 — Wait for the auto-settle
 
-You can walk away now. After the 45s deadline, anyone can call `settleQuotation` to finalize; if you do nothing, the protocol still picks the winning maker from on-chain reveals and either mints your position or refunds your escrow.
+After the offer deadline closes, the protocol picks the best valid maker offer and either mints your position or refunds your escrow. In practice this usually completes within 2-3 minutes of submission (offer window 45s + a short reveal/settle window).
 
-Optional intermediate check — see who offered:
+You can walk away. If you want to inspect the offers while you wait:
 
 ```bash
-thetanuts rfq offers --id 42
+thetanuts rfq offers --id 25
 ```
 
 ```
-┌────────────────┬────────────┬────────────────┬──────────────┐
-│ offeror        │ amount     │ amountSource   │ revealed     │
-├────────────────┼────────────┼────────────────┼──────────────┤
-│ 0xMM1...a1    │ 0.488 USDC │ decrypted      │ no           │
-│ 0xMM2...b2    │ 0.495 USDC │ decrypted      │ no           │
-└────────────────┴────────────┴────────────────┴──────────────┘
+┌────────────────────────────────────────────┬──────────┬─────────────┬──────────────────┬──────────────┐
+│ offeror                                    │ status   │ offerAmount │ offerAmountHuman │ amountSource │
+├────────────────────────────────────────────┼──────────┼─────────────┼──────────────────┼──────────────┤
+│ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ rejected │ 4852        │ 0.004852         │ indexer      │
+└────────────────────────────────────────────┴──────────┴─────────────┴──────────────────┴──────────────┘
 ```
+
+> **Indexer quirk to know.** The `status` column (`accepted` / `rejected`) reflects the indexer's internal labeling and **does not always match the on-chain settlement outcome** — we've seen the winning lower offer surface as "rejected" while the actual auto-settle still picks it as the fill. Treat `rfq offers` as informational; rely on `rfq status` and `position list` for the authoritative outcome.
 
 ### Step 7 — Check whether you got filled
 
 ```bash
-thetanuts rfq status --ticker ETH-29MAY26-2000-P --since 1779000000
+thetanuts rfq status --ticker ETH-19MAY26-2050-P --since 1779163272
 ```
 
 Filled:
 
 ```
-✓ filled
-  position: 0xC5d6...E7f8
-  source:   rfq
-  contracts: 0.01116
-  premium:  0.488 USDC
+┌─────────────┬───────────────────────────────────────────────────────────────────────────────┐
+│ key         │ value                                                                         │
+├─────────────┼───────────────────────────────────────────────────────────────────────────────┤
+│ filled      │ true                                                                          │
+│ checkParams │ {"address":"0x2f1E…","ticker":"ETH-19MAY26-2050-P","since":1779163272,…}      │
+│ position    │ {"id":"0xE4bc5F4FdD7ad74d7E08ed2FCc38ee44d8535d64",…,"side":"BUYER",…}        │
+│ message     │ RFQ filled. Position ETH-19MAY26-2050-P with 0.006194 contracts (BUYER).     │
+└─────────────┴───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Exit code `0`. Not filled — escrow already refunded:
+Exit code `0`. Not filled (escrow auto-refunded):
 
 ```
-✗ no matching position found for ticker ETH-29MAY26-2000-P
-  (escrow was refunded by auto-settle)
+{ "filled": false, "message": "No fill detected — no position matching the ticker yet.", … }
 ```
 
 Exit code `1`.
 
+> **`rfq status` checks both indexer sources** (book and RFQ) for the ticker; an RFQ-auto-settled position lives only on the RFQ side and won't appear in book-side queries.
+
 ### Step 8 — Inspect the filled position
 
 ```bash
-thetanuts position info --address 0xC5d6...E7f8
+thetanuts position info --address 0xE4bc5F4FdD7ad74d7E08ed2FCc38ee44d8535d64
 ```
 
 ```
-┌─────────────────┬─────────────────────────────────────────────┐
-│ field           │ value                                       │
-├─────────────────┼─────────────────────────────────────────────┤
-│ optionType      │ PUT (vanilla, cash-settled)                 │
-│ strikes         │ 2000 USD                                    │
-│ expiry          │ 1779177600 (2026-05-29T08:00:00.000Z)       │
-│ collateralToken │ USDC (0x833589f…)                           │
-│ underlyingToken │ ETH (derived from priceFeed)                │
-│ priceFeed       │ 0x71041dd…                                  │
-└─────────────────┴─────────────────────────────────────────────┘
+┌─────────────────┬───────────────────────────────────────────────────┐
+│ key             │ value                                             │
+├─────────────────┼───────────────────────────────────────────────────┤
+│ address         │ 0xE4bc5F4FdD7ad74d7E08ed2FCc38ee44d8535d64        │
+│ optionType      │ PUT (vanilla)                                     │
+│ optionTypeRaw   │ 257                                               │
+│ strikes         │ 2050 USD                                          │
+│ strikesRaw      │ ["205000000000"]                                  │
+│ expiry          │ 1779177600 (2026-05-19T08:00:00.000Z)             │
+│ collateralToken │ USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) │
+│ underlyingToken │ ETH (derived from priceFeed)                      │
+│ priceFeed       │ 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70        │
+└─────────────────┴───────────────────────────────────────────────────┘
 ```
 
 After expiry, claim the payout the same way as the OptionBook flow:
 
 ```bash
-thetanuts position payout --address 0xC5d6...E7f8 --dry-run
-thetanuts position payout --address 0xC5d6...E7f8
+thetanuts position payout --address 0xE4bc...5d64 --dry-run
+thetanuts position payout --address 0xE4bc...5d64
 ```
 
 ---
@@ -636,7 +673,7 @@ thetanuts setup
 
 ```bash
 thetanuts chain info                # chainId, RPC, contracts
-thetanuts chain tokens              # configured tokens (USDC is the v0.1 trading collateral)
+thetanuts chain tokens              # configured tokens (USDC is the v0.1.0 trading collateral)
 thetanuts chain contracts           # contract addresses
 ```
 
@@ -701,16 +738,21 @@ thetanuts pricing condor    --underlying ETH --strikes 1600,1700,1800,1900 --exp
 ```bash
 thetanuts book orders --underlying ETH                                   # all live orders
 thetanuts book orders --underlying ETH --type PUT                        # filter by type
-thetanuts book preview --order-index 0 --collateral 1                    # preview a fill
-thetanuts book preview --order-index 0 --collateral 1 --scenarios        # + payoff table
-thetanuts book max-contracts --order-index 0                             # max fillable size
+
+# Preview / max contracts by structure identity (recommended)
+thetanuts book preview --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1
+thetanuts book preview --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1 --scenarios
+thetanuts book max-contracts --underlying ETH --type PUT --strike 2100 --expiry 1779177600
 
 # Pre-trade liquidity check
 thetanuts book check --underlying ETH --type PUT --strike 2200 \
                      --expiry 1778832000 --direction sell
 
 # Fill (always dry-run first)
-thetanuts book fill --order-index 0 --collateral 1 --dry-run
+thetanuts book fill --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1 --dry-run
+thetanuts book fill --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1
+
+# Legacy --order-index path still works but is volatile across calls:
 thetanuts book fill --order-index 0 --collateral 1
 ```
 
@@ -718,7 +760,9 @@ thetanuts book fill --order-index 0 --collateral 1
 
 | Flag | Meaning |
 | ---- | ------- |
-| `--order-index <n>` | Position in the live order book (0-indexed) |
+| `--underlying <ETH\|BTC>` + `--type <PUT\|CALL>` + `--strike <usd>` + `--expiry <ts>` | Preferred: select by structure identity. Stable across calls. For multi-leg, pass `--strikes <csv>` instead of `--strike`. |
+| `--strict` | When the selector matches multiple orders, error instead of picking the cheapest. |
+| `--order-index <n>` | Legacy: position in the live order book (0-indexed). Resolved fresh at broadcast — may change between commands. |
 | `--collateral <n>` | USDC amount to spend. CLI derives contracts from the order's price. Omit to fill the max available. |
 | `--approve-amount <val>` | If allowance is short. Default: exact. `max` approves MaxUint256 (WARNING printed). |
 | `--yes` | Skip both prompts (approval + fill) |
@@ -852,7 +896,7 @@ thetanuts config validate           # checks RPC + key still work
 thetanuts market data
 thetanuts book orders --underlying ETH --type PUT
 thetanuts pricing all --underlying ETH
-thetanuts book preview --order-index 0 --collateral 1
+thetanuts book preview --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1
 ```
 
 ### Monitor your portfolio
