@@ -423,9 +423,11 @@ thetanuts position info --address 0x5F712F331c1f0f30F913c22b053985bf2ac88dc4
 After expiry, claim the payout:
 
 ```bash
-thetanuts position payout --address 0x5F71...8dc4 --dry-run     # always dry-run first
-thetanuts position payout --address 0x5F71...8dc4
+thetanuts position payout --address 0x5F71...8dc4 --dry-run     # simulate first
+thetanuts position payout --address 0x5F71...8dc4               # claim
 ```
+
+Pre-expiry, both commands print `option has not expired yet` and exit non-zero — no tx is sent. After expiry, the simulator first prints the resolved TWAP, `numContracts`, `strikes`, and `simulatedPayout`, then (in non-`--dry-run` mode) prompts to confirm and broadcasts the `claim()` tx; the receipt block shows `txHash`, `status`, `gasUsed`, and `feeUsd`. The claim sweeps the payout to the position holder's wallet. Live capture coming in v0.1.1.
 
 ---
 
@@ -651,9 +653,11 @@ thetanuts position info --address 0xE4bc5F4FdD7ad74d7E08ed2FCc38ee44d8535d64
 After expiry, claim the payout the same way as the OptionBook flow:
 
 ```bash
-thetanuts position payout --address 0xE4bc...5d64 --dry-run
-thetanuts position payout --address 0xE4bc...5d64
+thetanuts position payout --address 0xE4bc...5d64 --dry-run     # simulate first
+thetanuts position payout --address 0xE4bc...5d64               # claim
 ```
+
+Pre-expiry, both commands exit non-zero with `option has not expired yet` and never broadcast. After expiry, the dry-run prints the resolved TWAP, `numContracts`, `strikes`, and `simulatedPayout`; the non-`--dry-run` form then prompts to confirm and broadcasts `claim()`, returning a tx receipt with `txHash`/`status`/`gasUsed`/`feeUsd`. Settled USDC is swept to the position holder's wallet. Live capture coming in v0.1.1.
 
 ---
 
