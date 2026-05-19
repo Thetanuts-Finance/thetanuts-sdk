@@ -587,4 +587,118 @@ export function register(program: Command): void {
       }
     });
 
+  grp
+    .command('transfer')
+    .description('Transfer an ERC-20 token to another address')
+    .requiredOption('--token <symbol>', 'token symbol or address')
+    .requiredOption('--to <addr>', 'recipient address')
+    .requiredOption('--amount <amount>', 'decimal amount (e.g. 5.50)')
+    .action(async (_localOpts: unknown, cmd: Command) => {
+      const opts = getGlobalOpts(cmd);
+      const local = cmd.opts<{ token: string; to: string; amount: string }>();
+      try {
+        const result = getClient(opts);
+        requireSigner(result);
+        const { client } = result;
+
+        let tokenAddr: string;
+        let tokenSymbol = local.token;
+        const tokens = client.chainConfig.tokens;
+        const symKey =
+          tokens[local.token]
+            ? local.token
+            : Object.keys(tokens).find((s) => s.toLowerCase() === local.token.toLowerCase());
+        if (symKey) {
+          tokenAddr = tokens[symKey]!.address;
+          tokenSymbol = symKey;
+        } else if (ADDRESS_REGEX.test(local.token)) {
+          tokenAddr = local.token;
+          for (const [sym, t] of Object.entries(tokens)) {
+            if (t.address.toLowerCase() === tokenAddr.toLowerCase()) tokenSymbol = sym;
+          }
+        } else {
+          process.stderr.write(
+            'Unknown token; run `thetanuts chain tokens` to see what\'s configured.\n'
+          );
+          process.exit(4);
+        }
+
+        if (!ADDRESS_REGEX.test(local.to)) {
+          process.stderr.write('--to must be a 0x-prefixed 40-char hex address\n');
+          process.exit(2);
+        }
+
+        // Resolve token decimals first. Some tokens have quirky setups
+        // (proxy/upgrade weirdness, malformed ABIs) where getDecimals reverts —
+        // wrap so the user sees something actionable instead of an ethers stack.
+        let decimals: number;
+        try {
+          decimals = Number(await client.erc20.getDecimals(tokenAddr));
+        } catch (err) {
+          process.stderr.write(
+            `Could not read decimals for ${tokenSymbol} (${tokenAddr}): ${(err as Error).message ?? String(err)}\n` +
+              `Run \`thetanuts chain tokens\` to confirm the symbol is configured for this chain.\n`
+          );
+          process.exit(4);
+        }
+        let amountRaw: bigint;
+        try {
+          amountRaw = client.utils.toBigInt(local.amount, decimals);
+        } catch (err) {
+          process.stderr.write(`Invalid --amount: ${(err as Error).message}\n`);
+          process.exit(2);
+        }
+        if (amountRaw <= 0n) {
+          process.stderr.write('--amount must be positive (got 0 or less after decimal scaling)\n');
+          process.exit(2);
+        }
+
+        const from = await client.getSignerAddress();
+        const balance = await client.erc20.getBalance(tokenAddr, from);
+        if (amountRaw > balance) {
+          process.stderr.write(
+            `Insufficient balance: have ${client.utils.fromBigInt(balance, decimals)} ${tokenSymbol}, ` +
+              `need ${client.utils.fromBigInt(amountRaw, decimals)} ${tokenSymbol}.\n`
+          );
+          process.exit(4);
+        }
+
+        const preview = {
+          action: 'transfer',
+          token: tokenAddr,
+          tokenSymbol,
+          from,
+          to: local.to,
+          amount: client.utils.fromBigInt(amountRaw, decimals),
+          amountRaw: amountRaw.toString(),
+        };
+        render(preview, { output: opts.output, noColor: !opts.color });
+
+        if (opts.dryRun) {
+          const encoded = client.erc20.encodeTransfer(tokenAddr, local.to, amountRaw);
+          render(
+            { dryRun: true, ...encoded },
+            { output: opts.output, noColor: !opts.color, truncate: true }
+          );
+          return;
+        }
+
+        const ok = await confirm('Proceed with transfer?', {
+          yes: Boolean(opts.yes),
+          dryRun: Boolean(opts.dryRun),
+        });
+        if (!ok) process.exit(3);
+
+        const receipt = await client.erc20.transfer(tokenAddr, local.to, amountRaw);
+        const ethUsd = await fetchEthUsdSafe(client.api);
+        render(
+          buildTxReceiptPayload(receipt, ethUsd),
+          { output: opts.output, noColor: !opts.color }
+        );
+      } catch (err) {
+        renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
+        process.exit(1);
+      }
+    });
+
 }
