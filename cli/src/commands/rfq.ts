@@ -15,6 +15,7 @@ import { getClient, requireSigner, type GetClientResult } from '../client.js';
 import { jsonReplacer, render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
 import { computePayoutSummary, computeScenarios } from '../payout.js';
+import { underlyingSymbolByPriceFeed } from '../format.js';
 
 // ----------------------------------------------------------------------------
 // RFQ Constants
@@ -1142,7 +1143,28 @@ function parseRFQRequest(raw: unknown): RFQRequest {
   };
 }
 
-async function loadRequestFromBuildFile(filePath: string): Promise<RFQRequest> {
+/**
+ * Loaded build-file payload. The top-level `rfq` summary block is written by
+ * `rfq build --out` since v0.1.0 — we read it back for the MM-grid re-check
+ * gate in `loadOrBuildRequest`. Older artifacts (or hand-rolled JSON) may only
+ * carry `request`; in that case `gridCheck` is undefined and the caller
+ * derives the (underlying, optionType) tuple from `request.params` instead.
+ */
+interface LoadedBuildFile {
+  request: RFQRequest;
+  ticker?: string;
+  // (underlying, optionType) the build was authored against. When present, the
+  // caller re-validates against the live MM grid before broadcast — closes the
+  // window where a stale build file submits to a rotated-out strike.
+  gridCheck?: {
+    underlying: Underlying;
+    optionType: OptionType;
+    strikes: number[];
+    expiry: number;
+  };
+}
+
+async function loadRequestFromBuildFile(filePath: string): Promise<LoadedBuildFile> {
   const abs = path.resolve(filePath);
   let raw: string;
   try {
@@ -1160,7 +1182,68 @@ async function loadRequestFromBuildFile(filePath: string): Promise<RFQRequest> {
   if (!top.request) {
     throw new Error(`Build file at ${abs} is missing a top-level "request" field — was it created by \`thetanuts rfq build --out\`?`);
   }
-  return parseRFQRequest(top.request);
+  const request = parseRFQRequest(top.request);
+
+  // Try the v0.1.0+ top-level `rfq` summary first — cheap and authoritative.
+  const summary = top.rfq as Record<string, unknown> | undefined;
+  let gridCheck: LoadedBuildFile['gridCheck'];
+  let ticker: string | undefined;
+  if (summary && typeof summary === 'object') {
+    const underlying = (summary.underlying as string | undefined)?.toUpperCase();
+    const optionType = (summary.type as string | undefined)?.toUpperCase();
+    const strikes = Array.isArray(summary.strikes)
+      ? summary.strikes.map((s) => Number(s)).filter((n) => Number.isFinite(n))
+      : undefined;
+    const expiry = typeof summary.expiry === 'number' ? summary.expiry : Number(summary.expiry);
+    ticker = typeof summary.ticker === 'string' ? summary.ticker : undefined;
+    if (
+      (underlying === 'ETH' || underlying === 'BTC') &&
+      (optionType === 'PUT' || optionType === 'CALL') &&
+      Array.isArray(strikes) &&
+      strikes.length > 0 &&
+      Number.isFinite(expiry)
+    ) {
+      gridCheck = { underlying, optionType, strikes, expiry: Number(expiry) };
+    }
+  }
+
+  return { request, ticker, gridCheck };
+}
+
+/**
+ * Derive the (underlying, optionType) tuple for grid-check purposes from a raw
+ * RFQRequest when the build file lacks the top-level `rfq` summary (legacy
+ * artifact, or hand-rolled JSON). Reverse-lookups:
+ *   - `params.collateralPriceFeed` → underlying via chainConfig.priceFeeds
+ *   - `params.implementation`     → optionType via chainConfig.optionImplementations
+ * Returns undefined when either lookup misses, in which case we skip the gate
+ * rather than block the submission — strict fail would be worse than the
+ * pre-fix status quo.
+ */
+function deriveGridCheckFromRequest(
+  request: RFQRequest,
+  client: GetClientResult['client']
+): LoadedBuildFile['gridCheck'] | undefined {
+  const underlying = underlyingSymbolByPriceFeed(
+    request.params.collateralPriceFeed,
+    client.chainConfig.priceFeeds
+  );
+  if (underlying !== 'ETH' && underlying !== 'BTC') return undefined;
+  const impl = client.chainConfig.optionImplementations?.[request.params.implementation.toLowerCase()];
+  if (!impl?.name) return undefined;
+  // Impl names follow `(PUT|CALL)[_SPREAD|_FLY|_CONDOR]` or `INVERSE_CALL[_*]`.
+  // We only need PUT vs CALL for the grid lookup.
+  const optionType: OptionType | undefined = impl.name.startsWith('PUT')
+    ? 'PUT'
+    : impl.name.includes('CALL')
+      ? 'CALL'
+      : undefined;
+  if (!optionType) return undefined;
+  const strikes = request.params.strikes.map((s) => Number(s) / 1e8).filter((n) => Number.isFinite(n));
+  if (strikes.length === 0) return undefined;
+  const expiry = Number(request.params.expiryTimestamp);
+  if (!Number.isFinite(expiry)) return undefined;
+  return { underlying, optionType, strikes, expiry };
 }
 
 /**
@@ -1168,6 +1251,11 @@ async function loadRequestFromBuildFile(filePath: string): Promise<RFQRequest> {
  * requesterPublicKey from the keystore if it isn't already set. Used by every
  * write that submits an RFQRequest (request, static-request, swap-and-call's
  * inner self-call when generated from flags).
+ *
+ * When loading from a build file, re-validates (strike, expiry, type) against
+ * the live MM quote grid before returning — closes the gap where a stale build
+ * file submits escrow to a strike the MM no longer quotes. The gate is skipped
+ * when --reserve-price is set by the user (explicit override of MM pricing).
  */
 async function loadOrBuildRequest(
   result: GetClientResult,
@@ -1175,8 +1263,33 @@ async function loadOrBuildRequest(
   globalOpts: ReturnType<typeof getGlobalOpts>
 ): Promise<{ request: RFQRequest; fromFile: boolean; structureType?: StructureType; ticker?: string }> {
   if (local.fromBuildFile) {
-    const req = await loadRequestFromBuildFile(local.fromBuildFile);
-    return { request: req, fromFile: true };
+    const loaded = await loadRequestFromBuildFile(local.fromBuildFile);
+    // Build-file path: re-validate the (strike, expiry, type) against the live
+    // MM grid unless the user explicitly overrode pricing with --reserve-price.
+    const hasUserReserve = local.reservePrice !== undefined && local.reservePrice !== '';
+    if (!hasUserReserve) {
+      const check = loaded.gridCheck ?? deriveGridCheckFromRequest(loaded.request, result.client);
+      if (check) {
+        try {
+          await assertStrikeExpiryAvailable({
+            client: result.client,
+            underlying: check.underlying,
+            optionType: check.optionType,
+            strikes: check.strikes,
+            expiry: check.expiry,
+          });
+        } catch (err) {
+          const original = (err as Error).message ?? String(err);
+          const wrapped = new Error(
+            `Build file references ${original.replace(/\.$/, '')}. ` +
+              `Re-run \`thetanuts rfq build\` to refresh, or pass --reserve-price to override.`
+          );
+          (wrapped as Error & { exitCode?: number }).exitCode = 4;
+          throw wrapped;
+        }
+      }
+    }
+    return { request: loaded.request, fromFile: true, ticker: loaded.ticker };
   }
   const built = await buildFromFlags(result, local, globalOpts);
   return { request: built.rfqRequest, fromFile: false, structureType: built.structureType, ticker: built.ticker };
