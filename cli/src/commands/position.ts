@@ -2,14 +2,17 @@ import type { Command } from 'commander';
 import type {
   PayoutType,
   Position,
+  RFQRequest,
   ThetanutsClient,
   OptionImplementationInfo,
 } from '@thetanuts-finance/thetanuts-client';
 import { buildTicker } from '@thetanuts-finance/thetanuts-client';
+import { MaxUint256 } from 'ethers';
 import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner } from '../client.js';
-import { render, renderError } from '../output.js';
+import { render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
+import { extractQuotationIdFromReceipt } from './rfq.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -691,7 +694,13 @@ async function fetchPricingForPosition(
       buyPrice: Number(result.feeAdjustedAsk ?? result.rawAskPrice ?? 0),
       spotPrice: spot,
     };
-  } catch {
+  } catch (err) {
+    // Surface diagnostic when THETANUTS_DEBUG_PNL=1;
+    if (process.env.THETANUTS_DEBUG_PNL) {
+      process.stderr.write(
+        `[pnl] mtm fetch failed for ${pos.optionAddress}: ${(err as Error)?.message ?? String(err)}\n`
+      );
+    }
     return null;
   }
 }
@@ -890,24 +899,11 @@ async function resolveMtmPnL(
 }
 
 /**
- * Full 4-tier resolution: indexer → MTM → unavailable. Promise.allSettled
- * dispatch happens one level up (`resolveAllPnL`) so a single slow MM fetch
- * doesn't block the whole table.
- */
-async function resolvePnL(
-  client: ThetanutsClient,
-  pos: Position
-): Promise<ResolvedPnL> {
-  const indexer = resolveIndexerPnL(pos);
-  if (indexer) return indexer;
-  const mtm = await resolveMtmPnL(client, pos);
-  if (mtm) return mtm;
-  return { source: 'unavailable', pnlUsd: null, pnlPct: null };
-}
-
-/**
  * Fan-out resolver: Tier 1/2 first (synchronous), then Tier 3 in parallel for
  * the residual set. Surfaces a stderr advisory if Tier 3 fetches exceed 2s.
+ *
+ * Per-position alternative (`indexer → MTM → unavailable`) is inlined inside
+ * `resolveAllPnL` so we don't ship a single-call variant that nothing uses.
  */
 async function resolveAllPnL(
   client: ThetanutsClient,
@@ -1137,6 +1133,25 @@ function registerReads(grp: Command): void {
             };
           });
           render(rows, renderOpts(opts));
+          // If any LIVE row resolved to "—", surface the standard hint so users
+          // don't read the dash as "0" or "broken" — most often it just means
+          // the MM has rotated off this strike near expiry, and the live
+          // quote will return after the next grid refresh
+          let anyUnavailable = false;
+          for (let i = 0; i < pnlResolutions.length; i++) {
+            const r = pnlResolutions[i]!;
+            const p = positions[i]!;
+            if (r.source === 'unavailable' && !isDeadPosition(p)) {
+              anyUnavailable = true;
+              break;
+            }
+          }
+          if (anyUnavailable) {
+            process.stderr.write(
+              `Note: '—' in the pnl column means the market maker had no live quote for that strike at fetch time. ` +
+                `It usually clears in a minute or two; re-run \`thetanuts position list\` to retry.\n`
+            );
+          }
         } else {
           // Machine-readable path: preserve the existing field shape exactly
           // so scripts that rely on `amount` / `entryPrice` / etc. as
@@ -1236,9 +1251,6 @@ function registerReads(grp: Command): void {
           // lookup. If we DO have a signer, we additionally try the user's
           // RFQ positions list (which IS keyed by user and contains impl).
           let impl: OptionImplementationInfo | null = null;
-          let apiImplName: string | undefined;
-          let apiImplType: string | undefined;
-          let apiSource: string | undefined;
           // Best-effort: scan the signer's positions (BOTH book + rfq) for
           // this option. The Book API populates `implementationName` /
           // `implementationType` directly (verified live: indexer
@@ -1261,9 +1273,6 @@ function registerReads(grp: Command): void {
                   (p) => p.optionAddress.toLowerCase() === wanted
                 );
                 if (hit?.implementationName) {
-                  apiImplName = hit.implementationName;
-                  apiImplType = hit.implementationType;
-                  apiSource = 'book';
                   // Synthesize an OptionImplementationInfo when we have the
                   // name/type but not the address (Book API doesn't return
                   // the impl address — only its name).
@@ -1283,9 +1292,6 @@ function registerReads(grp: Command): void {
                   const resolved = resolveImplByAddress(client, hit.implementation);
                   if (resolved) {
                     impl = resolved;
-                    apiImplName = resolved.name;
-                    apiImplType = resolved.type;
-                    apiSource = 'rfq';
                   }
                 }
               }
@@ -1512,11 +1518,18 @@ function registerWrites(grp: Command): void {
         }
 
         // Preview the simulated payout at TWAP so the user sees what they'll claim.
-        const [twap, strikes, numContracts] = await Promise.all([
+        // `getStrikes()` and `getNumContracts()` return ethers v6 Result proxies —
+        // these are frozen array-likes that throw "Cannot assign to read only
+        // property '0'" when ethers tries to re-encode them as ABI input on
+        // the next call. Spread/coerce into plain arrays / values before
+        // passing into simulatePayout (which encodes uint256[]).
+        const [twap, rawStrikes, rawNumContracts] = await Promise.all([
           client.option.getTWAP(local.address),
           client.option.getStrikes(local.address),
           client.option.getNumContracts(local.address),
         ]);
+        const strikes: bigint[] = Array.from(rawStrikes ?? []).map((s) => BigInt(String(s)));
+        const numContracts: bigint = BigInt(String(rawNumContracts ?? 0n));
         const simulated = await client.option.simulatePayout(
           local.address,
           twap,
@@ -1533,6 +1546,21 @@ function registerWrites(grp: Command): void {
           },
           renderOpts(opts)
         );
+
+        // Guard zero-payout: the option contract reverts (without a reason)
+        // when payout() is called on an expired-OTM position because there's
+        // nothing to transfer
+        if (simulated === 0n) {
+          const err = new Error(
+            `Option ${local.address} expired with zero payout. ` +
+              `The strike was not breached at settlement so there's nothing to claim. ` +
+              `Premium paid at entry is the realized loss; no on-chain transaction is needed.`
+          );
+          (err as Error & { exitCode?: number }).exitCode = 0;
+          // Render as info, not error — exit code 0 since this isn't a failure.
+          process.stderr.write(`${err.message}\n`);
+          process.exit(0);
+        }
 
         if (opts.dryRun) {
           render({ dryRun: true, action: 'payout', optionAddress: local.address }, renderOpts(opts));
@@ -1555,6 +1583,335 @@ function registerWrites(grp: Command): void {
           },
           renderOpts(opts)
         );
+      } catch (err) {
+        renderError(err, renderOpts(opts));
+        process.exit(1);
+      }
+    });
+
+  // -------------------------------------------------------------------------
+  // close — open a flipped-direction RFQ on the same option to unwind
+  // -------------------------------------------------------------------------
+  grp
+    .command('close')
+    .description(
+      'Close an RFQ position by opening an opposite-direction RFQ on the same option ' +
+        '(mirrors the dApp\'s close-position flow).'
+    )
+    .requiredOption('--address <addr>', 'option contract address to close (copy from `position list`)')
+    .option(
+      '--reserve-price <n>',
+      'override the MM-derived closing price per contract (in USDC per contract). Required when the MM has no live quote.'
+    )
+    .option('--deadline-minutes <n>', 'offer-window length in minutes (default 1 = 60 s)', '1')
+    .option('--fill-or-kill', 'reject partial fills — only accept a full-size match')
+    .option('--ensure-allowance', 'approve collateral on OptionFactory before submission if short')
+    .option('--approve-amount <max|n>', 'allowance amount when --ensure-allowance fires (default: exact reservePrice)')
+    .action(async (_local: unknown, cmd: Command) => {
+      const opts = getGlobalOpts(cmd);
+      const local = cmd.opts<{
+        address: string;
+        reservePrice?: string;
+        deadlineMinutes?: string;
+        fillOrKill?: boolean;
+        ensureAllowance?: boolean;
+        approveAmount?: string;
+      }>();
+      try {
+        if (!/^0x[a-fA-F0-9]{40}$/.test(local.address)) {
+          throw new Error('--address must be a 0x-prefixed 40-char hex address');
+        }
+
+        const res = getClient(opts);
+        requireSigner(res);
+        const { client } = res;
+        const signerAddress = await client.getSignerAddress();
+
+        // Fetch all RFQ-source positions for the signer, find the target.
+        // The SDK's return type is loose; narrow to unknown[] then guard before
+        // touching individual records. Defensive in case the indexer ever ships
+        // a non-array payload (rare 5xx shape mismatch).
+        const raws = (await client.api.getUserOptionsFromRfq(signerAddress)) as unknown;
+        const rawList: unknown[] = Array.isArray(raws) ? raws : [];
+        const targetRaw = rawList.find(
+          (r): r is RfqOptionResponse =>
+            typeof r === 'object' &&
+            r !== null &&
+            'address' in r &&
+            String((r as { address?: unknown }).address ?? '').toLowerCase() ===
+              local.address.toLowerCase()
+        );
+        if (!targetRaw) {
+          const err = new Error(
+            `No RFQ-source position found for option ${local.address} on signer ${signerAddress}. ` +
+              `Run \`thetanuts position list --source rfq\` to see closeable positions.`
+          );
+          (err as Error & { exitCode?: number }).exitCode = 4;
+          throw err;
+        }
+
+        const pos = normalizeRfqPosition(client, targetRaw as RfqOptionResponse, signerAddress);
+        const side = pos.side; // 'buyer' | 'seller'
+        const isClosingLong = side === 'seller'; // seller buys back, buyer sells back
+
+        const implementationAddress = String(targetRaw.implementation ?? '');
+        if (
+          !implementationAddress ||
+          implementationAddress === '0x0000000000000000000000000000000000000000'
+        ) {
+          throw new Error(
+            `Position ${local.address} has no resolved implementation address. ` +
+              `The indexer payload may be incomplete; retry in a moment.`
+          );
+        }
+        const collateralPriceFeed = String(
+          targetRaw.priceFeed ?? targetRaw.collateralPriceFeed ?? pos.priceFeed ?? ''
+        );
+        if (!collateralPriceFeed) {
+          throw new Error(`Position ${local.address} is missing collateralPriceFeed on the indexer payload.`);
+        }
+
+        const collateralMeta = getCollateralMeta(client, pos.option.collateral);
+
+        // v0.1.0 enforces USDC-only on the CLI surface for both build and close
+        if (collateralMeta.symbol !== 'USDC') {
+          const err = new Error(
+            `v0.1.0 supports closing USDC-collateralized RFQ positions only. ` +
+              `Position ${local.address} is collateralized in ${collateralMeta.symbol}. ` +
+              `Non-USDC close will be enabled in v0.1.1 once Decimal.js arithmetic is wired in.`
+          );
+          (err as Error & { exitCode?: number }).exitCode = 4;
+          throw err;
+        }
+
+        // Derive closingPricePerContract: MM-driven by default, override via --reserve-price.
+        let closingPricePerContract: number;
+        let priceSource: 'mm-bid' | 'mm-ask' | 'user';
+        if (local.reservePrice !== undefined && local.reservePrice !== '') {
+          closingPricePerContract = Number.parseFloat(local.reservePrice);
+          if (!Number.isFinite(closingPricePerContract) || closingPricePerContract < 0) {
+            throw new Error('--reserve-price must be a non-negative number');
+          }
+          priceSource = 'user';
+        } else {
+          const pricing = await fetchPricingForPosition(client, pos);
+          if (!pricing) {
+            const err = new Error(
+              `MM has no live quote for ${pos.optionAddress} right now (typical 1–3 h pre-expiry). ` +
+                `Pass --reserve-price <USDC-per-contract> explicitly. ` +
+                `Tip: closing buyer side wants the MM bid (floor), seller side wants the ask (ceiling).`
+            );
+            (err as Error & { exitCode?: number }).exitCode = 4;
+            throw err;
+          }
+          // buyer closes by selling → uses MM bid (sellPrice in our PricingForPnL)
+          // seller closes by buying → uses MM ask (buyPrice in our PricingForPnL)
+          closingPricePerContract = side === 'buyer' ? pricing.sellPrice : pricing.buyPrice;
+          priceSource = side === 'buyer' ? 'mm-bid' : 'mm-ask';
+          if (!Number.isFinite(closingPricePerContract) || closingPricePerContract <= 0) {
+            const err = new Error(
+              `MM closing quote was non-positive (${closingPricePerContract}). ` +
+                `The option may be too deep ITM/OTM or near expiry. ` +
+                `Pass --reserve-price <USDC-per-contract> to force a closing RFQ at your own price.`
+            );
+            (err as Error & { exitCode?: number }).exitCode = 4;
+            throw err;
+          }
+        }
+
+        // Reserve price formula matches dApp useRfqActions.ts:733-738:
+        //   rawReserve = numContracts (raw) × closingPricePerContract (human)
+        //   reservePriceBn = ceil(rawReserve) on BUY side, floor(rawReserve) on SELL side
+        const numContractsRaw = pos.amount ?? 0n;
+        if (numContractsRaw <= 0n) {
+          throw new Error(`Position ${local.address} has numContracts=0 — nothing to close.`);
+        }
+        const rawReserveFloat = Number(numContractsRaw) * closingPricePerContract;
+        const reservePriceBn =
+          closingPricePerContract > 0
+            ? BigInt(isClosingLong ? Math.ceil(rawReserveFloat) : Math.floor(rawReserveFloat))
+            : 0n;
+
+        // Build the request (matches dApp shape exactly).
+        const keyPair = await client.rfqKeys.getOrCreateKeyPair();
+        const deadlineMinutes = Number.parseFloat(local.deadlineMinutes ?? '1');
+        if (!Number.isFinite(deadlineMinutes) || deadlineMinutes <= 0) {
+          throw new Error(`--deadline-minutes must be > 0 (got "${local.deadlineMinutes}")`);
+        }
+        const offerEndSec = Math.floor(Date.now() / 1000) + Math.round(deadlineMinutes * 60);
+        const request: RFQRequest = {
+          params: {
+            requester: signerAddress,
+            existingOptionAddress: pos.optionAddress,
+            collateral: pos.option.collateral,
+            collateralPriceFeed,
+            implementation: implementationAddress,
+            strikes: pos.option.strikes,
+            numContracts: numContractsRaw,
+            requesterDeposit: 0n,
+            collateralAmount: 0n,
+            expiryTimestamp: BigInt(pos.option.expiry),
+            offerEndTimestamp: BigInt(offerEndSec),
+            isRequestingLongPosition: isClosingLong,
+            convertToLimitOrder: !local.fillOrKill,
+            extraOptionData: '0x',
+          },
+          tracking: { referralId: 0n, eventCode: 0n },
+          reservePrice: reservePriceBn,
+          requesterPublicKey: keyPair.compressedPublicKey,
+        };
+
+        const contractsHuman = Number(numContractsRaw) / 10 ** collateralMeta.decimals;
+        const reserveHuman = Number(reservePriceBn) / 10 ** collateralMeta.decimals;
+        const closeDirection = isClosingLong ? 'buy' : 'sell';
+
+        // Compute a display ticker if we can; falls back to the option address.
+        // SDK's buildTicker takes (underlying, expiry, strikes, isCall) — same
+        // helper book preview uses for display.
+        const underlyingForTicker = deriveUnderlying(
+          client,
+          pos.option.underlying,
+          pos.priceFeed,
+          pos.option.collateral
+        );
+        const strikesHumanForTicker = pos.option.strikes.map((s) => Number(s) / 1e8);
+        const isCallForTicker = deriveIsCall(pos);
+        // buildTicker only accepts a single strike; for multi-leg, render
+        // a slash-joined ticker manually (matches the dApp's display style).
+        let displayTicker: string;
+        if (underlyingForTicker && strikesHumanForTicker.length === 1) {
+          displayTicker = buildTicker(
+            underlyingForTicker,
+            pos.option.expiry,
+            strikesHumanForTicker[0]!,
+            isCallForTicker
+          );
+        } else if (underlyingForTicker && strikesHumanForTicker.length > 1) {
+          const base = buildTicker(
+            underlyingForTicker,
+            pos.option.expiry,
+            strikesHumanForTicker[0]!,
+            isCallForTicker
+          );
+          // e.g. "ETH-19MAY26-2125-P" → "ETH-19MAY26-2125/2100-P"
+          const suffix = strikesHumanForTicker
+            .slice(1)
+            .map((s) => s.toString())
+            .join('/');
+          const m = base.match(/^(.*-)(\d+(?:\.\d+)?)(-[CP])$/);
+          displayTicker = m ? `${m[1]}${m[2]}/${suffix}${m[3]}` : base;
+        } else {
+          displayTicker = pos.optionAddress;
+        }
+
+        const summary = {
+          action: 'close',
+          optionAddress: pos.optionAddress,
+          ticker: displayTicker,
+          side,
+          closingDirection: closeDirection,
+          contracts: contractsHuman,
+          closingPricePerContract,
+          priceSource,
+          reservePrice: reservePriceBn.toString(),
+          reservePriceHuman: `${reserveHuman.toFixed(6)} ${collateralMeta.asset}`,
+          deadlineSeconds: Math.round(deadlineMinutes * 60),
+          fillOrKill: Boolean(local.fillOrKill),
+        };
+        render(summary, renderOpts(opts));
+
+        // Dry-run: emit calldata + skip allowance + skip broadcast.
+        if (opts.dryRun) {
+          const { to, data } = client.optionFactory.encodeRequestForQuotation(request);
+          render(
+            {
+              dryRun: true,
+              transaction: {
+                to,
+                data:
+                  data.length > 80
+                    ? `${data.slice(0, 40)}…${data.slice(-8)} (${data.length} chars)`
+                    : data,
+              },
+            },
+            renderOpts(opts)
+          );
+          process.exit(0);
+        }
+
+        // Ensure allowance — only when the requester actually escrows collateral.
+        // BUY-side close (seller closing) requires the reservePrice to be escrowed
+        // up-front on the OptionFactory. SELL-side close doesn't escrow USDC
+        // (the option itself transfers), so the allowance step is skipped.
+        if (isClosingLong && reservePriceBn > 0n && local.ensureAllowance) {
+          const factoryAddr = client.chainConfig.contracts.optionFactory;
+          if (!factoryAddr) {
+            throw new Error('OptionFactory is not deployed on this chain — close-position requires Base mainnet.');
+          }
+          const desired =
+            local.approveAmount === 'max'
+              ? MaxUint256
+              : local.approveAmount !== undefined
+                ? BigInt(Math.round(Number.parseFloat(local.approveAmount) * 10 ** collateralMeta.decimals))
+                : reservePriceBn;
+          if (local.approveAmount === 'max') {
+            process.stderr.write(
+              `WARNING: approving MaxUint256 on ${collateralMeta.asset} for optionFactory. Revoke after closing if you do not trust the contract.\n`
+            );
+          }
+          if (!pos.option.collateral) {
+            throw new Error('Position is missing collateral address; cannot approve.');
+          }
+          const approveReceipt = await client.erc20.ensureAllowance(pos.option.collateral, factoryAddr, desired);
+          if (approveReceipt) {
+            render(
+              {
+                action: 'approve',
+                txHash: approveReceipt.hash,
+                status: approveReceipt.status,
+                gasUsed: approveReceipt.gasUsed.toString(),
+              },
+              renderOpts(opts)
+            );
+          }
+        }
+
+        const ok = await confirm(
+          `Submit closing RFQ (${closeDirection.toUpperCase()} ${contractsHuman} contracts of ${displayTicker}, reserve ${reserveHuman.toFixed(6)} ${collateralMeta.asset}, ${Math.round(deadlineMinutes * 60)}s deadline)?`,
+          { yes: opts.yes, dryRun: opts.dryRun }
+        );
+        if (!ok) process.exit(3);
+
+        const submittedAt = Math.floor(Date.now() / 1000);
+        const receipt = await client.optionFactory.requestForQuotation(request);
+        const quotationId = extractQuotationIdFromReceipt(
+          receipt.logs,
+          client.optionFactory.contractAddress
+        );
+        const ethUsd = await fetchEthUsdSafe(client.api);
+        render(
+          buildTxReceiptPayload(
+            receipt,
+            ethUsd,
+            quotationId !== undefined ? { quotationId } : undefined
+          ),
+          renderOpts(opts)
+        );
+
+        // Post-broadcast guidance — match `rfq request`'s tip pattern. Auto-settle
+        // is best-effort on close RFQs (no maker is incentivized to call settle
+        // when no offer wins)
+        if (opts.output !== 'json') {
+          const idHint = quotationId !== undefined ? quotationId : '<quotationId>';
+          process.stderr.write(
+            `\nClose RFQ ${idHint} submitted on ${pos.optionAddress}. The protocol settles after the offer deadline (${Math.round(deadlineMinutes * 60)} s).\n` +
+              `  thetanuts rfq status --ticker ${displayTicker} --since ${submittedAt}\n` +
+              `  thetanuts position list --source rfq\n` +
+              `Note: close RFQs may not auto-settle when no maker matches. If status still shows the RFQ active after the deadline, run:\n` +
+              `  thetanuts rfq settle --id ${idHint}\n` +
+              `to refund the escrow.\n`
+          );
+        }
       } catch (err) {
         renderError(err, renderOpts(opts));
         process.exit(1);
