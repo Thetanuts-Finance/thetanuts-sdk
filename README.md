@@ -1,225 +1,182 @@
 # @thetanuts-finance/thetanuts-client
 
-TypeScript SDK for Thetanuts Finance V4 - Options trading on EVM chains.
+TypeScript client for trading options on **Base mainnet** via Thetanuts Finance V4 — listed orderbook fills, custom-built RFQs, and real-time price/order streams over WebSocket. Works in Node 18+ and modern browsers, ships as ESM and CJS with full type definitions.
 
 > **Full documentation:** [docs.thetanuts.finance/sdk](https://docs.thetanuts.finance/sdk)
 
-## Table of Contents
+## Contents
 
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Key Concepts](#key-concepts)
-- [With Signer (for transactions)](#with-signer-for-transactions)
-- [Referrer (Fee Sharing)](#referrer-fee-sharing)
+- [30-second start](#30-second-start)
+- [Two paths: read market data, or trade](#two-paths-read-market-data-or-trade)
+- [Choosing between OptionBook and RFQ](#choosing-between-optionbook-and-rfq)
 - [Modules](#modules)
-- [Supported Chains](#supported-chains)
-- [Configuration Options](#configuration-options)
-- [RFQ Key Management](#rfq-key-management)
-- [Examples](#examples)
-- [Common Workflows](#common-workflows)
-- [Error Handling](#error-handling)
-- [Production Checklist](#production-checklist)
-- [Compatibility](#compatibility)
-- [Custom Logger](#custom-logger)
-- [Directory Structure](#directory-structure)
+- [Common workflows](#common-workflows)
+- [Error handling](#error-handling)
+- [Production checklist](#production-checklist)
+- [Reference](#reference)
 - [Development](#development)
-- [Documentation](#documentation)
-- [API Reference](#api-reference)
-- [License](#license)
-- [Links](#links)
+- [Documentation & links](#documentation--links)
 
-## Features
+---
 
-- **Complete Options Trading**: Fill orders, manage positions, handle RFQs
-- **Settlement Types**: Cash-settled and physically settled options
-- **Multi-Strategy Support**: Spreads, butterflies, condors, iron condors (cash-settled)
-- **Real-time Data**: WebSocket subscriptions for live updates
-- **Type-Safe**: Full TypeScript support with comprehensive type definitions
-- **Modular Design**: Use only what you need
-- **ESM and CJS builds**: Maximum compatibility
+## 30-second start
 
-### OptionBook vs RFQ (Factory)
+Install:
 
-The SDK supports two trading systems. Choose based on your use case:
-
-| | **OptionBook** | **RFQ (Factory)** |
-|---|---|---|
-| **What** | Fill existing market-maker orders | Create custom options via sealed-bid auction |
-| **When to use** | Quick trades on listed options (vanilla and multi-leg) | Custom options via sealed-bid auction: any strike, any expiry, cash-settled or physically settled |
-| **Structures** | Vanilla, spread, butterfly, condor, iron condor (cash-settled) | Vanilla, spread, butterfly, condor, iron condor (cash-settled or physically settled for vanilla) |
-| **Key methods** | `fillOrder()`, `previewFillOrder()` | `buildRFQRequest()`, `requestForQuotation()` |
-| **Pricing** | Order prices from `fetchOrders()` | MM pricing from `getAllPricing()` |
-| **Data source** | Book indexer (`/api/v1/book/`) | Factory indexer (`/api/v1/factory/`) |
-| **User data** | `getUserPositionsFromIndexer()` | `getUserRfqs()`, `getUserOptionsFromRfq()` |
-| **Stats** | `getBookProtocolStats()`, `getBookDailyStats()` | `getFactoryProtocolStats()`, `getFactoryDailyStats()` |
-| **Collateral** | Paid upfront by taker | `collateralAmount = 0` (held by factory) |
-| **Settlement** | Cash-settled (payout in USDC/WETH/cbBTC based on price difference at expiry) | Cash-settled by default; physically settled optional via `buildPhysicalOptionRFQ()` |
-
-## Installation
-
-Using npm:
 ```bash
-npm install @thetanuts-finance/thetanuts-client
+npm install @thetanuts-finance/thetanuts-client ethers
 ```
 
-Using yarn:
-```bash
-yarn add @thetanuts-finance/thetanuts-client
-```
-
-## Quick Start
+Instantiate a read-only client and prove it works:
 
 ```typescript
 import { ethers } from 'ethers';
 import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 
-// Initialize with provider (read-only — no signer needed for any of this)
 const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 const client = new ThetanutsClient({
   chainId: 8453, // Base mainnet
   provider,
 });
 
-// 1. Fetch available orders from the book
 const orders = await client.api.fetchOrders();
-console.log(`Found ${orders.length} orders`);
+console.log(`Found ${orders.length} live orders on the book`);
 
-// 2. Get market data
-const marketData = await client.api.getMarketData();
-console.log(`BTC: $${marketData.prices.BTC}`);
-console.log(`ETH: $${marketData.prices.ETH}`);
+const market = await client.api.getMarketData();
+console.log(`ETH: $${market.prices.ETH}  BTC: $${market.prices.BTC}`);
+```
 
-// 3. Preview what a fill would actually cost (no transaction, no signer)
-//    For PUTs and spreads, contract count is NOT the same as premium —
-//    previewFillOrder runs the same collateral math the contract uses.
-if (orders.length > 0) {
-  const preview = client.optionBook.previewFillOrder(orders[0], 10_000000n); // 10 USDC
-  console.log(`Contracts: ${preview.numContracts}`);
-  console.log(`Collateral: ${preview.collateralToken}`);
-  console.log(`Price per contract: ${preview.pricePerContract}`);
-}
+No signer, no approvals, no transactions — just network reads. If that prints, your setup is good.
 
-// 4. Get MM pricing for custom RFQ options
+---
+
+## Two paths: read market data, or trade
+
+### Path A — I just want to read market data
+
+You don't need a signer. The client above can already:
+
+- Browse the OptionBook (`client.api.fetchOrders`)
+- Fetch MM pricing for RFQ-style options (`client.mmPricing.getAllPricing`)
+- Pull positions, stats, and historical data from the indexer (`client.api.*`)
+- Subscribe to live orders, prices, and trades (`client.ws.*`)
+
+Quick examples:
+
+```typescript
+// All active ETH option quotes the MM is showing
 const pricing = await client.mmPricing.getAllPricing('ETH');
 const active = client.mmPricing.filterExpired(Object.values(pricing));
-console.log(`${active.length} active ETH options available for RFQ`);
+console.log(`${active.length} active ETH options`);
+
+// Real-time price stream
+await client.ws.connect();
+client.ws.subscribePrices((update) => {
+  console.log(`${update.underlying}: $${update.price}`);
+}, 'ETH');
 ```
 
-**Next step:** to actually execute a fill you need a signer. Jump to [OptionBook: Browse and Fill an Order](#optionbook-browse-and-fill-an-order), or to create a custom option jump to [RFQ: Create a Custom Option](#rfq-create-a-custom-option).
+### Path B — I want to trade
 
-## Key Concepts
+You need three things in order:
 
-### Chain Configuration
-
-Access all contract addresses and token configs from the client -- no hardcoding required:
-
-```typescript
-const config = client.chainConfig;
-
-// Tokens
-config.tokens.USDC.address;  // 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-config.tokens.USDC.decimals; // 6
-config.tokens.WETH.address;  // 0x4200000000000000000000000000000000000006
-config.tokens.cbBTC.address; // 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf
-
-// Cash-settled implementations (OptionBook)
-config.implementations.PUT;            // Vanilla PUT
-config.implementations.INVERSE_CALL;   // Vanilla CALL
-config.implementations.PUT_SPREAD;     // Put spread (2 strikes)
-config.implementations.CALL_SPREAD;    // Call spread (2 strikes)
-config.implementations.PUT_FLY;        // Put butterfly (3 strikes)
-config.implementations.CALL_FLY;       // Call butterfly (3 strikes)
-config.implementations.PUT_CONDOR;     // Put condor (4 strikes)
-config.implementations.CALL_CONDOR;    // Call condor (4 strikes)
-config.implementations.IRON_CONDOR;    // Iron condor (4 strikes)
-
-// Physically settled implementations (RFQ/Factory)
-config.implementations.PHYSICAL_PUT;          // Vanilla physical PUT
-config.implementations.PHYSICAL_CALL;         // Vanilla physical CALL
-
-// Price feeds
-config.priceFeeds.ETH;  // Chainlink ETH/USD feed
-config.priceFeeds.BTC;  // Chainlink BTC/USD feed
-```
-
-### Decimal Handling
-
-The SDK provides utilities for safe decimal conversions:
-
-| Type | Decimals | Example |
-|------|----------|---------|
-| USDC | 6 | `1000000` = 1 USDC |
-| WETH | 18 | `1000000000000000000` = 1 WETH |
-| cbBTC | 8 | `100000000` = 1 cbBTC |
-| Strike/Price | 8 | `185000000000` = $1850 |
-
-```typescript
-// Convert to on-chain values
-const usdc = client.utils.toBigInt('100.5', 6);   // 100500000n
-const strike = client.utils.strikeToChain(1850);  // 185000000000n
-
-// Convert from on-chain values
-const display = client.utils.fromBigInt(100500000n, 6);  // '100.5'
-const price = client.utils.strikeFromChain(185000000000n); // 1850
-```
-
-### RFQ: collateralAmount is ALWAYS 0
-
-When creating RFQs, the `collateralAmount` parameter must **always be 0**:
-
-```typescript
-// ✅ CORRECT - collateralAmount is always 0
-const params = client.optionFactory.buildRFQParams({
-  // ... other params
-});
-// buildRFQParams automatically sets collateralAmount = 0
-
-// ❌ WRONG - never set collateralAmount manually
-collateralAmount: BigInt(1000000)  // This will cause issues!
-```
-
-**Why?** Collateral is NOT locked at RFQ creation. It's pulled at settlement time from both parties. The `buildRFQParams` helper enforces this pattern automatically.
-
-For **SELL positions**, you must separately approve tokens for the OptionFactory contract before creating the RFQ. See the [RFQ Workflow Guide](docs/RFQ_WORKFLOW.md) for complete details.
-
-## With Signer (for transactions)
+1. **A signer** — anything `ethers.Signer`-shaped (private key wallet, Coinbase Smart Wallet, Safe, etc.).
+2. **Token approvals** — `USDC`, `WETH`, or `cbBTC` must be approved to the OptionBook or OptionFactory contract before you fill or RFQ.
+3. **The right module** — `client.optionBook` for filling existing orders, `client.optionFactory` for creating custom RFQs.
 
 ```typescript
 import { ethers } from 'ethers';
 import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 
-// Initialize with signer for write operations
 const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
-const signer = new ethers.Wallet(privateKey, provider);
+const signer = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
 
 const client = new ThetanutsClient({
   chainId: 8453,
   provider,
   signer,
-  referrer: '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567', // Optional: referrer for fee sharing
+  // Optional: earn a share of fees on every fill you route
+  referrer: '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567',
 });
 
-// Approve collateral token spending
-const usdcAddress = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+// Approve USDC to OptionBook before filling
 await client.erc20.ensureAllowance(
-  usdcAddress,
+  client.chainConfig.tokens.USDC.address,
   client.chainConfig.contracts.optionBook,
-  1000000000n // 1000 USDC
+  10_000000n, // 10 USDC (6 decimals)
 );
 
-// Fill an order (pass full OrderWithSignature)
-const order = orders[0];
-const result = await client.optionBook.fillOrder(order);
-console.log(`Trade executed: ${result.hash}`);
+// Fill an order — see Common workflows for the full flow
+const orders = await client.api.fetchOrders();
+const receipt = await client.optionBook.fillOrder(orders[0], 10_000000n);
+console.log(`Filled: ${receipt.hash}`);
 ```
 
-## Referrer (Fee Sharing)
+Jump to [Common workflows](#common-workflows) for end-to-end fills, RFQs, multi-leg structures, and position management.
 
-The SDK supports a **referrer address** for fee sharing on order fills. When a referrer is set, a portion of the trading fees is allocated to the referrer.
+---
+
+## Choosing between OptionBook and RFQ
+
+Both systems use the same cash-settled implementation contracts and produce identical option positions. The difference is **how you get a quote** and **who provides liquidity**.
+
+|                | **OptionBook**                                                | **RFQ (Factory)**                                                                        |
+| -------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| What           | Fill existing market-maker orders from a public book          | Request a custom option, market makers submit sealed-bid offers                          |
+| Best for       | Quick trades on listed strikes/expiries                       | Custom strikes, custom expiries, off-the-run structures                                  |
+| Structures     | Vanilla, spread, butterfly, condor, iron condor (cash)        | Same, plus optional physically-settled vanilla                                           |
+| Settlement     | Cash-settled (payout in collateral token at expiry)           | **Cash-settled by default**; physical opt-in via `buildPhysicalOptionRFQ()` (vanilla only) |
+| Key methods    | `fetchOrders()`, `previewFillOrder()`, `fillOrder()`          | `buildRFQRequest()`, `requestForQuotation()`, `settleQuotationEarly()`                   |
+| Pricing source | Per-order from `fetchOrders()`                                | MM continuous quotes from `client.mmPricing.getAllPricing()`                             |
+| Collateral     | Taker pays premium upfront                                    | `collateralAmount = 0` at creation; pulled at settlement (SELL needs prior approval)     |
+| Data           | Book indexer (`/api/v1/book/`)                                | Factory indexer (`/api/v1/factory/`)                                                     |
+| User reads     | `getUserPositionsFromIndexer()`                               | `getUserRfqs()`, `getUserOptionsFromRfq()`                                               |
+| Stats          | `getBookProtocolStats()`, `getBookDailyStats()`               | `getFactoryProtocolStats()`, `getFactoryDailyStats()`                                    |
+
+Rule of thumb: if the order you want already exists on the book, fill it. If not, RFQ it.
+
+---
+
+## Modules
+
+The client exposes 14 modules. Pull what you need; the rest stay idle.
+
+| Module                  | Purpose                                              | Needs signer    |
+| ----------------------- | ---------------------------------------------------- | --------------- |
+| `client.api`            | Indexer reads: orders, positions, stats, market data | No              |
+| `client.optionBook`     | Fill / preview / cancel orders, fees                 | Write ops only  |
+| `client.optionFactory`  | RFQ lifecycle (create, offer, settle)                | Write ops only  |
+| `client.option`         | Position management and payouts                      | Write ops only  |
+| `client.ranger`         | RangerOption (zone-bound, 4-strike) positions        | Write ops only  |
+| `client.mmPricing`      | Continuous MM pricing, Greeks, fee adjustments       | No              |
+| `client.rfqKeys`        | ECDH keypairs for encrypted RFQ offers               | No              |
+| `client.erc20`          | Token approvals, balances, transfers                 | Write ops only  |
+| `client.events`         | On-chain event queries                               | No              |
+| `client.ws`             | Real-time order, price, and trade subscriptions      | No              |
+| `client.utils`          | Decimal conversions, payoff math                     | No              |
+| `client.loan`           | Non-liquidatable lending (borrow vs ETH/BTC)         | Write ops only  |
+| `client.wheelVault`     | WheelVault interactions                              | Write ops only  |
+| `client.strategyVault`  | StrategyVault interactions                           | Write ops only  |
+
+Note: the pricing module is **`client.mmPricing`**, not `client.pricing`.
+
+See [`src/modules/README.md`](src/modules/README.md) for per-module reference.
+
+---
+
+## Common workflows
+
+### OptionBook flows
+
+#### Browse and fill an order
 
 ```typescript
-// Option 1: Set referrer at client initialization (applies to all fills)
+import { ethers } from 'ethers';
+import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
+
+const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
+const signer = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+
 const client = new ThetanutsClient({
   chainId: 8453,
   provider,
@@ -227,179 +184,260 @@ const client = new ThetanutsClient({
   referrer: '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567',
 });
 
-// All fillOrder calls will use this referrer automatically
-await client.optionBook.fillOrder(order);
+// 1. Browse the book
+const orders = await client.api.fetchOrders();
+const order = orders.find(
+  (o) => o.order.expiry > BigInt(Math.floor(Date.now() / 1000)),
+);
+if (!order) throw new Error('No active orders');
 
-// Option 2: Pass referrer per fill call (overrides client default)
+// 2. Preview the fill — no transaction, no signer call
+//    For PUTs and multi-leg structures, contract count != premium.
+//    previewFillOrder runs the same collateral math the contract uses.
+const preview = client.optionBook.previewFillOrder(order, 10_000000n); // 10 USDC
+console.log(`Buying ${preview.numContracts} contracts at ${preview.pricePerContract}`);
+console.log(`Collateral token: ${preview.collateralToken}`);
+
+// 3. Approve collateral
+const usdc = client.chainConfig.tokens.USDC.address;
+await client.erc20.ensureAllowance(
+  usdc,
+  client.chainConfig.contracts.optionBook,
+  10_000000n,
+);
+
+// 4. Fill
+const receipt = await client.optionBook.fillOrder(order, 10_000000n);
+console.log(`Filled: ${receipt.hash}`);
+```
+
+#### Understand collateral vs contracts (PUT footgun)
+
+`availableAmount` on an order is the **maker's collateral budget**, not contract count. The actual fillable contracts depend on option type:
+
+| Type            | Strikes | Formula                                  | Worked example                            |
+| --------------- | ------- | ---------------------------------------- | ----------------------------------------- |
+| Vanilla PUT     | 1       | `(collateral × 1e8) / strike`            | 10,000 USDC @ $95k strike = 0.105 contracts |
+| Inverse CALL    | 1       | `collateral / 1e12`                      | 1 WETH = 1 contract                        |
+| Spread          | 2       | `(collateral × 1e8) / spreadWidth`       | 10,000 USDC / $10k spread = 1 contract     |
+| Butterfly       | 3       | `(collateral × 1e8) / maxSpread`         | Based on widest strike range               |
+| Condor          | 4       | `(collateral × 1e8) / maxSpread`         | Based on widest strike range               |
+
+Always call `previewFillOrder()` before `fillOrder()` — it returns the exact contract count, collateral token, and price-per-contract the contract will use.
+
+#### Referrer fees
+
+Set a referrer to earn a share of fees on every fill you route. Fees accrue per collateral token and can be claimed in bulk.
+
+```typescript
+// Set globally on the client
+const client = new ThetanutsClient({
+  chainId: 8453, provider, signer,
+  referrer: '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567',
+});
+
+// Or override per-call
 await client.optionBook.fillOrder(order, undefined, '0xYourReferrerAddress');
 
-// Option 3: Use encode methods (for viem/wagmi/AA wallets)
+// Or build the calldata for viem/wagmi/AA wallets
 const { to, data } = client.optionBook.encodeFillOrder(
-  order,
-  collateralAmount,
-  '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567'
+  order, 10_000000n, '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567',
 );
-const hash = await walletClient.sendTransaction({ to, data });
 
-// Query referrer fee split
-const feeBps = await client.optionBook.getReferrerFeeSplit('0x...');
-console.log(`Referrer fee: ${feeBps} bps`);
-
-// Query accumulated fees for a single token
-const fees = await client.optionBook.getFees(usdcAddress, '0x...');
-console.log(`Accumulated fees: ${fees}`);
-
-// Check all claimable fees across every collateral token at once
-const claimable = await client.optionBook.getAllClaimableFees('0x...');
+// Check what's claimable across every collateral token
+const claimable = await client.optionBook.getAllClaimableFees('0xYourAddress');
 for (const fee of claimable) {
   console.log(`${fee.symbol}: ${ethers.formatUnits(fee.amount, fee.decimals)}`);
 }
 
-// Claim all non-zero fee balances in one call
+// Claim every non-zero balance in one call
 const results = await client.optionBook.claimAllFees();
 for (const r of results) {
-  if (r.receipt) console.log(`Claimed ${r.symbol}: tx ${r.receipt.hash}`);
+  if (r.receipt) console.log(`Claimed ${r.symbol}: ${r.receipt.hash}`);
 }
 ```
 
-If no referrer is provided, the zero address (`0x000...`) is used (no fee sharing).
+If no referrer is set, the zero address is used (no fee sharing).
 
-## Modules
+---
 
-| Module | Purpose | Requires Signer |
-|--------|---------|-----------------|
-| `client.erc20` | Token approvals, balances, transfers | Write ops only |
-| `client.optionBook` | Fill/cancel orders, get fees, claim fees | Write ops only |
-| `client.api` | Fetch orders, positions, stats | No |
-| `client.optionFactory` | RFQ lifecycle management | Write ops only |
-| `client.option` | Position management, payouts | Write ops only |
-| `client.ranger` | RangerOption (zone-bound, 4-strike) position management | Write ops only |
-| `client.events` | Query blockchain events | No |
-| `client.ws` | Real-time subscriptions | No |
-| `client.mmPricing` | Market maker pricing, Greeks | No |
-| `client.rfqKeys` | ECDH key management, offer encryption | No |
-| `client.utils` | Decimal conversions, payoffs | No |
-| `client.loan` | Non-liquidatable lending | Write ops only |
-| `client.wheelVault` | WheelVault (Ethereum mainnet) interactions | Write ops only |
-| `client.strategyVault` | StrategyVault (Base) interactions | Write ops only |
+### RFQ flows
 
-See [src/modules/README.md](src/modules/README.md) for detailed module documentation (14 modules total).
+RFQs are sealed-bid: you broadcast a request, market makers submit encrypted offers, and you reveal/settle the best one. The SDK handles ECDH encryption automatically.
 
-## Supported Chains
-
-| Chain | Chain ID | Status |
-|-------|----------|--------|
-| Base Mainnet | 8453 | Supported |
-
-## Configuration Options
+#### Vanilla RFQ (cash-settled)
 
 ```typescript
-interface ThetanutsClientConfig {
-  chainId: 8453;                    // Required: Chain ID
-  provider: Provider;               // Required: ethers.js provider
-  signer?: Signer;                  // Optional: For transactions
-  referrer?: string;                // Optional: Referrer address for fees
-  apiBaseUrl?: string;              // Optional: Override API URL
-  indexerApiUrl?: string;           // Optional: Override indexer URL
-  pricingApiUrl?: string;           // Optional: Override pricing URL
-  wsUrl?: string;                   // Optional: Override WebSocket URL
-  env?: 'dev' | 'prod';             // Optional: Environment (default: prod)
-  logger?: ThetanutsLogger;         // Optional: Custom logger
-}
-```
+const client = new ThetanutsClient({ chainId: 8453, provider, signer });
+const userAddress = await signer.getAddress();
 
-## RFQ Key Management
-
-The SDK uses ECDH (Elliptic Curve Diffie-Hellman) key pairs for encrypted offers in the RFQ system. Keys are automatically persisted based on your environment:
-
-| Environment | Default Storage | Persistence |
-|-------------|-----------------|-------------|
-| **Node.js** | `FileStorageProvider` | Keys saved to `.thetanuts-keys/` directory |
-| **Browser** | `LocalStorageProvider` | Keys saved to localStorage |
-
-### Automatic Key Management
-
-```typescript
-// Keys are automatically persisted - no configuration needed
+// 1. Get (or create) your ECDH keypair — used to receive encrypted MM offers
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
-console.log('Public Key:', keyPair.compressedPublicKey);
-// Keys are saved automatically and survive process restarts
-```
 
-### Custom Storage Location (Node.js)
-
-```typescript
-import { ThetanutsClient, FileStorageProvider } from '@thetanuts-finance/thetanuts-client';
-
-// Custom storage directory
-const customStorage = new FileStorageProvider('./my-keys');
-const client = new ThetanutsClient({
-  chainId: 8453,
-  provider,
-  keyStorageProvider: customStorage,
+// 2. Build the request. buildRFQRequest enforces collateralAmount = 0.
+const rfqRequest = client.optionFactory.buildRFQRequest({
+  requester: userAddress,
+  underlying: 'ETH',           // 'ETH' | 'BTC'
+  optionType: 'PUT',           // 'CALL' | 'PUT'
+  strike: 2000,                // Human-readable USD strike
+  expiry: Math.floor(Date.now() / 1000) + 86400 * 7, // 7 days out
+  numContracts: 1.5,           // Human-readable
+  isLong: true,                // true = BUY, false = SELL
+  offerDeadlineMinutes: 60,
+  collateralToken: 'USDC',
+  reservePrice: 0.015,         // Optional: max price per contract you'd accept
+  requesterPublicKey: keyPair.compressedPublicKey,
 });
+
+// 3. Submit
+const receipt = await client.optionFactory.requestForQuotation(rfqRequest);
+console.log(`RFQ created: ${receipt.hash}`);
+
+// SELL side only: approve collateral to the OptionFactory BEFORE submitting.
+// For a PUT, the collateral is strike * contracts (in USDC):
+//   const approval = BigInt(Math.round(2000 * 1.5 * 1e6));
+//   await client.erc20.approve(USDC, client.optionFactory.contractAddress, approval);
 ```
 
-### Key Backup Warning
+See the [RFQ workflow guide](docs/RFQ_WORKFLOW.md) for the full lifecycle: MM offers, the reveal phase, and final settlement.
 
-> **IMPORTANT**: Back up your RFQ private keys! Keys are stored in `.thetanuts-keys/` with secure permissions (0o600). If lost, you **cannot** decrypt offers made to your public key. There is no recovery mechanism.
+#### Multi-leg RFQs (spread, butterfly, condor)
 
-### Memory Storage (Testing Only)
+Pass an array of strikes instead of a single strike. The implementation is selected automatically from the leg count.
 
 ```typescript
-import { ThetanutsClient, MemoryStorageProvider } from '@thetanuts-finance/thetanuts-client';
+const keyPair = await client.rfqKeys.getOrCreateKeyPair();
+const expiry = Math.floor(Date.now() / 1000) + 86400 * 7;
 
-// ⚠️ WARNING: Keys are LOST when process exits!
-const client = new ThetanutsClient({
-  chainId: 8453,
-  provider,
-  keyStorageProvider: new MemoryStorageProvider(),
+// Butterfly: 3 strikes — +1 PUT @lower, -2 PUT @middle, +1 PUT @upper
+const butterfly = client.optionFactory.buildRFQRequest({
+  requester: userAddress,
+  underlying: 'ETH',
+  optionType: 'PUT',
+  strikes: [1700, 1800, 1900],     // 3 strikes = BUTTERFLY
+  expiry,
+  numContracts: 0.001,
+  isLong: false,                   // SELL (short) butterfly
+  offerDeadlineMinutes: 6,
+  collateralToken: 'USDC',
+  reservePrice: 0.0001,
+  requesterPublicKey: keyPair.compressedPublicKey,
 });
+
+// Collateral for a short PUT butterfly = (middle - lower) * numContracts
+// $100 wing width * 0.001 = 0.1 USDC
+await client.erc20.ensureAllowance(
+  client.chainConfig.tokens.USDC.address,
+  client.optionFactory.contractAddress,
+  100000n,
+);
+await client.optionFactory.requestForQuotation(butterfly);
+
+// Condor: 4 strikes — +1 @s1, -1 @s2, -1 @s3, +1 @s4
+const condor = client.optionFactory.buildRFQRequest({
+  requester: userAddress,
+  underlying: 'ETH',
+  optionType: 'PUT',
+  strikes: [1600, 1700, 1800, 1900],  // 4 strikes = CONDOR
+  expiry,
+  numContracts: 0.001,
+  isLong: false,
+  offerDeadlineMinutes: 6,
+  collateralToken: 'USDC',
+  reservePrice: 0.0001,
+  requesterPublicKey: keyPair.compressedPublicKey,
+});
+await client.optionFactory.requestForQuotation(condor);
 ```
 
-The SDK logs a warning when using `MemoryStorageProvider` since keys won't persist.
+#### Physically-settled RFQ (vanilla only)
 
-## Examples
-
-### Check Token Balance
+By default, RFQs are cash-settled. For physical settlement, use the dedicated builder — only vanilla CALL/PUT are supported on-chain.
 
 ```typescript
-const balance = await client.erc20.getBalance(usdcAddress, userAddress);
-console.log(`Balance: ${ethers.formatUnits(balance, 6)} USDC`);
+const physical = client.optionFactory.buildPhysicalOptionRFQ({
+  requester: userAddress,
+  underlying: 'ETH',
+  optionType: 'CALL',
+  strike: 2500,
+  expiry,
+  numContracts: 1,
+  isLong: true,
+  offerDeadlineMinutes: 30,
+  collateralToken: 'WETH',
+  requesterPublicKey: keyPair.compressedPublicKey,
+});
+await client.optionFactory.requestForQuotation(physical);
 ```
 
-### Get Protocol Stats
+#### Settle early (accept an MM offer before the deadline)
 
 ```typescript
-// Lightweight legacy stats: totals only
+const quotationId = 784n;
+const currentBlock = await provider.getBlockNumber();
+
+// 1. Pull the MM offers from chain events
+const offerEvents = await client.events.getOfferMadeEvents({
+  quotationId,
+  fromBlock: currentBlock - 1000,
+});
+const offer = offerEvents[0];
+
+// 2. Decrypt with your keypair
+const keyPair = await client.rfqKeys.loadKeyPair();
+const decrypted = await client.rfqKeys.decryptOffer(
+  offer.signedOfferForRequester,
+  offer.signingKey,
+);
+console.log(`Offer: ${ethers.formatUnits(decrypted.offerAmount, 6)} USDC`);
+
+// 3. Accept on-chain
+const { to, data } = client.optionFactory.encodeSettleQuotationEarly(
+  quotationId,
+  decrypted.offerAmount,
+  decrypted.nonce,
+  offer.offeror,
+);
+const tx = await signer.sendTransaction({ to, data });
+console.log(`Settled early: ${tx.hash}`);
+```
+
+#### All structures at a glance
+
+| Structure  | Strikes | Implementation              | Strike order              |
+| ---------- | ------- | --------------------------- | ------------------------- |
+| Vanilla    | 1       | `PUT` / `INVERSE_CALL`      | N/A                       |
+| Spread     | 2       | `PUT_SPREAD` / `CALL_SPREAD`| PUT: desc, CALL: asc      |
+| Butterfly  | 3       | `PUT_FLY` / `CALL_FLY`      | PUT: desc, CALL: asc      |
+| Condor     | 4       | `PUT_CONDOR` / `CALL_CONDOR`| Always ascending          |
+| Iron condor| 4       | `IRON_CONDOR`               | `strike1..strike4` asc    |
+
+Iron condor strike params are named `strike1, strike2, strike3, strike4` — **not** `putLowerStrike` / `callLowerStrike`. Butterfly and call/put fly are `PUT_FLY` / `CALL_FLY` (singular, no trailing `S`).
+
+---
+
+### Position & portfolio flows
+
+```typescript
+// All on-chain positions for an address — pulled from the book indexer
+const positions = await client.api.getUserPositionsFromIndexer(userAddress);
+
+// All RFQs you've created (active + historical)
+const rfqs = await client.api.getUserRfqs(userAddress);
+
+// Options that materialized from your RFQs after MM acceptance
+const rfqOptions = await client.api.getUserOptionsFromRfq(userAddress);
+
+// Lightweight legacy totals
 const stats = await client.api.getStatsFromIndexer();
-console.log(`Unique Users: ${stats.uniqueUsers}`);
-console.log(`Open Positions: ${stats.openPositions}`);
-console.log(`Total Options Tracked: ${stats.totalOptionsTracked}`);
+console.log(`Unique users: ${stats.uniqueUsers}, open: ${stats.openPositions}`);
 
-// Richer protocol stats with time windows and per-implementation breakdowns:
-//   client.api.getBookProtocolStats()     // OptionBook side
-//   client.api.getFactoryProtocolStats()  // RFQ/Factory side
-//   client.api.getProtocolStats()         // Combined
-```
+// Richer time-windowed protocol stats (book / factory / combined)
+const bookStats = await client.api.getBookProtocolStats();
+const factoryStats = await client.api.getFactoryProtocolStats();
+const combined = await client.api.getProtocolStats();
 
-### Subscribe to Real-time Updates
-
-```typescript
-await client.ws.connect();
-
-client.ws.subscribe({ type: 'orders' }, (update) => {
-  console.log('Order update:', update);
-});
-
-client.ws.subscribe({ type: 'prices' }, (update) => {
-  console.log('Price update:', update);
-});
-```
-
-### Calculate Option Payoff
-
-```typescript
+// Compute payoff at a hypothetical settlement price
 const payoff = client.utils.calculatePayout({
   structure: 'call_spread',
   strikes: [100000n, 105000n],
@@ -407,324 +445,40 @@ const payoff = client.utils.calculatePayout({
   price: 102000n,
   isLong: true,
 });
-console.log(`Payoff: ${payoff}`);
 ```
 
-## Common Workflows
+---
 
-### OptionBook: Browse and Fill an Order
-
-```typescript
-import { ethers } from 'ethers';
-import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
-
-const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
-const signer = new ethers.Wallet(privateKey, provider);
-
-const client = new ThetanutsClient({
-  chainId: 8453,
-  provider,
-  signer,
-  referrer: '0x92b8ac05b63472d1D84b32bDFBBf3e1887331567',
-});
-
-// 1. Fetch available orders
-const orders = await client.api.fetchOrders();
-const order = orders.find((o) => o.order.expiry > BigInt(Math.floor(Date.now() / 1000)));
-
-if (!order) throw new Error('No active orders found');
-
-// 2. Preview the fill (dry-run, no transaction)
-const preview = client.optionBook.previewFillOrder(order, 10_000000n); // 10 USDC
-console.log(`Contracts: ${preview.numContracts}, Collateral: ${preview.collateralToken}`);
-
-// 3. Approve collateral spending
-const usdcAddress = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-await client.erc20.ensureAllowance(
-  usdcAddress,
-  client.chainConfig.contracts.optionBook,
-  10_000000n,
-);
-
-// 4. Fill the order
-const receipt = await client.optionBook.fillOrder(order, 10_000000n);
-console.log(`Trade executed: ${receipt.hash}`);
-```
-
-### RFQ: Create a Custom Option
+### Realtime / WebSocket
 
 ```typescript
-import { ethers } from 'ethers';
-import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
-
-const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
-const signer = new ethers.Wallet(privateKey, provider);
-
-const client = new ThetanutsClient({ chainId: 8453, provider, signer });
-const userAddress = await signer.getAddress();
-
-// 1. Build RFQ params using helper (enforces collateralAmount = 0)
-const rfqRequest = client.optionFactory.buildRFQRequest({
-  requester: userAddress,
-  underlying: 'ETH',           // 'ETH' | 'BTC'
-  optionType: 'PUT',           // 'CALL' | 'PUT'
-  strike: 2000,                // Human-readable
-  expiry: Math.floor(Date.now() / 1000) + 86400 * 7, // 7 days
-  numContracts: 1.5,           // Human-readable
-  isLong: true,                // true = BUY, false = SELL
-  offerDeadlineMinutes: 60,
-  collateralToken: 'USDC',
-  reservePrice: 0.015,         // Optional: max price per contract
-  requesterPublicKey: '0xYourECDHPublicKey',
-});
-
-// 2. Encode and send transaction
-const { to, data } = client.optionFactory.encodeRequestForQuotation(rfqRequest);
-const tx = await signer.sendTransaction({ to, data });
-console.log(`RFQ created: ${tx.hash}`);
-
-// For SELL positions, approve tokens BEFORE creating RFQ:
-// const strike = 2000;
-// const numContracts = 1.5;
-// const approval = BigInt(Math.round(strike * numContracts * 1e6)); // PUT: strike * contracts
-// await client.erc20.approve(USDC, client.optionFactory.contractAddress, approval);
-```
-
-See [RFQ Workflow Guide](docs/RFQ_WORKFLOW.md) for the complete RFQ lifecycle including MM offers, reveal phase, and settlement.
-
-### RFQ: Create a Butterfly
-
-```typescript
-// Butterfly uses 3 strikes: lower, middle, upper
-// Structure: +1 PUT @lower, -2 PUT @middle, +1 PUT @upper
-const butterflyRequest = client.optionFactory.buildRFQRequest({
-  requester: userAddress,
-  underlying: 'ETH',
-  optionType: 'PUT',
-  strikes: [1700, 1800, 1900],  // 3 strikes = BUTTERFLY
-  expiry,
-  numContracts: 0.001,
-  isLong: false,                // SELL (short) butterfly
-  offerDeadlineMinutes: 6,
-  collateralToken: 'USDC',
-  reservePrice: 0.0001,
-  requesterPublicKey: keyPair.compressedPublicKey,
-});
-
-// Collateral for butterfly = (middleStrike - lowerStrike) × numContracts
-// $100 wing width × 0.001 contracts = 0.1 USDC
-await client.erc20.ensureAllowance(USDC, factoryAddress, 100000n); // 0.1 USDC
-
-const receipt = await client.optionFactory.requestForQuotation(butterflyRequest);
-```
-
-### RFQ: Early Settlement (Accept MM Offer Before Deadline)
-
-```typescript
-// After MM submits an encrypted offer, decrypt and accept it early
-const quotationId = 784n;
-
-// 1. Find the MM's offer from events
-const offerEvents = await client.events.getOfferMadeEvents({
-  quotationId,
-  fromBlock: currentBlock - 1000,
-});
-
-const offer = offerEvents[0];
-
-// 2. Decrypt the offer using your ECDH keypair
-const keyPair = await client.rfqKeys.loadKeyPair();
-const decrypted = await client.rfqKeys.decryptOffer(
-  offer.signedOfferForRequester,
-  offer.signingKey
-);
-
-console.log('Offer Amount:', ethers.formatUnits(decrypted.offerAmount, 6), 'USDC');
-
-// 3. Accept the offer (settle early)
-const { to, data } = client.optionFactory.encodeSettleQuotationEarly(
-  quotationId,
-  decrypted.offerAmount,
-  decrypted.nonce,
-  offer.offeror
-);
-
-const tx = await signer.sendTransaction({ to, data });
-console.log('Early settlement TX:', tx.hash);
-```
-
-**Real example (RFQ 784 - PUT BUTTERFLY):**
-- Structure: $1700 / $1800 / $1900 PUT BUTTERFLY
-- Offer Deadline: 04:10:34 UTC
-- MM Offer: 0.000223 USDC at 04:05:45 UTC
-- Early Settle: 04:07:09 UTC (3 min before deadline)
-- TX: `0x105f75cdfb64a3796100f6d667bc4f7fec3836d2b5aa5c43b66073a1b40964ee`
-
-### RFQ: Create a Condor
-
-```typescript
-// Condor uses 4 strikes
-// Structure: +1 PUT @strike1, -1 PUT @strike2, -1 PUT @strike3, +1 PUT @strike4
-const condorRequest = client.optionFactory.buildRFQRequest({
-  requester: userAddress,
-  underlying: 'ETH',
-  optionType: 'PUT',
-  strikes: [1600, 1700, 1800, 1900],  // 4 strikes = CONDOR
-  expiry,
-  numContracts: 0.001,
-  isLong: false,                       // SELL (short) condor
-  offerDeadlineMinutes: 6,
-  collateralToken: 'USDC',
-  reservePrice: 0.0001,
-  requesterPublicKey: keyPair.compressedPublicKey,
-});
-
-// Collateral for condor = (strike2 - strike1) × numContracts
-// $100 wing width × 0.001 contracts = 0.1 USDC
-await client.erc20.ensureAllowance(USDC, factoryAddress, 100000n); // 0.1 USDC
-
-const receipt = await client.optionFactory.requestForQuotation(condorRequest);
-```
-
-**Real example (RFQ 785 - PUT CONDOR):**
-- Structure: $1600 / $1700 / $1800 / $1900 PUT CONDOR
-- MM Offer: 0.003248 USDC
-- Early Settle: 04:15:00 UTC (4 min before deadline)
-- TX: `0xa89fb6dbad43b430399bbdec878927185e602b7df9b5390f71d2d11c33e4d850`
-- Option: `0x20D51d70A51Aa529eb9460a49aAC94910A1bc267`
-
-### All Option Structures Summary
-
-| Structure | Strikes | Implementation | Strike Order |
-|-----------|---------|----------------|--------------|
-| Vanilla | 1 | PUT / INVERSE_CALL | N/A |
-| Spread | 2 | PUT_SPREAD / CALL_SPREAD | PUT: desc, CALL: asc |
-| Butterfly | 3 | PUT_FLY / CALL_FLY | PUT: desc, CALL: asc |
-| Condor | 4 | PUT_CONDOR / CALL_CONDOR | Always ascending |
-
-### Both: Monitor Positions with WebSocket
-
-```typescript
-import { ethers } from 'ethers';
-import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
-
-const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 const client = new ThetanutsClient({ chainId: 8453, provider });
-
-// 1. Connect
 await client.ws.connect();
 
-// 2. Subscribe to order updates
 const unsubOrders = client.ws.subscribeOrders((update) => {
   console.log(`Order ${update.event}:`, update);
 });
 
-// 3. Subscribe to price updates for ETH
 const unsubPrices = client.ws.subscribePrices((update) => {
-  console.log(`ETH price: $${update.price}`);
+  console.log(`ETH: $${update.price}`);
 }, 'ETH');
 
-// 4. Handle connection state changes
 const unsubState = client.ws.onStateChange((state) => {
-  console.log(`WebSocket state: ${state}`);
+  console.log(`WS state: ${state}`);
 });
 
-// 5. Disconnect when done
-// unsubOrders();
-// unsubPrices();
-// unsubState();
+// Tear down when done
+// unsubOrders(); unsubPrices(); unsubState();
 // client.ws.disconnect();
 ```
 
-## Understanding Collateral vs Contracts
+The WebSocket module auto-reconnects (default 10 attempts). Tune via `maxReconnectAttempts` / `reconnectInterval`.
 
-When viewing orders, `availableAmount` represents the **maker's collateral budget**, not the number of contracts. The actual number of purchasable contracts depends on the option type and collateral requirements.
+---
 
-### Collateral Formulas by Option Type
+## Error handling
 
-| Option Type | # Strikes | Formula | Example |
-|-------------|-----------|---------|---------|
-| **Vanilla PUT** | 1 | `(collateral × 1e8) / strike` | 10,000 USDC at $95k strike = 0.105 contracts |
-| **Inverse CALL** | 1 | `collateral / 1e12` | 1 WETH = 1 contract |
-| **SPREAD** | 2 | `(collateral × 1e8) / spreadWidth` | 10,000 USDC / $10k spread = 1 contract |
-| **BUTTERFLY** | 3 | `(collateral × 1e8) / maxSpread` | Based on widest strike range |
-| **CONDOR** | 4 | `(collateral × 1e8) / maxSpread` | Based on widest strike range |
-
-### Using previewFillOrder
-
-Always use `previewFillOrder()` to see the actual contract count before filling:
-
-```typescript
-const order = orders[0];
-
-// Preview shows calculated max contracts based on collateral requirements
-const preview = client.optionBook.previewFillOrder(order);
-console.log(`Max contracts: ${preview.maxContracts}`);
-console.log(`Collateral token: ${preview.collateralToken}`);
-console.log(`Price per contract: ${preview.pricePerContract}`);
-
-// Preview with specific premium amount
-const preview10 = client.optionBook.previewFillOrder(order, 10_000000n); // 10 USDC premium
-console.log(`Contracts for 10 USDC: ${preview10.numContracts}`);
-```
-
-### Why This Matters
-
-For a PUT option with a $95,000 strike:
-- **Maker provides**: 10,000 USDC collateral
-- **Max contracts**: 10,000 / 95,000 ≈ **0.105 contracts** (not 10,000!)
-
-The `previewFillOrder()` method handles these calculations automatically for all option types.
-
-## Error Handling
-
-All SDK methods throw `ThetanutsError` with typed error codes:
-
-```typescript
-import { isThetanutsError } from '@thetanuts-finance/thetanuts-client';
-
-try {
-  await client.optionBook.fillOrder(orderWithSig);
-} catch (error) {
-  if (isThetanutsError(error)) {
-    switch (error.code) {
-      case 'ORDER_EXPIRED':
-        console.log('Order has expired');
-        break;
-      case 'SLIPPAGE_EXCEEDED':
-        console.log('Price moved too much');
-        break;
-      case 'INSUFFICIENT_ALLOWANCE':
-        console.log('Need to approve tokens first');
-        break;
-      case 'SIGNER_REQUIRED':
-        console.log('Signer required for this operation');
-        break;
-    }
-  }
-}
-```
-
-### Error Codes
-
-| Code | Description |
-|------|-------------|
-| `ORDER_EXPIRED` | Order has expired or will expire soon |
-| `SLIPPAGE_EXCEEDED` | Price moved beyond tolerance |
-| `INSUFFICIENT_ALLOWANCE` | Token approval needed |
-| `INSUFFICIENT_BALANCE` | Not enough tokens |
-| `NETWORK_UNSUPPORTED` | Network not supported |
-| `HTTP_ERROR` | API request failed |
-| `CONTRACT_REVERT` | Smart contract call failed |
-| `INVALID_PARAMS` | Invalid parameters provided |
-| `ORDER_NOT_FOUND` | Order not found |
-| `SIZE_EXCEEDED` | Fill size exceeds available |
-| `SIGNER_REQUIRED` | Signer needed for transaction |
-| `WEBSOCKET_ERROR` | WebSocket connection error |
-
-### Using `instanceof` for Typed Error Handling
-
-The SDK exports typed error classes for precise error handling:
+All SDK methods throw `ThetanutsError` with a typed `code`. The package also exports concrete subclasses for `instanceof` narrowing.
 
 ```typescript
 import {
@@ -739,26 +493,40 @@ try {
   await client.optionBook.fillOrder(order, 10_000000n);
 } catch (error) {
   if (error instanceof OrderExpiredError) {
-    console.log('Order expired, fetching fresh orders...');
-    const freshOrders = await client.api.fetchOrders();
+    const fresh = await client.api.fetchOrders();
     // retry with a fresh order
   } else if (error instanceof InsufficientAllowanceError) {
-    console.log('Approving tokens first...');
-    await client.erc20.ensureAllowance(usdcAddress, optionBookAddress, amount);
-    // retry the fill
+    await client.erc20.ensureAllowance(usdc, optionBook, amount);
+    // retry
   } else if (error instanceof ContractRevertError) {
-    console.log('Contract reverted:', error.message);
-    console.log('Cause:', error.cause);
+    console.error('Reverted:', error.message, error.cause);
   } else if (error instanceof ThetanutsError) {
-    console.log(`SDK error [${error.code}]: ${error.message}`);
+    console.error(`SDK error [${error.code}]: ${error.message}`);
   }
 }
 ```
 
-### Retry Pattern for Transient Errors
+### Error codes
+
+| Code                     | Meaning                                |
+| ------------------------ | -------------------------------------- |
+| `ORDER_EXPIRED`          | Order expired or expiring imminently   |
+| `SLIPPAGE_EXCEEDED`      | Price moved beyond tolerance           |
+| `INSUFFICIENT_ALLOWANCE` | Approve the collateral token first     |
+| `INSUFFICIENT_BALANCE`   | Wallet doesn't hold enough tokens      |
+| `NETWORK_UNSUPPORTED`    | Configured chainId isn't supported     |
+| `HTTP_ERROR`             | API/indexer request failed             |
+| `CONTRACT_REVERT`        | On-chain call reverted                 |
+| `INVALID_PARAMS`         | Bad arguments to an SDK method         |
+| `ORDER_NOT_FOUND`        | No order with that id                  |
+| `SIZE_EXCEEDED`          | Fill size exceeds available collateral |
+| `SIGNER_REQUIRED`        | This call needs a signer               |
+| `WEBSOCKET_ERROR`        | WS transport failure                   |
+
+### Retrying transient errors
 
 ```typescript
-import { RateLimitError, ThetanutsError } from '@thetanuts-finance/thetanuts-client';
+import { RateLimitError } from '@thetanuts-finance/thetanuts-client';
 
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -766,12 +534,10 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
       return await fn();
     } catch (error) {
       if (error instanceof RateLimitError) {
-        const delay = Math.pow(2, attempt) * 1000; // exponential backoff
-        console.log(`Rate limited, retrying in ${delay}ms...`);
-        await new Promise((r) => setTimeout(r, delay));
+        await new Promise((r) => setTimeout(r, 2 ** attempt * 1000));
         continue;
       }
-      throw error; // non-retryable error
+      throw error;
     }
   }
   throw new Error('Max retries exceeded');
@@ -780,49 +546,124 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
 const orders = await withRetry(() => client.api.fetchOrders());
 ```
 
-## Production Checklist
+---
 
-Before deploying to production, verify the following:
+## Production checklist
 
-- **RPC Provider**: Use a reliable RPC provider instead of the public `https://mainnet.base.org` endpoint. Public endpoints have strict rate limits and may be unreliable under load.
+- **Bring your own RPC.** `https://mainnet.base.org` is rate-limited and unreliable under load. Use Alchemy, Infura, QuickNode, or your own node.
+- **Set a referrer** if you're routing user flow — fees accrue automatically.
+- **Wire a logger.** Pass a custom `logger` to forward to Sentry / Datadog / your stack.
+- **Approve before you fill.** The SDK never auto-approves. Always call `client.erc20.ensureAllowance()` first.
+- **Check `order.expiry` upfront.** Cheaper than catching `OrderExpiredError` after a failed gas estimate.
+- **Configure WS reconnects** (`maxReconnectAttempts`, `reconnectInterval`) for your uptime targets.
+- **Back up your RFQ keypair.** Node stores keys in `.thetanuts-keys/` (perms `0600`). If you lose the private key, encrypted MM offers to your old public key are unrecoverable.
+- **Use a real key store in production.** `MemoryStorageProvider` loses keys on process exit.
 
-  ```typescript
-  // ❌ Not recommended for production
-  const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
+---
 
-  // ✅ Recommended: Use your own RPC provider
-  const provider = new ethers.JsonRpcProvider('https://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY');
-  // Or: https://base-mainnet.infura.io/v3/YOUR_PROJECT_ID
-  // Or: https://base.quiknode.pro/YOUR_ENDPOINT
-  ```
-- **Referrer Configuration**: Set the `referrer` address in the client config to earn fee-sharing revenue on order fills.
-- **Error Logging**: Pass a custom `logger` to the client to capture errors in your monitoring system (Sentry, Datadog, etc.).
-- **Gas Buffer**: The SDK adds a 20% gas buffer for Account Abstraction wallets (Coinbase Smart Wallet, Safe). If you use a standard EOA wallet, this buffer still applies for safety.
-- **Collateral Approval Flow**: Always call `client.erc20.ensureAllowance()` before `fillOrder()`. The SDK does not auto-approve.
-- **WebSocket Reconnection**: The WebSocket module auto-reconnects by default (up to 10 attempts). Configure `maxReconnectAttempts` and `reconnectInterval` for your use case.
-- **Order Expiry Checks**: Always check `order.expiry` before filling. The SDK throws `OrderExpiredError` but checking upfront avoids wasted gas estimates.
+## Reference
 
-## Compatibility
+### Client configuration
 
-| Requirement | Minimum Version |
-|-------------|----------------|
-| Node.js | >= 18 |
-| ethers.js | v6 |
-| TypeScript | >= 5.0 |
+```typescript
+interface ThetanutsClientConfig {
+  chainId: 8453;                         // Required: Base mainnet
+  provider: Provider;                    // Required: ethers.js provider
+  signer?: Signer;                       // Optional: needed for write ops
+  referrer?: string;                     // Optional: fee-share address
+  apiBaseUrl?: string;                   // Optional: override REST API base
+  indexerApiUrl?: string;                // Optional: override indexer
+  pricingApiUrl?: string;                // Optional: override MM pricing
+  wsUrl?: string;                        // Optional: override WebSocket
+  env?: 'dev' | 'prod';                  // Optional: default 'prod'
+  logger?: ThetanutsLogger;              // Optional: custom logger
+  keyStorageProvider?: KeyStorageProvider; // Optional: override RFQ key store
+  rfqKeyPrefix?: string;                 // Optional: namespace stored keys
+}
+```
 
-### Supported Chains
+### Chain config (no hardcoded addresses)
 
-| Chain | Chain ID | Network |
-|-------|----------|---------|
-| Base Mainnet | 8453 | Base |
+```typescript
+const config = client.chainConfig;
 
-### Build Formats
+// Tokens
+config.tokens.USDC.address;   // 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+config.tokens.USDC.decimals;  // 6
+config.tokens.WETH.address;   // 0x4200000000000000000000000000000000000006
+config.tokens.cbBTC.address;  // 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf
 
-The SDK ships as both ESM and CJS with TypeScript declarations (`.d.ts`), built with [tsup](https://tsup.egoist.dev/).
+// Cash-settled implementations (OptionBook + RFQ)
+config.implementations.PUT;            // Vanilla PUT
+config.implementations.INVERSE_CALL;   // Vanilla CALL
+config.implementations.PUT_SPREAD;     // Put spread (2 strikes)
+config.implementations.CALL_SPREAD;    // Call spread (2 strikes)
+config.implementations.PUT_FLY;        // Put butterfly (3 strikes)
+config.implementations.CALL_FLY;       // Call butterfly (3 strikes)
+config.implementations.PUT_CONDOR;     // Put condor (4 strikes)
+config.implementations.CALL_CONDOR;    // Call condor (4 strikes)
+config.implementations.IRON_CONDOR;    // Iron condor (4 strikes)
 
-## Custom Logger
+// Physically settled (vanilla only — multi-leg physicals are zero-addressed)
+config.implementations.PHYSICAL_PUT;
+config.implementations.PHYSICAL_CALL;
 
-Pass a custom logger for debugging:
+// Chainlink price feeds
+config.priceFeeds.ETH;
+config.priceFeeds.BTC;
+```
+
+### Decimal helpers
+
+| Quantity     | Decimals | Example                                   |
+| ------------ | -------- | ----------------------------------------- |
+| USDC         | 6        | `1000000n` = 1 USDC                       |
+| WETH         | 18       | `1000000000000000000n` = 1 WETH           |
+| cbBTC        | 8        | `100000000n` = 1 cbBTC                    |
+| Strike/Price | 8        | `185000000000n` = $1,850                  |
+
+```typescript
+client.utils.toBigInt('100.5', 6);        // 100500000n
+client.utils.strikeToChain(1850);         // 185000000000n
+client.utils.fromBigInt(100500000n, 6);   // '100.5'
+client.utils.strikeFromChain(185000000000n); // 1850
+```
+
+### RFQ collateralAmount is always 0
+
+`collateralAmount` on a quotation params struct **must be `0`**. `buildRFQRequest` / `buildRFQParams` enforce this; never override it. Collateral isn't locked at RFQ creation — it's pulled from both parties at settlement. SELL-side RFQs require a prior `approve()` on the OptionFactory.
+
+### RFQ key management
+
+ECDH keypairs are persisted automatically. The default storage backend depends on environment:
+
+| Environment | Default backend         | Persistence                      |
+| ----------- | ----------------------- | -------------------------------- |
+| Node.js     | `FileStorageProvider`   | `.thetanuts-keys/` (perms `0600`) |
+| Browser     | `LocalStorageProvider`  | `localStorage`                    |
+
+```typescript
+const keyPair = await client.rfqKeys.getOrCreateKeyPair();
+console.log(keyPair.compressedPublicKey);
+
+// Custom dir (Node)
+import { FileStorageProvider } from '@thetanuts-finance/thetanuts-client';
+const client = new ThetanutsClient({
+  chainId: 8453, provider,
+  keyStorageProvider: new FileStorageProvider('./my-keys'),
+});
+
+// Memory-only (tests only — logs a warning, keys lost on exit)
+import { MemoryStorageProvider } from '@thetanuts-finance/thetanuts-client';
+const testClient = new ThetanutsClient({
+  chainId: 8453, provider,
+  keyStorageProvider: new MemoryStorageProvider(),
+});
+```
+
+**Back up your private key.** There is no recovery path — lose it and you cannot decrypt offers sent to that public key.
+
+### Custom logger
 
 ```typescript
 import { ThetanutsClient, consoleLogger } from '@thetanuts-finance/thetanuts-client';
@@ -830,33 +671,33 @@ import { ThetanutsClient, consoleLogger } from '@thetanuts-finance/thetanuts-cli
 const client = new ThetanutsClient({
   chainId: 8453,
   provider,
-  logger: consoleLogger, // Use built-in console logger
-});
-
-// Or use your own logger
-const client = new ThetanutsClient({
-  chainId: 8453,
-  provider,
-  logger: {
-    debug: (msg, meta) => myLogger.debug(msg, meta),
-    info: (msg, meta) => myLogger.info(msg, meta),
-    warn: (msg, meta) => myLogger.warn(msg, meta),
-    error: (msg, meta) => myLogger.error(msg, meta),
-  },
+  logger: consoleLogger, // built-in
+  // logger: { debug, info, warn, error }, // or your own
 });
 ```
 
-## Directory Structure
+### Compatibility
+
+| Requirement | Minimum         |
+| ----------- | --------------- |
+| Node.js     | 18              |
+| ethers.js   | v6              |
+| TypeScript  | 5.0             |
+| Chain       | Base (8453)     |
+
+Builds ship as both ESM and CJS with `.d.ts` declarations, produced by [tsup](https://tsup.egoist.dev/). Both npm and Yarn (incl. Yarn Berry) are supported; CI auto-detects the lockfile.
+
+### Directory layout
 
 ```
 src/
-├── abis/       # Smart contract ABIs (ERC20, OptionBook, OptionFactory, BaseOption)
-├── chains/     # Chain configurations
-├── client/     # Main client class
-├── modules/    # Feature modules (11 modules)
-├── types/      # TypeScript definitions (16 type files)
-├── utils/      # Utility functions
-└── index.ts    # Main entry point
+├── abis/       # Contract ABIs (ERC20, OptionBook, OptionFactory, BaseOption, ...)
+├── chains/     # Chain config (addresses, tokens, implementations)
+├── client/     # ThetanutsClient
+├── modules/    # 14 feature modules
+├── types/      # Type definitions
+├── utils/      # Helpers
+└── index.ts    # Public entry
 
 scripts/
 ├── run-mainnet-tests.ts       # Live mainnet integration tests
@@ -864,99 +705,66 @@ scripts/
 └── test-indexer-endpoints.ts  # Indexer endpoint validation
 ```
 
-See [src/README.md](src/README.md) for detailed source documentation.
+---
 
 ## Development
 
 ```bash
-# Install dependencies
 npm install
-# or
-yarn install
-
-# Build
-npm run build
-# or
-yarn build
-
-# Run mainnet integration tests (requires network access)
-npm test
-# or
-yarn test
-
-# Run indexer benchmark
-npm run test:benchmark
-# or
-yarn test:benchmark
-
-# Lint
-npm run lint
-# or
-yarn lint
-
-# Type check
+npm run build           # tsup: ESM + CJS + types
 npm run typecheck
-# or
-yarn typecheck
+npm run lint
+npm test                # live mainnet integration tests (needs network)
+npm run test:benchmark
 ```
 
-### Package Manager Support
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the four required gates and PR conventions.
 
-This project supports both **npm** and **Yarn** (including Yarn Berry/v2+). The CI pipeline automatically detects which package manager to use based on the lock file present:
+---
 
-- If `yarn.lock` exists: Uses `yarn install --frozen-lockfile` and `yarn <script>`
-- If only `package-lock.json` exists: Uses `npm ci` and `npm run <script>`
+## Documentation & links
 
-**For contributors**: Please use the same package manager consistently to avoid lock file conflicts. If you're adding dependencies, ensure the lock file you're using is committed.
+| Section                                                                                | Description                                                  |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| [Getting Started](https://docs.thetanuts.finance/sdk/getting-started/overview)         | Installation, quick start, configuration                     |
+| [OptionBook](https://docs.thetanuts.finance/sdk/optionbook/overview)                   | Browse, preview, fill                                        |
+| [RFQ (Factory)](https://docs.thetanuts.finance/sdk/rfq/overview)                       | Custom options, multi-leg, RFQ lifecycle                     |
+| [Pricing](https://docs.thetanuts.finance/sdk/pricing/mm-pricing)                       | MM pricing, spreads, collateral cost                         |
+| [Guides](https://docs.thetanuts.finance/sdk/guides/error-handling)                     | Errors, WebSocket, production checklist                      |
+| [Loan](https://docs.thetanuts.finance/sdk/loan/overview)                               | Non-liquidatable lending                                     |
+| [SDK Reference](https://docs.thetanuts.finance/sdk/reference/client)                   | Client, modules, types, utilities                            |
+| [MCP Server](mcp-server/README.md)                                                     | Read-only MCP server for AI agents                           |
 
-## Documentation
+### Copy-paste examples
 
-Detailed guides and references:
+| File                                                                | What it shows                                              |
+| ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [`docs/examples/fill-order.ts`](docs/examples/fill-order.ts)        | Full OptionBook fill: preview, approve, execute, errors    |
+| [`docs/examples/claim-fees.ts`](docs/examples/claim-fees.ts)        | Check + claim referrer fees across all tokens              |
+| [`docs/examples/create-rfq.ts`](docs/examples/create-rfq.ts)        | RFQ creation (BUY and SELL sides)                          |
+| [`docs/examples/physical-option-rfq.ts`](docs/examples/physical-option-rfq.ts) | Physically-settled RFQ (vanilla only)               |
+| [`docs/examples/fetch-pricing.ts`](docs/examples/fetch-pricing.ts)  | MM pricing with filters                                    |
+| [`docs/examples/option-management.ts`](docs/examples/option-management.ts)     | Position queries and operations                     |
+| [`docs/examples/query-stats.ts`](docs/examples/query-stats.ts)      | Protocol and referrer stats                                |
 
-| Section | Description |
-|---------|-------------|
-| [Getting Started](https://docs.thetanuts.finance/sdk/getting-started/overview) | Installation, quick start, configuration |
-| [OptionBook](https://docs.thetanuts.finance/sdk/optionbook/overview) | Browse orders, preview fills, execute trades |
-| [RFQ (Factory)](https://docs.thetanuts.finance/sdk/rfq/overview) | Create custom options, multi-leg structures, RFQ lifecycle |
-| [Pricing](https://docs.thetanuts.finance/sdk/pricing/mm-pricing) | MM pricing, spreads, collateral cost |
-| [Guides](https://docs.thetanuts.finance/sdk/guides/error-handling) | Error handling, WebSocket, production checklist |
-| [Loan](https://docs.thetanuts.finance/sdk/loan/overview) | Non-liquidatable lending (borrow USDC against ETH/BTC) |
-| [SDK Reference](https://docs.thetanuts.finance/sdk/reference/client) | Client, modules, types, utilities |
-| [MCP Server](mcp-server/README.md) | Read-only MCP server for AI agents |
+### API reference
 
-### Code Examples
+- [Source overview](src/README.md)
+- [Client](src/client/README.md)
+- [Modules](src/modules/README.md)
+- [Types](src/types/README.md)
+- [Utils](src/utils/README.md)
+- [ABIs](src/abis/README.md)
+- [Chains](src/chains/README.md)
+- [Scripts](scripts/README.md)
 
-Copy-paste ready examples in `docs/examples/`:
+### License & policies
 
-- [`fill-order.ts`](docs/examples/fill-order.ts) - Complete OptionBook fill flow with preview, approval, and error handling
-- [`claim-fees.ts`](docs/examples/claim-fees.ts) - Check and claim referrer fees across all collateral tokens
-- [`create-rfq.ts`](docs/examples/create-rfq.ts) - Complete RFQ creation flow (BUY and SELL)
-- [`physical-option-rfq.ts`](docs/examples/physical-option-rfq.ts) - Physically settled option RFQ (vanilla only)
-- [`fetch-pricing.ts`](docs/examples/fetch-pricing.ts) - MM pricing with filters
-- [`option-management.ts`](docs/examples/option-management.ts) - Option queries and operations
-- [`query-stats.ts`](docs/examples/query-stats.ts) - Protocol and referrer statistics
+- [MIT License](LICENSE)
+- [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
-## API Reference
-
-- [Source Overview](src/README.md) - Source code structure
-- [Client](src/client/README.md) - ThetanutsClient initialization
-- [Modules](src/modules/README.md) - All module documentation
-- [Types](src/types/README.md) - Type definitions
-- [Utils](src/utils/README.md) - Utility functions
-- [ABIs](src/abis/README.md) - Smart contract ABIs
-- [Chains](src/chains/README.md) - Chain configuration
-- [Scripts](scripts/README.md) - Available scripts
-
-## License
-
-MIT
-
-## Contributing & Security
-
-- [Contributing guide](CONTRIBUTING.md) — local setup, the four required gates, PR conventions
-- [Security policy](SECURITY.md) — supported versions, vulnerability reporting
-
-## Links
+### Links
 
 - [Thetanuts Finance](https://thetanuts.finance)
 - [Documentation](https://docs.thetanuts.finance)
