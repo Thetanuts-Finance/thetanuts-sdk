@@ -609,18 +609,40 @@ async function buildFromFlags(
     throw err;
   }
 
-  // Grid-availability gate — refuse any (strike, expiry) the MM isn't quoting,
-  // regardless of direction or sizing path. The BUY-without-reserve-price flow
-  // would catch this later via fetchMmAskForBuild, but BUY-with-reserve-price,
-  // SELL, and direct --contracts paths previously had no gate at all and could
-  // strand on-chain escrow on a useless RFQ.
-  await assertStrikeExpiryAvailable({
-    client: result.client,
-    underlying: underlying as 'ETH' | 'BTC',
-    optionType: type as OptionType,
-    strikes,
-    expiry,
-  });
+  /* Grid-availability gate — refuse any (strike, expiry) the MM isn't quoting,
+  regardless of direction or sizing path. The BUY-without-reserve-price flow
+  would catch this later via fetchMmAskForBuild, but BUY-with-reserve-price,
+  SELL, and direct --contracts paths previously had no gate at all and could
+  strand on-chain escrow on a useless RFQ.
+  IRON_CONDOR mixes legs: strikes[0..1] are PUT legs, strikes[2..3] are CALL
+  legs. Checking all 4 against a single optionType blocks every legitimate
+  IC build because no real MM grid has the same strikes under both call and
+  put surfaces
+  */
+  if (isIronCondor && strikes.length === 4) {
+    await assertStrikeExpiryAvailable({
+      client: result.client,
+      underlying: underlying as 'ETH' | 'BTC',
+      optionType: 'PUT',
+      strikes: [strikes[0]!, strikes[1]!],
+      expiry,
+    });
+    await assertStrikeExpiryAvailable({
+      client: result.client,
+      underlying: underlying as 'ETH' | 'BTC',
+      optionType: 'CALL',
+      strikes: [strikes[2]!, strikes[3]!],
+      expiry,
+    });
+  } else {
+    await assertStrikeExpiryAvailable({
+      client: result.client,
+      underlying: underlying as 'ETH' | 'BTC',
+      optionType: type as OptionType,
+      strikes,
+      expiry,
+    });
+  }
 
   const deadlineMinutes = local.deadlineMinutes !== undefined && local.deadlineMinutes !== ''
     ? Number.parseFloat(local.deadlineMinutes)
@@ -1310,7 +1332,7 @@ async function loadOrBuildRequest(
  * Returns undefined if neither pattern matches. Caller treats as soft miss —
  * the tx itself succeeded; user just won't see the convenience ID printed.
  */
-function extractQuotationIdFromReceipt(
+export function extractQuotationIdFromReceipt(
   logs: ReadonlyArray<{ topics: readonly string[]; data: string; address: string }>,
   factoryAddress: string
 ): string | undefined {
