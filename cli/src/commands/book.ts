@@ -175,7 +175,7 @@ function assertUsdcCollateral(
 function deriveStructureType(strikeCount: number, isCall: boolean): StructureType {
   switch (strikeCount) {
     case 1:
-      return isCall ? 'INVERSE_CALL' : 'PUT';
+      return isCall ? 'CALL' : 'PUT';
     case 2:
       return isCall ? 'CALL_SPREAD' : 'PUT_SPREAD';
     case 3:

@@ -24,6 +24,7 @@ import type { ProductName } from '@thetanuts-finance/thetanuts-client';
 
 export type StructureType =
   | 'PUT'
+  | 'CALL'
   | 'INVERSE_CALL'
   | 'PUT_SPREAD'
   | 'CALL_SPREAD'
@@ -44,6 +45,12 @@ function toProductName(
   structureType: StructureType,
   collateralToken: CollateralToken
 ): ProductName {
+  // 'CALL' is the v0.1 CLI label for single-strike call with USDC collateral
+  // (book.ts no longer routes through 'INVERSE_CALL' for the USDC-only book
+  // surface). It always maps to LINEAR_CALL on the SDK side.
+  if (structureType === 'CALL') {
+    return 'LINEAR_CALL';
+  }
   if (structureType === 'INVERSE_CALL') {
     return collateralToken === 'WETH' ? 'INVERSE_CALL' : 'LINEAR_CALL';
   }
@@ -165,6 +172,9 @@ function payoffPerContract(
   switch (structureType) {
     case 'PUT':
       return pos(strikes[0]! - spot);
+    case 'CALL':
+      // LINEAR_CALL (USDC-only): payoff capped at strike
+      return Math.min(strikes[0]!, pos(spot - strikes[0]!));
     case 'INVERSE_CALL':
       if (collateralToken === 'WETH') {
         // Inverse call: payoff in underlying = max(S − K, 0) / S
