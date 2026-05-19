@@ -138,6 +138,8 @@ thetanuts -o json market data
 
 Piping works cleanly — EPIPE is handled, so `thetanuts ... | head` exits silently with status 0. Errors emit on stderr by default; pass `--json-errors` for a structured JSON error on stderr. Either way the exit code is non-zero.
 
+> **v0.1 display note.** A few list endpoints (`book orders`, `book preview` header, indexer raw fields) emit on-chain values in their **raw token decimals** in table mode — e.g. a strike of `$2100` appears as `210000000000` (8-decimal Chainlink scale) and a USDC premium as `177432100` (6-decimal USDC). Humanized values are always available under `-o json` (the `payout` sub-block is already humanized in table mode too). End-to-end humanization of every list endpoint is on the v0.1.1 polish list.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -180,49 +182,77 @@ ETH testnet word1 word2 word3 ... word12
 
 Send a tiny amount of USDC (the trading collateral) plus a few cents of ETH on Base for gas to the address printed above. Bridges and on-ramps that support Base mainnet work fine.
 
-Verify:
+Verify (ERC-20 balances only — `wallet balance` does not show native ETH; check that separately via your block explorer or RPC):
 
 ```bash
 thetanuts wallet balance
 ```
 
 ```
-┌────────┬──────────┐
-│ token  │ balance  │
-├────────┼──────────┤
-│ ETH    │ 0.0021   │
-│ USDC   │ 25.00    │
-└────────┴──────────┘
+Skipped 2 token(s) with known SDK config issues: cbDOGE, cbXRP. Use --all to inspect.
+┌───────────┬────────────────────────────────────────────┬──────────┬────────┐
+│ symbol    │ address                                    │ balance  │ raw    │
+├───────────┼────────────────────────────────────────────┼──────────┼────────┤
+│ USDC      │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 0.120647 │ 120647 │
+│ WETH      │ 0x4200000000000000000000000000000000000006 │ 0        │ 0      │
+│ cbBTC     │ 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf │ 0        │ 0      │
+│ aBasWETH  │ 0xD4a0e0b9149BCee3C920d2E00b5dE09138fd8bb7 │ 0        │ 0      │
+│ aBascbBTC │ 0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6 │ 0        │ 0      │
+│ aBasUSDC  │ 0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB │ 0        │ 0      │
+└───────────┴────────────────────────────────────────────┴──────────┴────────┘
+```
+
+Single-token query gives a vertical key-value view:
+
+```bash
+thetanuts wallet balance --token USDC
+```
+
+```
+┌──────────┬────────────────────────────────────────────┐
+│ key      │ value                                      │
+├──────────┼────────────────────────────────────────────┤
+│ address  │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │
+│ symbol   │ USDC                                       │
+│ decimals │ 6                                          │
+│ balance  │ 0.110648                                   │
+│ raw      │ 110648                                     │
+└──────────┴────────────────────────────────────────────┘
 ```
 
 ### Step 3 — Approve USDC for the OptionBook
 
-The OptionBook needs an ERC-20 allowance to pull the premium when you fill an order.
+The OptionBook needs an ERC-20 allowance to pull the premium when you fill an order. Approve a small budget (e.g. 0.5 USDC):
 
 ```bash
-thetanuts wallet approve --token USDC --for optionBook --amount 10 --dry-run
+thetanuts wallet approve --token USDC --for optionBook --amount 0.5 --dry-run
 ```
 
-Expected output (dry-run):
-
 ```
-preview: approve 10 USDC to optionBook (0x...)
-  calldata: 0x095ea7b3…0007a120 (138 chars)
-
-run again without --dry-run to broadcast
+┌─────────┬────────────────────────────────────────────┐
+│ key     │ value                                      │
+├─────────┼────────────────────────────────────────────┤
+│ action  │ approve                                    │
+│ token   │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │
+│ spender │ 0x1bDff855d6811728acaDC00989e79143a2bdfDed │
+│ amount  │ 0.5                                        │
+│ raw     │ 500000                                     │
+└─────────┴────────────────────────────────────────────┘
+┌────────┬────────────────────────────────────────────┐
+│ key    │ value                                      │
+├────────┼────────────────────────────────────────────┤
+│ dryRun │ true                                       │
+│ to     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │
+│ data   │ 0x095ea7b3…0007a120 (138 chars)            │
+└────────┴────────────────────────────────────────────┘
 ```
 
-When happy, broadcast:
+When happy, drop `--dry-run`:
 
 ```bash
-thetanuts wallet approve --token USDC --for optionBook --amount 10
-```
-
-```
-? Approve 10 USDC to optionBook (0x...)? Yes
-✓ broadcast
-  tx: 0xabcd...1234
-  gasUsed: 46812  gasPriceGwei: 0.05  feeEth: 0.0000023  feeUsd: $0.005
+thetanuts wallet approve --token USDC --for optionBook --amount 0.5
+# Prompts: Approve 0.5 USDC to optionBook (0x1bDff8...)? (y/N)
+# After confirmation, prints a receipt with txHash, status, gasUsed, gasPriceGwei, feeEth, feeUsd.
 ```
 
 ### Step 4 — Browse live orders
@@ -231,81 +261,125 @@ thetanuts wallet approve --token USDC --for optionBook --amount 10
 thetanuts book orders --underlying ETH --type PUT
 ```
 
+In table mode, v0.1 emits the order fields **as the indexer returns them** — raw token decimals, no ticker column. Divide `strikes` and `pricePerContract` by `10^8` for USD; divide `availableAmount` by `10^6` for USDC; `expiry` is a Unix timestamp.
+
 ```
-┌─────┬──────────────────────────┬────────┬─────────┬───────────────┬──────────┐
-│ idx │ ticker                   │ type   │ strike  │ pricePerContr │ size     │
-├─────┼──────────────────────────┼────────┼─────────┼───────────────┼──────────┤
-│ 0   │ ETH-29MAY26-2000-P       │ PUT    │ $2000   │ $42.50        │ 5.0      │
-│ 1   │ ETH-29MAY26-2100-P       │ PUT    │ $2100   │ $58.20        │ 3.2      │
-│ 2   │ ETH-19JUN26-2000-P       │ PUT    │ $2000   │ $61.10        │ 8.4      │
-└─────┴──────────────────────────┴────────┴─────────┴───────────────┴──────────┘
+┌───────┬────────────────────────────────────────────┬────────┬────────┬──────────────┬──────────────────┬────────────┬─────────────────┬────────────────────────────────────────────┬──────────────────────┐
+│ index │ maker                                      │ isCall │ isLong │ strikes      │ pricePerContract │ expiry     │ availableAmount │ collateral                                 │ orderExpiryTimestamp │
+├───────┼────────────────────────────────────────────┼────────┼────────┼──────────────┼──────────────────┼────────────┼─────────────────┼────────────────────────────────────────────┼──────────────────────┤
+│ 0     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ false  │ false  │ 210000000000 │ 177432100        │ 1779177600 │ 10000000000     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 1779160920           │
+│ 1     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ false  │ false  │ 212500000000 │ 681784895        │ 1779177600 │ 10000000000     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 1779160920           │
+│ 2     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ false  │ false  │ 202500000000 │ 241469222        │ 1779264000 │ 10000000000     │ 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 │ 1779160920           │
+└───────┴────────────────────────────────────────────┴────────┴────────┴──────────────┴──────────────────┴────────────┴─────────────────┴────────────────────────────────────────────┴──────────────────────┘
 ```
+
+Reading row 0: `isCall: false` → PUT, `strikes: 210000000000` → $2100 strike, `pricePerContract: 177432100` → ~$1.77 per contract (the SDK normalizes premium-per-contract relative to the strike denominator — `book preview` will tell you the actual USDC cost), `expiry: 1779177600` → 2026-05-19T08:00:00Z.
+
+For machine-friendly output, use `-o json` and `jq`:
+
+```bash
+thetanuts -o json book orders --underlying ETH --type PUT | jq '.[] | {index, strike: (.strikes[0] | tonumber / 1e8), expiry, pricePerContract}'
+```
+
+> **Polishing this output for human eyes (ticker column, humanized strikes/prices) is on the v0.1.1 list.**
 
 ### Step 5 — Preview the fill
 
+In v0.1 the `book preview` table includes a nested `payout` JSON blob — it's easier to read in JSON mode. Pass `--scenarios` to also render a payoff table at expiry (humanized USD values):
+
 ```bash
-thetanuts book preview --order-index 0 --collateral 1 --scenarios
+thetanuts -o json book preview --order-index 0 --collateral 0.01 --scenarios
 ```
 
+```json
+{
+  "numContracts": "11516",
+  "maxContracts": "4819277",
+  "collateralToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "pricePerContract": "86834316",
+  "totalCollateral": "10000",
+  "referrer": "0x0000000000000000000000000000000000000000",
+  "maker": "0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E",
+  "expiry": "1779177600",
+  "isCall": false,
+  "strikes": ["207500000000"],
+  "payout": {
+    "direction": "buy",
+    "contracts": 0.00011516,
+    "premiumPerContract": "86.834316 USDC",
+    "totalPremium": "0.00999984 USDC",
+    "maxLoss": "0.00999984 USDC (premium paid if option expires OTM)",
+    "maxGain": "0.2290 USDC (max intrinsic minus premium)",
+    "note": "Estimates assume fill at the listed premium. Actual maker quote may beat reserve."
+  }
+}
 ```
-order: ETH-29MAY26-2000-P (PUT, strike $2000)
-fill plan:
-  collateral spent:    1.00 USDC
-  contracts received:  0.0235
-  pricePerContract:    $42.50
 
-payout (cash-settled at expiry):
-  totalPremium:  $1.00 (max loss)
-  maxGain:       $46.00 (if ETH → 0)
-  note: PUT pays max(strike − spot, 0) per contract
+Followed by the scenarios table:
 
-scenarios:
-┌────────────────┬─────────────────┬──────────────┬──────────────────┐
-│ spotAtExpiry   │ payoutPerContr  │ totalPayout  │ netPnl           │
-├────────────────┼─────────────────┼──────────────┼──────────────────┤
-│ $1800          │ $200.00         │ $4.70        │ +$3.70 (+370%)   │
-│ $1900          │ $100.00         │ $2.35        │ +$1.35 (+135%)   │
-│ $1950          │ $50.00          │ $1.18        │ +$0.18 (+18%)    │
-│ $2000 (strike) │ $0.00           │ $0.00        │ -$1.00 (-100%)   │
-│ $2050          │ $0.00           │ $0.00        │ -$1.00 (-100%)   │
-└────────────────┴─────────────────┴──────────────┴──────────────────┘
 ```
+┌────────────────┬───────────────────┬─────────────┬────────────────────┐
+│ spotAtExpiry   │ payoutPerContract │ totalPayout │ netPnl             │
+├────────────────┼───────────────────┼─────────────┼────────────────────┤
+│ $1867.5        │ $207.50           │ $0.02       │ +$0.01 (+139%)     │
+│ $1971.25       │ $103.75           │ $0.01       │ +$0.001948 (+19%)  │
+│ $2023.13       │ $51.87            │ $0.005973   │ -$0.004026 (-40%)  │
+│ $2075 (strike) │ $0.00             │ $0.00       │ -$0.010000 (-100%) │
+│ $2126.88       │ $0.00             │ $0.00       │ -$0.010000 (-100%) │
+└────────────────┴───────────────────┴─────────────┴────────────────────┘
+```
+
+Reading the payout: 0.01 USDC buys 0.00011516 contracts of a $2075 PUT at $86.83 per contract; max loss is the $0.01 premium if ETH stays above $2075 at expiry; max gain is $0.229 if ETH crashes to zero.
+
+> **Order-index quirk to know.** `--order-index N` resolves to whatever order is at index N **at the moment of broadcast**. The order book moves quickly — fresh fills shift indices. If absolute identity matters for scripting, capture `maker` + `availableAmount` from `book orders -o json` and re-resolve manually, or pin to a less-volatile order in the list.
 
 ### Step 6 — Dry-run the fill
 
 Always run `--dry-run` first to see the actual calldata.
 
 ```bash
-thetanuts book fill --order-index 0 --collateral 1 --dry-run
+thetanuts book fill --order-index 0 --collateral 0.01 --dry-run
 ```
 
-```
-preview: fill order ETH-29MAY26-2000-P
-  collateral:        1.00 USDC
-  contracts:         0.0235
-  pricePerContract:  $42.50
+The command prints the same preview table from Step 5, then a dry-run block:
 
-approve calldata:  0x095ea7b3…000f4240 (138 chars)
-fill calldata:     0x3593564c…0000000a (842 chars)
-
-run again without --dry-run to broadcast
 ```
+┌─────────┬───────────────────────────────────────────────────────────────────────────────┐
+│ key     │ value                                                                         │
+├─────────┼───────────────────────────────────────────────────────────────────────────────┤
+│ dryRun  │ true                                                                          │
+│ approve │ (none — allowance sufficient)                                                 │
+│ fill    │ {"to":"0x1bDff855d6811728acaDC00989e79143a2bdfDed","data":"0xa4761ec1…00000000 (1482 chars)"} │
+└─────────┴───────────────────────────────────────────────────────────────────────────────┘
+```
+
+If the wallet doesn't have enough allowance, the `approve` cell shows the approval calldata that would be sent first. Both calldatas are always emitted under `-o json` regardless of current allowance, so the dry-run is reproducible for hand-off.
 
 ### Step 7 — Broadcast the real fill
 
 ```bash
-thetanuts book fill --order-index 0 --collateral 1
+thetanuts book fill --order-index 0 --collateral 0.01
+# Interactive prompt: Confirm fill? (y/N)
+# Or non-interactively: add --yes
 ```
 
+After confirmation, the CLI prints the same preview table once more (for the auditable record) and then a receipt:
+
 ```
-? Fill order 0 (ETH-29MAY26-2000-P) with 1.00 USDC for 0.0235 contracts? Yes
-✓ broadcast
-  tx: 0xfeed...beef
-  position: 0xA1b2...C3d4
-  gasUsed: 312044  gasPriceGwei: 0.05  feeEth: 0.0000156  feeUsd: $0.034
+┌──────────────┬────────────────────────────────────────────────────────────────────┐
+│ key          │ value                                                              │
+├──────────────┼────────────────────────────────────────────────────────────────────┤
+│ txHash       │ 0x2f4400c833397591538a5086638c7f769b0ad4882bfe0d374ce965e72222a0b8 │
+│ status       │ success                                                            │
+│ blockNumber  │ 46185821                                                           │
+│ gasUsed      │ 643214                                                             │
+│ gasPriceGwei │ 0.006                                                              │
+│ feeEth       │ 0.000004                                                           │
+│ feeUsd       │ $0.0082                                                            │
+└──────────────┴────────────────────────────────────────────────────────────────────┘
 ```
 
-Between the confirm prompt and broadcast, the CLI re-fetches the order book and re-resolves your order by `(maker, nonce)`. If the order moved or was already filled, the CLI aborts cleanly instead of broadcasting a tx that would revert.
+The CLI re-fetches the order book between the confirm prompt and broadcast. The fill resolves to whatever order sits at `--order-index N` at broadcast time — if the live book has shifted (a fresher order took index 0, the original moved or was filled), you'll fill the **current** order at that index, not the one shown in the preview. Always inspect the second preview that prints after confirmation; abort with Ctrl-C if anything material has changed.
 
 ### Step 8 — Inspect your new position
 
@@ -314,20 +388,42 @@ thetanuts position list
 ```
 
 ```
-┌─────────────┬────────┬────────┬────────────────────┬─────────────────────┬───────────┬─────────┬─────┐
-│ id          │ source │ side   │ createdAt          │ expiry              │ contracts │ premium │ pnl │
-├─────────────┼────────┼────────┼────────────────────┼─────────────────────┼───────────┼─────────┼─────┤
-│ 0xA1b2…C3d4 │ book   │ buyer  │ 2026-05-19T03:42:01│ 2026-05-29T08:00:00 │ 0.023529  │ $1.00   │ —   │
-└─────────────┴────────┴────────┴────────────────────┴─────────────────────┴───────────┴─────────┴─────┘
+┌────────────────────────────────────────────┬────────────────────────────────────────────┬────────┬───────┬──────────────────────┬────────────┬───────────┬────────────────┬─────────────────┐
+│ id                                         │ optionAddress                              │ source │ side  │ createdAt            │ expiry     │ contracts │ premium        │ pnl             │
+├────────────────────────────────────────────┼────────────────────────────────────────────┼────────┼───────┼──────────────────────┼────────────┼───────────┼────────────────┼─────────────────┤
+│ 0x5F712F331c1f0f30F913c22b053985bf2ac88dc4 │ 0x5F712F331c1f0f30F913c22b053985bf2ac88dc4 │ book   │ buyer │ 2026-05-19T03:23:09Z │ 2026-05-19 │ 0.01135   │ $0.009999 USDC │ $-0.01 (-67.4%) │
+└────────────────────────────────────────────┴────────────────────────────────────────────┴────────┴───────┴──────────────────────┴────────────┴───────────┴────────────────┴─────────────────┘
 ```
 
-For a fresh position the `pnl` column shows `—` until the indexer settles it or MM mark-to-market pricing is reachable. Once it resolves, you'll see `+$X.XX (+Y.Y%)`.
+`pnl` shows `—` when neither the indexer's pre-computed PnL nor a fresh MM mark-to-market quote is reachable; otherwise it's `+/-$X.XX (+/-Y.Y%)` from whichever source resolved. Scripts can read `pnlSource` from `-o json` (`"indexer"`, `"mtm"`, or `"unavailable"`).
+
+To see the structure terms (strike, type, expiry, collateral):
+
+```bash
+thetanuts position info --address 0x5F712F331c1f0f30F913c22b053985bf2ac88dc4
+```
+
+```
+┌─────────────────┬───────────────────────────────────────────────────┐
+│ key             │ value                                             │
+├─────────────────┼───────────────────────────────────────────────────┤
+│ address         │ 0x5F712F331c1f0f30F913c22b053985bf2ac88dc4        │
+│ optionType      │ PUT (vanilla)                                     │
+│ optionTypeRaw   │ 257                                               │
+│ strikes         │ 2075 USD                                          │
+│ strikesRaw      │ ["207500000000"]                                  │
+│ expiry          │ 1779177600 (2026-05-19T08:00:00.000Z)             │
+│ collateralToken │ USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) │
+│ underlyingToken │ ETH (derived from priceFeed)                      │
+│ priceFeed       │ 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70        │
+└─────────────────┴───────────────────────────────────────────────────┘
+```
 
 After expiry, claim the payout:
 
 ```bash
-thetanuts position payout --address 0xA1b2...C3d4 --dry-run    # always dry-run first
-thetanuts position payout --address 0xA1b2...C3d4
+thetanuts position payout --address 0x5F71...8dc4 --dry-run     # always dry-run first
+thetanuts position payout --address 0x5F71...8dc4
 ```
 
 ---
@@ -371,14 +467,19 @@ thetanuts rfq quote --underlying ETH --type put
 ```
 
 ```
-┌──────────────────────┬───────┬───────┬───────┬──────────────────────┐
-│ ticker               │ bid   │ ask   │ mark  │ expiry               │
-├──────────────────────┼───────┼───────┼───────┼──────────────────────┤
-│ ETH-29MAY26-1900-P   │ 32.10 │ 35.40 │ 33.75 │ 2026-05-29T08:00:00  │
-│ ETH-29MAY26-2000-P   │ 41.20 │ 44.80 │ 43.00 │ 2026-05-29T08:00:00  │
-│ ETH-29MAY26-2100-P   │ 56.40 │ 60.10 │ 58.25 │ 2026-05-29T08:00:00  │
-└──────────────────────┴───────┴───────┴───────┴──────────────────────┘
+┌────────────┬────────────┬────────┬──────┬─────────────────────┬───────────┬───────────┬──────────┬────────────┬────────────┐
+│ expiry     │ date       │ strike │ type │ ticker              │ bid       │ ask       │ mark     │ usdcAsk    │ wethAsk    │
+├────────────┼────────────┼────────┼──────┼─────────────────────┼───────────┼───────────┼──────────┼────────────┼────────────┤
+│ 1779177600 │ 2026-05-19 │ 2050   │ P    │ ETH-19MAY26-2050-P  │ 0.0000875 │ 0.000225  │ 0.000159 │ 0.00026815 │ 0.00025331 │
+│ 1779177600 │ 2026-05-19 │ 2075   │ P    │ ETH-19MAY26-2075-P  │ 0.000175  │ 0.0003375 │ 0.000339 │ 0.00038447 │ 0.00036919 │
+│ 1779177600 │ 2026-05-19 │ 2100   │ P    │ ETH-19MAY26-2100-P  │ 0.0006125 │ 0.001125  │ 0.00091  │ 0.00119604 │ 0.00118031 │
+│ 1779177600 │ 2026-05-19 │ 2125   │ P    │ ETH-19MAY26-2125-P  │ 0.002625  │ 0.0042    │ 0.003363 │ 0.00436373 │ 0.00434756 │
+│ 1779177600 │ 2026-05-19 │ 2150   │ P    │ ETH-19MAY26-2150-P  │ 0.0106    │ 0.0139    │ 0.011937 │ 0.01435517 │ 0.01433856 │
+│ ...        │ ...        │ ...    │ ...  │ ...                 │ ...       │ ...       │ ...      │ ...        │ ...        │
+└────────────┴────────────┴────────┴──────┴─────────────────────┴───────────┴───────────┴──────────┴────────────┴────────────┘
 ```
+
+`bid` / `ask` / `mark` are MM-quoted prices per unit of underlying. `usdcAsk` is the implied USDC premium per contract (what you'd pay if you BUY this strike). `wethAsk` is the parallel WETH-collateral price — informational only for v0.1 since the CLI is USDC-only.
 
 > The CLI enforces this grid. If a (strike, expiry) is not listed, `rfq build` and `rfq request` refuse it with exit 4 and point you back at `rfq quote`.
 
