@@ -2392,6 +2392,8 @@ function registerStatus(grp: Command): void {
           payload.message = 'No fill detected — no position matching the ticker yet.';
           payload.suggestions = [
             'Re-run after the offer deadline + reveal window has closed',
+            'The indexer can lag on-chain settlement by 30–60s — retry in a moment if the receipt confirmed',
+            'Cross-check on-chain via `thetanuts rfq get --id <quotationId>` (state[0]=true means settled)',
             'Verify the ticker exactly matches the RFQ (case-insensitive)',
             'Check `rfq offers --id <quotationId>` to see whether any maker bid',
             'Inspect orderbook fill alternatives via `book check`',
