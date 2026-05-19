@@ -130,7 +130,7 @@ function validateStrikeOrdering(
 }
 
 /**
- * v0.1 is USDC-only across all structures on the CLI surface. The SDK still
+ * v0.1.0 is USDC-only across all structures on the CLI surface. The SDK still
  * supports WETH collateral for the inverse-CALL family, but the CLI rejects
  * non-USDC up front (see buildFromFlags). Always default to USDC so the
  * default code path doesn't trip the new validator.
@@ -596,13 +596,13 @@ async function buildFromFlags(
     throw new Error('--collateral-token must be USDC or WETH');
   }
 
-  // v0.1 is USDC-only on the CLI. The SDK still supports WETH collateral for
+  // v0.1.0 is USDC-only on the CLI. The SDK still supports WETH collateral for
   // the inverse-CALL family, but it's not exposed here; reject any non-USDC
   // collateral up front so users don't get a clean-looking build artifact
   // they can't submit.
   if (collateralToken !== 'USDC') {
     const err = new Error(
-      'v0.1 supports USDC collateral only — WETH/cbBTC will be enabled in a future release'
+      'v0.1.0 supports USDC collateral only — WETH/cbBTC will be enabled in a future release'
     );
     (err as Error & { exitCode?: number }).exitCode = 4;
     throw err;
@@ -788,7 +788,7 @@ function attachBuildFlags(cmd: Command, { allFlagsOptional = false }: { allFlags
 
     .option(
       '--collateral-token <USDC>',
-      'collateral token (v0.1: USDC only; WETH/cbBTC planned for a future release)'
+      'collateral token (v0.1.0: USDC only; WETH/cbBTC planned for a future release)'
     )
     .option(
       '--deadline-minutes <n>',
@@ -1438,6 +1438,7 @@ function registerRequest(grp: Command): void {
         });
         if (!ok) process.exit(3);
 
+        const submittedAt = Math.floor(Date.now() / 1000);
         const receipt = await result.client.optionFactory.requestForQuotation(requestWithPk);
         const quotationId = extractQuotationIdFromReceipt(
           receipt.logs,
@@ -1456,6 +1457,20 @@ function registerRequest(grp: Command): void {
           process.stderr.write(
             `\nRFQ ${quotationId} submitted. Watch offers: thetanuts rfq offers --id ${quotationId}\n` +
               `Cancel before deadline:           thetanuts rfq cancel --id ${quotationId}\n`
+          );
+        }
+        // "Just wait" hint: skip under -o json (machine output should stay
+        // clean) and the implicit --dry-run branch above already returned.
+        // Printed to stderr so scripts piping stdout aren't polluted.
+        if (opts.output !== 'json') {
+          const tickerArg = loaded.ticker ?? '<ticker>';
+          process.stderr.write(
+            `\nTip: you don't need to manually call 'rfq accept' or 'rfq offers' — the protocol\n` +
+              `auto-settles after the offer deadline (~45 seconds by default). Check fill status\n` +
+              `later with:\n` +
+              `  thetanuts rfq status --ticker ${tickerArg} --since ${submittedAt}\n` +
+              `  thetanuts position list --source rfq\n` +
+              `If you do want to lock in a specific maker early, see 'thetanuts rfq accept --help'.\n`
           );
         }
       } catch (err) {
@@ -2102,6 +2117,59 @@ function toNumberLoose(v: unknown): number | null {
   return null;
 }
 
+// Shape returned by /api/v1/factory/user/<addr>/positions — RFQ-source positions
+// (auto-settled or manually-settled RFQs). Fields are flat (not nested under
+// `option`) and use raw on-chain types. Mirrors the shape position.ts consumes
+// from the same endpoint.
+interface RfqOptionPositionShape {
+  address?: string;
+  buyer?: string;
+  seller?: string;
+  numContracts?: string | number | bigint;
+  collateralDecimals?: number;
+  collateralSymbol?: string;
+  underlyingAsset?: string;
+  strikes?: Array<string | number | bigint>;
+  expiry?: number;
+  expiryTimestamp?: number;
+  optionType?: number | string;
+  optionStatus?: string;
+  [k: string]: unknown;
+}
+
+function normalizeRfqOptionPosition(raw: RfqOptionPositionShape): NormalizedPosition {
+  const strikes = (raw.strikes ?? []).map((s) => {
+    const n = toNumberLoose(s);
+    return n !== null ? n / 1e8 : 0;
+  });
+  const optTypeNum = typeof raw.optionType === 'string' ? Number.parseInt(raw.optionType, 10) : raw.optionType;
+  const type: 'PUT' | 'CALL' | 'UNKNOWN' = optTypeNum === 0 ? 'PUT' : optTypeNum === 1 ? 'CALL' : 'UNKNOWN';
+  const expiry = raw.expiry ?? raw.expiryTimestamp ?? 0;
+  const decimals = raw.collateralDecimals ?? 6;
+  const contractsRaw = toNumberLoose(raw.numContracts);
+  const contracts = contractsRaw !== null ? contractsRaw / 10 ** decimals : null;
+  const underlying = raw.underlyingAsset;
+  const ticker = underlying && expiry > 0 && type !== 'UNKNOWN'
+    ? formatTicker(underlying, expiry, strikes, type)
+    : 'UNKNOWN';
+  // RFQ id from /factory carries -buyer/-seller suffix; match position.ts behavior.
+  const side = raw.buyer ? 'BUYER' : raw.seller ? 'SELLER' : 'UNKNOWN';
+  return {
+    id: raw.address,
+    optionAddress: raw.address,
+    underlying,
+    type,
+    strikes,
+    expiry,
+    expiryDate: expiry > 0 ? new Date(expiry * 1000).toISOString() : null,
+    contracts,
+    side,
+    status: raw.optionStatus,
+    collateral: raw.collateralSymbol,
+    ticker,
+  };
+}
+
 function normalizeIndexerPosition(raw: IndexerPositionShape): NormalizedPosition {
   const opt = raw.option ?? {};
   const strikes = (opt.strikes ?? []).map((s) => {
@@ -2162,10 +2230,23 @@ function registerStatus(grp: Command): void {
         }
 
         const targetTicker = local.ticker.toUpperCase();
+        // Query both indexer sources in parallel — book-side (getUserPositionsFromIndexer)
+        // AND RFQ-side (getUserOptionsFromRfq). A position minted by an RFQ auto-settle
+        // shows up only in the RFQ source; without this merge, rfq status reports
+        // "not filled" even when position list clearly shows the new position.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const raws = (await client.api.getUserPositionsFromIndexer(address)) as any[];
-        const normalized = (Array.isArray(raws) ? raws : []).map((r) => normalizeIndexerPosition(r as IndexerPositionShape));
-        const match = normalized.find((p) => p.ticker.toUpperCase() === targetTicker);
+        const [bookRaws, rfqRaws] = (await Promise.all([
+          client.api.getUserPositionsFromIndexer(address).catch(() => [] as unknown[]),
+          client.api.getUserOptionsFromRfq(address).catch(() => [] as unknown[]),
+        ])) as [unknown[], unknown[]];
+        const bookNormalized = (Array.isArray(bookRaws) ? bookRaws : []).map((r) =>
+          normalizeIndexerPosition(r as IndexerPositionShape)
+        );
+        const rfqNormalized = (Array.isArray(rfqRaws) ? rfqRaws : []).map((r) =>
+          normalizeRfqOptionPosition(r as RfqOptionPositionShape)
+        );
+        const merged = [...bookNormalized, ...rfqNormalized].filter((p) => p.ticker !== 'UNKNOWN');
+        const match = merged.find((p) => p.ticker.toUpperCase() === targetTicker);
 
         const payload: Record<string, unknown> = {
           filled: Boolean(match),
