@@ -398,6 +398,8 @@ thetanuts position list
 
 `pnl` shows `—` when neither the indexer's pre-computed PnL nor a fresh MM mark-to-market quote is reachable; otherwise it's `+/-$X.XX (+/-Y.Y%)` from whichever source resolved. Scripts can read `pnlSource` from `-o json` (`"indexer"`, `"mtm"`, or `"unavailable"`).
 
+> **What `—` means.** If you see `—` in the `pnl` column (or any price-derived field), it means the market maker had **no live quote** for that strike at fetch time. Common near expiry: the MM rotates out of strikes 1–3 hours before expiration. It's **not** a CLI bug or a zero — re-run `thetanuts position list` in a minute and the quote usually returns. To force a closing trade at your own price regardless of MM quotes, use `thetanuts position close --address <addr> --reserve-price <usd-per-contract>`.
+
 To see the structure terms (strike, type, expiry, collateral):
 
 ```bash
@@ -614,7 +616,7 @@ Filled:
 │ filled      │ true                                                                          │
 │ checkParams │ {"address":"0x2f1E…","ticker":"ETH-19MAY26-2050-P","since":1779163272,…}      │
 │ position    │ {"id":"0xE4bc5F4FdD7ad74d7E08ed2FCc38ee44d8535d64",…,"side":"BUYER",…}        │
-│ message     │ RFQ filled. Position ETH-19MAY26-2050-P with 0.006194 contracts (BUYER).     │
+│ message     │ RFQ filled. Position ETH-19MAY26-2050-P with 0.006194 contracts (BUYER).      │
 └─────────────┴───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -659,6 +661,51 @@ thetanuts position payout --address 0xE4bc...5d64               # claim
 
 Pre-expiry, both commands exit non-zero with `option has not expired yet` and never broadcast. After expiry, the dry-run prints the resolved TWAP, `numContracts`, `strikes`, and `simulatedPayout`; the non-`--dry-run` form then prompts to confirm and broadcasts `claim()`, returning a tx receipt with `txHash`/`status`/`gasUsed`/`feeUsd`. Settled USDC is swept to the position holder's wallet. Live capture coming in v0.1.1.
 
+#### How the `pnl` column is computed
+
+The CLI tries three sources in order, stopping at the first one that produces a number — same logic the [Thetanuts options dashboard](https://app.thetanuts.finance) uses:
+
+1. **`indexer`** — pre-computed PnL from the protocol's settlement worker, where available.
+2. **`mtm`** — a live mark-to-market valuation using the market maker's current bid/ask. Buyer/seller formulas mirror the dApp's `pnlCalculations.ts` byte-for-byte: buyer's PnL = `currentValue − entryPremium`; seller's PnL = `premium − closeCost`.
+3. **`unavailable`** — neither source resolved (option settled/expired, or MM has no live quote right now). The pnl column shows `—` and a stderr note suggests retrying.
+
+Scripts can branch on the `pnlSource` field in `-o json` output.
+
+#### Closing an RFQ position early — `position close`
+
+To unwind a position before expiry, open an **opposite-direction RFQ on the same option** — same flow the dApp's "Close" button uses (`useRfqActions.ts:701 handleClosePosition`). The CLI wraps that as one command:
+
+```bash
+thetanuts position close --address 0xE4bc...5d64 --dry-run     # preview
+thetanuts position close --address 0xE4bc...5d64               # broadcast
+```
+
+By default, the CLI fetches the MM's current bid (for closing a long) or ask (for closing a short) and uses it as the reserve price. To override (useful when the MM has retreated and the auto-fetch fails):
+
+```bash
+thetanuts position close --address 0xE4bc...5d64 --reserve-price 0.50
+```
+
+For a SHORT position you're buying back, you'll need OptionFactory to escrow the reserve — pass `--ensure-allowance` so the CLI runs the approval first:
+
+```bash
+thetanuts position close --address 0x2D55...01282 --ensure-allowance
+```
+
+**What gets printed.** A preview table (ticker, side, closingDirection, contracts, closingPricePerContract, reservePrice), then a confirm prompt, then a receipt with `txHash` / `gasUsed` / `feeUsd` / `quotationId`. After broadcast, the protocol auto-settles within the 60-second deadline; check fill via `rfq status` or `position list --source rfq`.
+
+**Flags:**
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--address <addr>` | Option contract to close (copy from `position list`) |
+| `--reserve-price <n>` | Override the MM-derived closing price (USDC per contract). Required when MM has no live quote. |
+| `--deadline-minutes <n>` | Offer window length (default 1 = 60 s) |
+| `--fill-or-kill` | Only accept a full-size match — partial fills rejected |
+| `--ensure-allowance` | Approve collateral on OptionFactory before submission (SHORT close path) |
+| `--approve-amount <max\|n>` | Allowance amount when `--ensure-allowance` fires (default: exact reservePrice) |
+| `--yes`, `--dry-run` | Standard global flags |
+
 ---
 
 ## Commands Reference
@@ -696,6 +743,9 @@ thetanuts wallet allowance --token USDC --for optionBook
 
 thetanuts wallet approve --token USDC --for optionBook --amount 100
 thetanuts wallet approve --token USDC --for optionBook --amount 100 --dry-run
+
+thetanuts wallet transfer --token USDC --to 0xRecipient --amount 5.50 --dry-run
+thetanuts wallet transfer --token USDC --to 0xRecipient --amount 5.50
 ```
 
 **Flags for `wallet approve`:**
@@ -706,6 +756,16 @@ thetanuts wallet approve --token USDC --for optionBook --amount 100 --dry-run
 | `--spender <addr>` | Explicit spender address |
 | `--for <name>` | Alternative: `optionBook` or `optionFactory` |
 | `--amount <max\|n>` | `max` approves MaxUint256 (WARNING printed). Otherwise a decimal. |
+| `--yes` | Skip confirmation prompt |
+| `--dry-run` | Emit calldata, do not broadcast |
+
+**Flags for `wallet transfer`:**
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--token <sym>` | Token symbol (USDC, WETH, cbBTC, …) or 0x-address |
+| `--to <addr>` | Recipient 0x-address |
+| `--amount <n>` | Decimal amount in token units (e.g. `5.50` for 5.50 USDC). Balance pre-checked. |
 | `--yes` | Skip confirmation prompt |
 | `--dry-run` | Emit calldata, do not broadcast |
 
@@ -780,6 +840,7 @@ thetanuts position list --source book                    # only OptionBook fills
 thetanuts position list --source rfq                     # only RFQ settlements
 thetanuts position info --address 0x...                  # decoded terms
 thetanuts position full --address 0x...                  # full on-chain math
+thetanuts position close --address 0x... --dry-run       # close early via flipped-direction RFQ
 thetanuts position payout --address 0x... --dry-run      # post-expiry: claim payout
 thetanuts position calc-payout --type call --strikes 2000 --price 2150 --contracts 1
 ```
@@ -798,6 +859,8 @@ thetanuts position calc-payout --type call --strikes 2000 --price 2150 --contrac
 | `pnl` | `+$X.XX (+Y.Y%)` / `-$X.XX (-Y.Y%)` when resolvable, else `—` |
 
 PnL prefers indexer-computed values; falls back to MM mark-to-market math; degrades to `—` if neither is available. Scripts can read `pnlSource` from `-o json` (always `"indexer"` | `"mtm"` | `"unavailable"`).
+
+A `—` in the PnL column means the market maker had no live quote for that strike at fetch time — not a CLI bug, not a zero. Re-run after a minute to retry, or use `position close --reserve-price <n>` to force a closing trade at your own price.
 
 ### Keys — RFQ keypair management
 
