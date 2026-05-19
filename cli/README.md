@@ -8,27 +8,39 @@ TypeScript CLI for [Thetanuts Finance V4](https://thetanuts.finance) options on 
 
 ## Install
 
-### From source (today)
-
 ```bash
-git clone https://github.com/Thetanuts-Finance/thetanuts-sdk
-cd thetanuts-sdk
-npm install && npm run build       # build the SDK once
-cd cli
-npm install && npm run build       # build the CLI
-npm link                           # exposes `thetanuts` on PATH
-thetanuts --help
-```
-
-Re-run `npm run build` inside `cli/` after editing — the symlink picks up changes automatically.
-
-### From npm (after publish)
-
-```bash
+# Recommended — global install puts `thetanuts` on PATH
 npm install -g @thetanuts-finance/cli
+thetanuts --help
+
+# Or use without installing (one-off run)
+npx --yes @thetanuts-finance/cli market data
+
+# Or install locally to a project
+npm install @thetanuts-finance/cli
+npx thetanuts --help        # invoke via npx from the project root
 ```
 
-The package is `@thetanuts-finance/cli`; the binary is `thetanuts`.
+The package is **`@thetanuts-finance/cli`**; the binary is **`thetanuts`**. Requires Node `>= 18`.
+
+### `thetanuts: command not found` after `npm install`?
+
+If you installed **without `-g`** and your shell can't find `thetanuts`, that's expected — local installs put the binary at `./node_modules/.bin/thetanuts` which **isn't on your shell's PATH by default**. Three ways to fix:
+
+```bash
+# 1. Switch to global install (recommended for CLI use)
+npm install -g @thetanuts-finance/cli
+thetanuts market data        # now works directly
+
+# 2. Stay local, use npx
+npm install @thetanuts-finance/cli
+npx thetanuts market data    # works without polluting global
+
+# 3. Stay local, call binary by path (for one-off scripting)
+./node_modules/.bin/thetanuts market data
+```
+
+For most users wanting a terminal trading CLI, **`-g` is the right call**. Local install is for project-scoped use (e.g., calling from an npm script in `package.json`, where npm auto-prepends `node_modules/.bin` to PATH).
 
 ## Quick Start
 
