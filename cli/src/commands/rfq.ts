@@ -130,15 +130,19 @@ function validateStrikeOrdering(
 }
 
 /**
- *   single-strike CALL  → WETH (INVERSE_CALL / PHYSICAL_CALL)
- *   everything else     → USDC
+ * v0.1 is USDC-only across all structures on the CLI surface. The SDK still
+ * supports WETH collateral for the inverse-CALL family, but the CLI rejects
+ * non-USDC up front (see buildFromFlags). Always default to USDC so the
+ * default code path doesn't trip the new validator.
  *
- * Iron condors fall under "everything else" (USDC); CLI multi-strike CALLs
- * also default to USDC even though the contract accepts WETH. The user can
- * override with --collateral-token explicitly
+ * Structure → implementation mapping (collateral is what swings this):
+ *   single-strike CALL + USDC           → LINEAR_CALL  (cash, capped payoff)
+ *   single-strike CALL + WETH           → INVERSE_CALL (cash, payoff (S−K)/S in ETH)
+ *   single-strike CALL + WETH +physical → PHYSICAL_CALL
+ *   PUT / spread / fly / condor + USDC  → linear cash-settled impl
  */
-function defaultCollateral(type: OptionType, strikeCount: number): 'USDC' | 'WETH' {
-  return type === 'CALL' && strikeCount === 1 ? 'WETH' : 'USDC';
+function defaultCollateral(_type: OptionType, _strikeCount: number): 'USDC' | 'WETH' {
+  return 'USDC';
 }
 
 /**
@@ -451,7 +455,44 @@ function parseBigIntStrict(name: string, raw: string | undefined): bigint {
   }
 }
 
-async function resolveRequester(opts: ReturnType<typeof getGlobalOpts>, result: GetClientResult, explicit?: string): Promise<string> {
+// Block submissions for (strike, expiry, type) combinations that aren't in the MM's live quote grid
+async function assertStrikeExpiryAvailable(args: {
+  client: GetClientResult['client'];
+  underlying: 'ETH' | 'BTC';
+  optionType: OptionType;
+  strikes: number[];
+  expiry: number;
+}): Promise<void> {
+  let grid;
+  try {
+    grid = await args.client.mmPricing.getPricingArray(args.underlying);
+  } catch (e) {
+    const err = new Error(
+      `unable to verify MM quote availability for ${args.underlying} ${args.optionType} ` +
+        `(${(e as Error).message ?? String(e)}). Retry, or pass --reserve-price to bypass the grid check.`
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+  const wantCall = args.optionType === 'CALL';
+  const matches = (strike: number): boolean =>
+    grid.some((q) => q.strike === strike && q.expiry === args.expiry && q.isCall === wantCall);
+  const missing = args.strikes.filter((s) => !matches(s));
+  if (missing.length > 0) {
+    const expiryIso = new Date(args.expiry * 1000).toISOString().slice(0, 10);
+    const verb = missing.length === 1 ? 'is' : 'are';
+    const err = new Error(
+      `strike${missing.length === 1 ? '' : 's'} ${missing.join(', ')} / expiry ${expiryIso} ` +
+        `(${args.underlying} ${args.optionType}) ${verb} not in the MM's current quote grid. ` +
+        `Run 'thetanuts rfq quote --underlying ${args.underlying} --type ${args.optionType.toLowerCase()}' ` +
+        `to see what's tradeable.`
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+}
+
+async function resolveRequester(_opts: ReturnType<typeof getGlobalOpts>, result: GetClientResult, explicit?: string): Promise<string> {
   if (explicit) {
     if (!ADDRESS_REGEX.test(explicit)) {
       throw new Error(`--requester must be a 0x-prefixed 40-char hex address (got "${explicit}")`);
@@ -489,6 +530,22 @@ async function buildFromFlags(
 
   const strikes = parseStrikes(local.strike, local.strikes);
   const expiry = parseUnsignedInt('--expiry', local.expiry);
+  // Expiry sanity bounds
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const FOUR_YEARS_SECONDS = 4 * 365 * 24 * 3600;
+  if (expiry > nowSeconds + FOUR_YEARS_SECONDS) {
+    const suggestion = nowSeconds + 86400 * 30;
+    const err = new Error(
+      `expiry ${expiry} is more than 4 years out — looks like milliseconds? Pass a Unix timestamp in seconds (e.g. ${suggestion})`
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
+  if (expiry < nowSeconds) {
+    const err = new Error('expiry must be in the future');
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
+  }
   const direction = (local.direction ?? '').toLowerCase();
   if (!['buy', 'sell'].includes(direction)) throw new Error('--direction must be buy or sell');
 
@@ -539,21 +596,30 @@ async function buildFromFlags(
     throw new Error('--collateral-token must be USDC or WETH');
   }
 
-  // WETH is only valid as collateral for the inverse-CALL family — single-strike
-  // CALL (INVERSE_CALL impl) and 2-strike CALL (INVERSE_CALL_SPREAD impl). Other
-  // structures have no INVERSE_* implementation deployed and would revert on
-  // submit. Catch it now so the user doesn't get a clean-looking build artifact.
-  if (collateralToken === 'WETH') {
-    const wethOk = type === 'CALL' && (strikes.length === 1 || strikes.length === 2);
-    if (!wethOk) {
-      const err = new Error(
-        `--collateral-token WETH is only supported for single-strike or 2-strike CALL ` +
-          `(got ${structureType}). Use USDC collateral, or rebuild as a CALL structure.`
-      );
-      (err as Error & { exitCode?: number }).exitCode = 4;
-      throw err;
-    }
+  // v0.1 is USDC-only on the CLI. The SDK still supports WETH collateral for
+  // the inverse-CALL family, but it's not exposed here; reject any non-USDC
+  // collateral up front so users don't get a clean-looking build artifact
+  // they can't submit.
+  if (collateralToken !== 'USDC') {
+    const err = new Error(
+      'v0.1 supports USDC collateral only — WETH/cbBTC will be enabled in a future release'
+    );
+    (err as Error & { exitCode?: number }).exitCode = 4;
+    throw err;
   }
+
+  // Grid-availability gate — refuse any (strike, expiry) the MM isn't quoting,
+  // regardless of direction or sizing path. The BUY-without-reserve-price flow
+  // would catch this later via fetchMmAskForBuild, but BUY-with-reserve-price,
+  // SELL, and direct --contracts paths previously had no gate at all and could
+  // strand on-chain escrow on a useless RFQ.
+  await assertStrikeExpiryAvailable({
+    client: result.client,
+    underlying: underlying as 'ETH' | 'BTC',
+    optionType: type as OptionType,
+    strikes,
+    expiry,
+  });
 
   const deadlineMinutes = local.deadlineMinutes !== undefined && local.deadlineMinutes !== ''
     ? Number.parseFloat(local.deadlineMinutes)
@@ -721,8 +787,8 @@ function attachBuildFlags(cmd: Command, { allFlagsOptional = false }: { allFlags
   return cmd
 
     .option(
-      '--collateral-token <USDC|WETH>',
-      'override the collateral default (single-strike CALL → WETH, everything else → USDC)'
+      '--collateral-token <USDC>',
+      'collateral token (v0.1: USDC only; WETH/cbBTC planned for a future release)'
     )
     .option(
       '--deadline-minutes <n>',
