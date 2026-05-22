@@ -296,6 +296,8 @@ export interface DeribitOptionData {
   underlying_price: number;
   /** Best ask price (fraction of underlying) */
   ask_price: number;
+  /** Best bid price (fraction of underlying) — not always present */
+  bid_price?: number;
   /** Mark price (fraction of underlying) */
   mark_price: number;
 }
