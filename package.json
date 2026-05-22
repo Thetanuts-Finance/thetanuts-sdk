@@ -24,6 +24,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "npx tsx scripts/run-mainnet-tests.ts",
+    "test:collar": "npx tsx scripts/test-collar-module.ts",
+    "test:collar:live": "npx tsx scripts/test-collar-module.ts --live",
     "test:benchmark": "npx tsx scripts/benchmark-indexer.ts",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
