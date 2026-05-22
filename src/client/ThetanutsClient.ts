@@ -20,6 +20,7 @@ import { UtilsModule } from '../modules/utils.js';
 import { RFQKeyManagerModule } from '../modules/rfqKeyManager.js';
 import { MMPricingModule } from '../modules/mmPricing.js';
 import { LoanModule } from '../modules/loan.js';
+import { CollarModule } from '../modules/collar.js';
 import { WheelVaultModule } from '../modules/wheelVault.js';
 import { StrategyVaultModule } from '../modules/strategyVault.js';
 
@@ -150,6 +151,13 @@ export class ThetanutsClient {
   public readonly loan: LoanModule;
 
   /**
+   * Collar module - Zero-interest collar loans (capped upside, no liquidations).
+   * Pricing/estimation works without deployed contracts; write methods require
+   * the CollarLoanCoordinator to be deployed on the chain.
+   */
+  public readonly collar: CollarModule;
+
+  /**
    * WheelVault module - Wheel strategy vaults on Ethereum
    */
   public readonly wheelVault: WheelVaultModule;
@@ -216,6 +224,7 @@ export class ThetanutsClient {
     this.rfqKeys = new RFQKeyManagerModule(this, config.keyStorageProvider, config.rfqKeyPrefix);
     this.mmPricing = new MMPricingModule(this);
     this.loan = new LoanModule(this);
+    this.collar = new CollarModule(this);
     this.wheelVault = new WheelVaultModule(this);
     this.strategyVault = new StrategyVaultModule(this);
   }
