@@ -44,6 +44,12 @@ import {
 import { LOAN_CONFIG } from '../chains/loan.js';
 import { createError, mapContractError } from '../utils/errors.js';
 import { validateAddress } from '../utils/validation.js';
+// Expiry helpers moved to `utils/expiry.ts` so both the put-leg (this module)
+// and the call-leg collar module share one parser.
+import {
+  parseDeribitExpiryOrThrow as parseExpiryTimestamp,
+  formatDeribitExpiry as formatExpiryDate,
+} from '../utils/expiry.js';
 import type {
   LoanUnderlying,
   LoanRequest,
@@ -138,29 +144,6 @@ interface WETHContract {
 }
 
 // ─── Internal Helpers ───
-
-const MONTH_MAP: Record<string, number> = {
-  JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
-  JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
-};
-
-function parseExpiryTimestamp(expiryStr: string): number {
-  const day = parseInt(expiryStr.slice(0, -5));
-  const month = expiryStr.slice(-5, -2);
-  const year = '20' + expiryStr.slice(-2);
-  const date = new Date(Date.UTC(parseInt(year), MONTH_MAP[month], day, 8, 0, 0));
-  return Math.floor(date.getTime() / 1000);
-}
-
-function formatExpiryDate(expiryStr: string): string {
-  const day = parseInt(expiryStr.slice(0, -5));
-  const month = expiryStr.slice(-5, -2);
-  const year = '20' + expiryStr.slice(-2);
-  const date = new Date(Date.UTC(parseInt(year), MONTH_MAP[month], day, 8, 0, 0));
-  return date.toLocaleDateString('en-US', {
-    weekday: 'short', month: 'long', day: 'numeric', year: 'numeric',
-  });
-}
 
 function parseDeribitKey(key: string): { asset: string; expiry: string; strike: number; type: string } | null {
   const parts = key.split('-');

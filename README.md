@@ -155,6 +155,7 @@ The client exposes 14 modules. Pull what you need; the rest stay idle.
 | `client.ws`             | Real-time order, price, and trade subscriptions      | No              |
 | `client.utils`          | Decimal conversions, payoff math                     | No              |
 | `client.loan`           | Non-liquidatable lending (borrow vs ETH/BTC)         | Write ops only  |
+| `client.collar`         | Zero-interest collar loans (capped upside, preview)  | Write ops only  |
 | `client.wheelVault`     | WheelVault interactions                              | Write ops only  |
 | `client.strategyVault`  | StrategyVault interactions                           | Write ops only  |
 

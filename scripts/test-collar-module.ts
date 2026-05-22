@@ -315,6 +315,15 @@ async function main() {
       const pricing = await collar.fetchPricing();
       record('fetchPricing returns BTC slot', !!pricing.BTC);
       record('fetchPricing returns ETH slot', !!pricing.ETH);
+
+      // The collar module delegates to LoanModule's cache. A second call from
+      // either module must return the same object (proves shared cache).
+      const pricing2 = await client.loan.fetchPricing();
+      const pricing3 = await collar.fetchPricing();
+      record(
+        'collar.fetchPricing and loan.fetchPricing share a cached object',
+        pricing === pricing2 && pricing2 === pricing3,
+      );
       const spotBtc = collar.extractUnderlyingPrice(pricing, 'BTC');
       const spotEth = collar.extractUnderlyingPrice(pricing, 'ETH');
       record('extractUnderlyingPrice(BTC) > 0', spotBtc > 0, `$${spotBtc}`);

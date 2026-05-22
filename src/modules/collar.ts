@@ -47,6 +47,7 @@ import {
   type CollarAssetConfig,
 } from '../chains/collar.js';
 import { createError } from '../utils/errors.js';
+import { parseDeribitExpiry } from '../utils/expiry.js';
 import type { DeribitPricingMap } from '../types/loan.js';
 
 // ─── Public types ───
@@ -349,7 +350,7 @@ export class CollarModule {
       if (!expiry || !strikeStr) continue;
       const strike = parseInt(strikeStr, 10);
       if (!strike) continue;
-      const ts = parseExpiryTimestamp(expiry);
+      const ts = parseDeribitExpiry(expiry);
       if (!ts || ts - now < minDurSec) continue;
       if (strike <= underlyingPrice) continue;
       if (strike > maxCapUsd) continue;
@@ -532,12 +533,13 @@ export class CollarModule {
 
   // ─── Pricing fetch ───
 
+  /**
+   * Fetch the Deribit-style pricing map. Delegates to {@link LoanModule.fetchPricing}
+   * so the collar and loan modules share a single 30s-cached call against
+   * `pricing.thetanuts.finance/all`.
+   */
   async fetchPricing(): Promise<DeribitPricingMap> {
-    const r = await fetch(COLLAR_CONFIG.pricingUrl);
-    if (!r.ok) throw createError('HTTP_ERROR', `Pricing API ${r.status}`);
-    const json = (await r.json()) as { data: DeribitPricingMap };
-    if (!json?.data) throw createError('HTTP_ERROR', 'Invalid pricing data');
-    return json.data;
+    return this.client.loan.fetchPricing();
   }
 
   extractUnderlyingPrice(pricingData: DeribitPricingMap, underlying: CollarUnderlying): number {
@@ -559,25 +561,5 @@ export class CollarModule {
 
   asset(underlying: CollarUnderlying): CollarAssetConfig {
     return COLLAR_CONFIG.assets[underlying];
-  }
-}
-
-// ─── Helpers ───
-
-const MONTH_MAP: Record<string, number> = {
-  JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
-  JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
-};
-
-function parseExpiryTimestamp(expiry: string): number | null {
-  try {
-    const day = parseInt(expiry.slice(0, -5), 10);
-    const month = expiry.slice(-5, -2);
-    const year = parseInt('20' + expiry.slice(-2), 10);
-    const m = MONTH_MAP[month];
-    if (m === undefined || !Number.isFinite(day) || !Number.isFinite(year)) return null;
-    return Math.floor(Date.UTC(year, m, day, 8, 0, 0) / 1000);
-  } catch {
-    return null;
   }
 }

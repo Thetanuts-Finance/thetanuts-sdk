@@ -2,6 +2,40 @@
 
 All notable changes to `@thetanuts-finance/thetanuts-client` are documented here.
 
+## Unreleased
+
+### Added
+
+- **`client.collar` — Collar Loan module.** Zero-interest, capped-upside loans via
+  Thetanuts V4 RFQ. Borrower buys a put at `K_lo` (default trigger) + sells a call
+  at `K_hi` (cap); MM funds an up-front USDC loan from the call premium it earns.
+  Three terminal outcomes at expiry: walk / repay / cap-settle.
+  - Pricing math against live Deribit quotes:
+    `target_put_premium = call_premium × (1 − mm_margin)`,
+    `K_lo = highest OTM put whose ask ≤ target`, `L = K_lo · N`.
+  - Surface: `estimateCollar`, `filterCapStrikes`, `getCapStrikeOptions`,
+    `requestLoan`, `cancelLoan`, `acceptOffer`, `exerciseCollar`, `walkAwayCollar`,
+    `getMaxCapStrike`, `getLoanRequest`, `getOptionInfo`, `fetchPricing`,
+    `extractUnderlyingPrice`, `isDeployed`.
+  - Status: `CollarLoanCoordinator` not yet deployed on Base. Pricing/read-only
+    methods work today against live Deribit. Write methods throw
+    `NETWORK_UNSUPPORTED` until `COLLAR_CONFIG.contracts.collarCoordinator` is
+    populated (`isCollarDeployed()` flips to `true` automatically).
+- **`utils/expiry.ts` — shared Deribit expiry parser.** New exports:
+  `parseDeribitExpiry`, `parseDeribitExpiryOrThrow`, `formatDeribitExpiry`,
+  `MONTH_MAP`. Both `LoanModule` (put leg) and `CollarModule` (call leg) now
+  share one source of truth.
+
+### Changed
+
+- **`DeribitOptionData` gains optional `bid_price`.** Collar pricing uses the
+  bid for the short-call leg (the conservative side a hedger could actually
+  receive on Deribit); existing put-leg consumers ignore the new field.
+- **`CollarModule.fetchPricing()` delegates to `LoanModule.fetchPricing()`.**
+  Single 30s-cached call against `pricing.thetanuts.finance/all` shared across
+  both modules — calling either module's `fetchPricing()` populates the same
+  cache. Verified by smoke test.
+
 ## 0.2.3 — strategyVault rename (BREAKING)
 
 Renames two public symbols on `client.strategyVault`. Behavior and contract

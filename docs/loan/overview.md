@@ -121,4 +121,5 @@ Loans qualifying for promo get reduced costs:
 - [Borrowing Guide](borrowing.md) — Full borrowing workflow with code examples
 - [Lending Guide](lending.md) — Fill limit orders and earn yield
 - [Pricing & Calculation](pricing.md) — Strike selection and cost calculation details
+- [Collar Loans](collar.md) — Zero-interest, capped-upside variant (`client.collar`)
 - [RFQ Key Management](../rfq/key-management.md) — ECDH keys used in loan auctions

@@ -35,6 +35,7 @@
 * [Borrowing](loan/borrowing.md)
 * [Lending](loan/lending.md)
 * [Pricing & Calculation](loan/pricing.md)
+* [Collar Loans](loan/collar.md)
 
 ## Wheel Vault (Ethereum)
 
