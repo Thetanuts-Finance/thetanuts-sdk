@@ -15,17 +15,26 @@
  *
  * Status: this module ships the pricing math + ABIs ahead of the collar-v12
  * deployment. Read-only methods that only need Deribit data work today; write
- * methods throw `COLLAR_NOT_DEPLOYED` until contract addresses are populated.
+ * methods throw `NETWORK_UNSUPPORTED` until contract addresses are populated.
  *
  * @example
  * ```typescript
- * const groups = await client.collar.getCapStrikeOptions('BTC', { ...client.collar.defaultSettings, depositAmount: 0.5 });
- * const est = client.collar.estimateCollar({ underlying: 'BTC', collateralAmount: 0.5, capUsd: 150000, expiry: '26DEC25' });
- * // est = { loanUsd, triggerUsd, capPayoutUsd, callBtc, putBtc, putStrike }
+ * const groups = await client.collar.getCapStrikeOptions('BTC', {
+ *   ...client.collar.defaultSettings,
+ *   collateralAmount: 0.5,
+ * });
+ * const est = client.collar.estimateCollar({
+ *   underlying: 'BTC',
+ *   collateralAmount: 0.5,
+ *   capUsd: 150000,
+ *   expiryLabel: '26DEC25',
+ *   pricingData,
+ *   underlyingPrice: 95000,
+ * });
  * ```
  */
 
-import { Contract, ethers } from 'ethers';
+import { Contract, Interface, ethers } from 'ethers';
 import type { ContractTransactionResponse } from 'ethers';
 
 import type { ThetanutsClient } from '../client/ThetanutsClient.js';
@@ -98,12 +107,78 @@ export interface CollarLoanResult {
   txHash: string;
 }
 
+// ─── Typed Contract Interfaces ───
+
+interface CollarRequestParams {
+  collateralToken: string;
+  priceFeed: string;
+  settlementToken: string;
+  collateralAmount: bigint;
+  capStrike: bigint;
+  expiryTimestamp: number;
+  offerEndTimestamp: number;
+  minLoan: bigint;
+  requesterPublicKey: string;
+}
+
+interface CollarCoordinatorContract {
+  tryGetMaxCapStrike(
+    underlying: string,
+    feed: string,
+    settlement: string,
+  ): Promise<[boolean, bigint]>;
+  getMaxCapStrike(underlying: string, feed: string, settlement: string): Promise<bigint>;
+  previewKLo(
+    loanAmount: bigint,
+    collateralToken: string,
+    settlementToken: string,
+    N: bigint,
+  ): Promise<bigint>;
+  loanRequests(quotationId: bigint): Promise<{
+    requester: string;
+    collateralAmount: bigint;
+    capStrike: bigint;
+    expiryTimestamp: bigint;
+    collateralToken: string;
+    settlementToken: string;
+    isSettled: boolean;
+    settledOptionContract: string;
+    loanClaimed: boolean;
+  }>;
+  fee(): Promise<bigint>;
+  optionFactory(): Promise<string>;
+  requestLoan(params: CollarRequestParams): Promise<ContractTransactionResponse>;
+  settleQuotationEarly(
+    quotationId: bigint,
+    offerAmount: bigint,
+    nonce: bigint,
+    offeror: string,
+  ): Promise<ContractTransactionResponse>;
+  cancelLoan(quotationId: bigint): Promise<ContractTransactionResponse>;
+}
+
+interface CollaredOptionContract {
+  exercise(): Promise<ContractTransactionResponse>;
+  doNotExercise(): Promise<ContractTransactionResponse>;
+  buyer(): Promise<string>;
+  seller(): Promise<string>;
+  collateralToken(): Promise<string>;
+  collateralAmount(): Promise<bigint>;
+  expiryTimestamp(): Promise<bigint>;
+  capStrike(): Promise<bigint>;
+  triggerStrike(): Promise<bigint>;
+  getTWAP(): Promise<bigint>;
+  settlementToken(): Promise<string>;
+  loanAmount(): Promise<bigint>;
+  settled(): Promise<boolean>;
+}
+
 // ─── Module ───
 
 export class CollarModule {
   public readonly defaultSettings: CollarSettings = COLLAR_DEFAULT_SETTINGS;
 
-  constructor(private client: ThetanutsClient) {}
+  constructor(private readonly client: ThetanutsClient) {}
 
   // ─── Capability checks ───
 
@@ -122,11 +197,40 @@ export class CollarModule {
     }
   }
 
-  private requireSigner() {
-    if (!this.client.signer) {
-      throw createError('SIGNER_REQUIRED', 'Signer required for write operations');
-    }
-    return this.client.signer;
+  // ─── Typed Contract Accessors ───
+
+  private getCoordinatorReadContract(): CollarCoordinatorContract {
+    return new Contract(
+      COLLAR_CONFIG.contracts.collarCoordinator,
+      COLLAR_COORDINATOR_ABI,
+      this.client.provider,
+    ) as unknown as CollarCoordinatorContract;
+  }
+
+  private getCoordinatorWriteContract(): CollarCoordinatorContract {
+    const signer = this.client.requireSigner();
+    return new Contract(
+      COLLAR_CONFIG.contracts.collarCoordinator,
+      COLLAR_COORDINATOR_ABI,
+      signer,
+    ) as unknown as CollarCoordinatorContract;
+  }
+
+  private getOptionReadContract(optionAddress: string): CollaredOptionContract {
+    return new Contract(
+      optionAddress,
+      COLLARED_CALL_OPTION_ABI,
+      this.client.provider,
+    ) as unknown as CollaredOptionContract;
+  }
+
+  private getOptionWriteContract(optionAddress: string): CollaredOptionContract {
+    const signer = this.client.requireSigner();
+    return new Contract(
+      optionAddress,
+      COLLARED_CALL_OPTION_ABI,
+      signer,
+    ) as unknown as CollaredOptionContract;
   }
 
   // ─── Pricing helpers ───
@@ -157,7 +261,7 @@ export class CollarModule {
     const callKey = `${params.underlying}-${params.expiryLabel}-${params.capUsd}-C`;
     const callData = slot[callKey];
     if (!callData) return null;
-    const callBtc = parseFloat(String(callData.bid_price ?? callData.mark_price));
+    const callBtc = Number(callData.bid_price ?? callData.mark_price);
     if (!Number.isFinite(callBtc) || callBtc <= 0) return null;
 
     const targetPutBtc = callBtc * (1 - margin);
@@ -177,7 +281,7 @@ export class CollarModule {
       if (!k || k >= spot) continue; // OTM only
       const putData = slot[key];
       if (!putData) continue;
-      const putBtc = parseFloat(String(putData.ask_price ?? putData.mark_price));
+      const putBtc = Number(putData.ask_price ?? putData.mark_price);
       if (!Number.isFinite(putBtc) || putBtc < 0) continue;
       if (putBtc <= targetPutBtc && (bestKLo === null || k > bestKLo)) {
         bestKLo = k;
@@ -197,7 +301,7 @@ export class CollarModule {
         const k = parseInt(strikePart, 10);
         if (!k || k >= spot) continue;
         const putData = slot[key];
-        const px = parseFloat(String(putData?.ask_price ?? putData?.mark_price ?? 0));
+        const px = Number(putData?.ask_price ?? putData?.mark_price ?? 0);
         if (bestKLo === null || k < bestKLo) {
           bestKLo = k;
           bestPutBtc = px;
@@ -308,7 +412,8 @@ export class CollarModule {
     overrides?: { pricingData?: DeribitPricingMap; underlyingPrice?: number; maxCapUsd?: number },
   ): Promise<CollarCapStrikeGroup[]> {
     const pricingData = overrides?.pricingData ?? (await this.fetchPricing());
-    const underlyingPrice = overrides?.underlyingPrice ?? this.extractUnderlyingPrice(pricingData, underlying);
+    const underlyingPrice =
+      overrides?.underlyingPrice ?? this.extractUnderlyingPrice(pricingData, underlying);
     if (!underlyingPrice) return [];
     return this.filterCapStrikes(pricingData, underlying, underlyingPrice, settings, overrides?.maxCapUsd);
   }
@@ -323,13 +428,13 @@ export class CollarModule {
     if (!this.isDeployed()) return null;
     const asset = COLLAR_CONFIG.assets[underlying];
     try {
-      const coordinator = this.readOnlyCoordinator();
+      const coordinator = this.getCoordinatorReadContract();
       const [ok, max] = await coordinator.tryGetMaxCapStrike(
         asset.collateral,
         asset.priceFeed,
         COLLAR_CONFIG.settlement,
       );
-      return ok && max && max !== 0n ? max : null;
+      return ok && max !== 0n ? max : null;
     } catch {
       return null;
     }
@@ -337,7 +442,7 @@ export class CollarModule {
 
   async getLoanRequest(quotationId: bigint) {
     this.requireDeployed();
-    const coordinator = this.readOnlyCoordinator();
+    const coordinator = this.getCoordinatorReadContract();
     return coordinator.loanRequests(quotationId);
   }
 
@@ -345,25 +450,22 @@ export class CollarModule {
 
   async requestLoan(req: CollarLoanRequest): Promise<CollarLoanResult> {
     this.requireDeployed();
-    const signer = this.requireSigner();
     const asset = COLLAR_CONFIG.assets[req.underlying];
     const N = ethers.parseUnits(req.collateralAmount, asset.decimals);
     const cap = BigInt(req.capUsd) * 10n ** BigInt(COLLAR_CONFIG.strikeDecimals);
     const minLoanBN = ethers.parseUnits(req.minLoanUsd.toFixed(6), 6);
     const offerEnd =
       req.offerEndTimestamp ??
-      Math.min(req.expiryTimestamp - 3600, Math.floor(Date.now() / 1000) + COLLAR_CONFIG.defaultOfferDurationSeconds);
+      Math.min(
+        req.expiryTimestamp - 3600,
+        Math.floor(Date.now() / 1000) + COLLAR_CONFIG.defaultOfferDurationSeconds,
+      );
 
     // Approve collateral
     await this.client.erc20.ensureAllowance(asset.collateral, COLLAR_CONFIG.contracts.collarCoordinator, N);
 
-    const coordinator = new Contract(
-      COLLAR_CONFIG.contracts.collarCoordinator,
-      COLLAR_COORDINATOR_ABI,
-      signer,
-    ) as any;
-
-    const tx: ContractTransactionResponse = await coordinator.requestLoan({
+    const coordinator = this.getCoordinatorWriteContract();
+    const tx = await coordinator.requestLoan({
       collateralToken: asset.collateral,
       priceFeed: asset.priceFeed,
       settlementToken: COLLAR_CONFIG.settlement,
@@ -377,12 +479,15 @@ export class CollarModule {
     const receipt = await tx.wait();
     if (!receipt) throw createError('CONTRACT_REVERT', 'requestLoan receipt missing');
 
-    const iface = new ethers.Interface(COLLAR_COORDINATOR_ABI);
+    const iface = new Interface(COLLAR_COORDINATOR_ABI);
     for (const log of receipt.logs) {
       try {
         const parsed = iface.parseLog({ topics: [...log.topics], data: log.data });
         if (parsed?.name === 'LoanRequested') {
-          return { quotationId: parsed.args.quotationId as bigint, txHash: receipt.hash };
+          return {
+            quotationId: parsed.args.quotationId as bigint,
+            txHash: receipt.hash,
+          };
         }
       } catch {
         // not our log
@@ -393,12 +498,7 @@ export class CollarModule {
 
   async cancelLoan(quotationId: bigint): Promise<ContractTransactionResponse> {
     this.requireDeployed();
-    const signer = this.requireSigner();
-    const coordinator = new Contract(
-      COLLAR_CONFIG.contracts.collarCoordinator,
-      COLLAR_COORDINATOR_ABI,
-      signer,
-    ) as any;
+    const coordinator = this.getCoordinatorWriteContract();
     return coordinator.cancelLoan(quotationId);
   }
 
@@ -409,34 +509,25 @@ export class CollarModule {
     offeror: string,
   ): Promise<ContractTransactionResponse> {
     this.requireDeployed();
-    const signer = this.requireSigner();
-    const coordinator = new Contract(
-      COLLAR_CONFIG.contracts.collarCoordinator,
-      COLLAR_COORDINATOR_ABI,
-      signer,
-    ) as any;
+    const coordinator = this.getCoordinatorWriteContract();
     return coordinator.settleQuotationEarly(quotationId, offerAmount, nonce, offeror);
   }
 
   // ─── Option contract helpers ───
 
-  collaredOptionContract(address: string) {
-    if (this.client.signer) {
-      return new Contract(address, COLLARED_CALL_OPTION_ABI, this.client.signer) as any;
-    }
-    return new Contract(address, COLLARED_CALL_OPTION_ABI, this.client.provider) as any;
-  }
-
   async exerciseCollar(optionAddress: string): Promise<ContractTransactionResponse> {
-    this.requireSigner();
-    const opt = this.collaredOptionContract(optionAddress);
+    const opt = this.getOptionWriteContract(optionAddress);
     return opt.exercise();
   }
 
   async walkAwayCollar(optionAddress: string): Promise<ContractTransactionResponse> {
-    this.requireSigner();
-    const opt = this.collaredOptionContract(optionAddress);
+    const opt = this.getOptionWriteContract(optionAddress);
     return opt.doNotExercise();
+  }
+
+  /** Read-only handle on a deployed CollaredCallOption proxy. */
+  getOptionInfo(optionAddress: string) {
+    return this.getOptionReadContract(optionAddress);
   }
 
   // ─── Pricing fetch ───
@@ -454,21 +545,13 @@ export class CollarModule {
     if (!slot) return 0;
     for (const k of Object.keys(slot)) {
       const entry = slot[k];
-      const p = parseFloat(String(entry?.underlying_price ?? 0));
+      const p = Number(entry?.underlying_price ?? 0);
       if (p > 0) return p;
     }
     return 0;
   }
 
-  // ─── Internals ───
-
-  private readOnlyCoordinator() {
-    return new Contract(
-      COLLAR_CONFIG.contracts.collarCoordinator,
-      COLLAR_COORDINATOR_ABI,
-      this.client.provider,
-    ) as any;
-  }
+  // ─── Public accessors ───
 
   get config() {
     return COLLAR_CONFIG;
