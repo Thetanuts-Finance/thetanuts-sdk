@@ -31,7 +31,9 @@ export interface CollarSettings {
 
 export const COLLAR_DEFAULT_SETTINGS: CollarSettings = {
   minDurationDays: 30,
-  minCapStrikeUsd: 100_000,
+  // 0 disables the floor. Collateral can be BTC (~$90k) or ETH (~$2k), so any
+  // non-zero default is wrong for one of the two assets; let callers opt-in.
+  minCapStrikeUsd: 0,
   minCapGapPct: 20,
   maxStrikesPerExpiry: 6,
   mmMarginPct: 4,
