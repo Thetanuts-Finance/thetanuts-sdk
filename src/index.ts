@@ -108,6 +108,11 @@ export { RFQKeyManagerModule } from './modules/rfqKeyManager.js';
 export { MMPricingModule, parseTicker, buildTicker, applyFeeAdjustment, calculateCollateralCost } from './modules/mmPricing.js';
 export { LoanModule } from './modules/loan.js';
 export { CollarModule } from './modules/collar.js';
+export type {
+  CollarCapability,
+  CollarModuleWriteEnabled,
+  CollarLoanRequestRecord,
+} from './modules/collar.js';
 export { WheelVaultModule } from './modules/wheelVault.js';
 export { StrategyVaultModule } from './modules/strategyVault.js';
 
