@@ -229,6 +229,7 @@ test('consumers can exhaustively switch on ZendfiError.code', () => {
       case 'NO_MATCHING_STRIKE':
       case 'CAP_ABOVE_MAX':
       case 'INVALID_CAP':
+      case 'INVALID_PARAM':
       case 'INSUFFICIENT_LOAN_BUDGET':
         return 'config';
       case 'EXPIRY_IN_PAST':

@@ -42,7 +42,8 @@ import {
   LOAN_WETH_ABI,
 } from '../abis/loan.js';
 import { LOAN_CONFIG } from '../chains/loan.js';
-import { createError, mapContractError } from '../utils/errors.js';
+import { mapContractError } from '../utils/errors.js';
+import { zendfiErr } from '../types/zendfi-errors.js';
 import { validateAddress } from '../utils/validation.js';
 // Expiry helpers moved to `utils/expiry.ts` so both the put-leg (this module)
 // and the call-leg collar module share one parser.
@@ -284,7 +285,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from requestLoan');
+        throw zendfiErr.contractRevert('loan.requestLoan: no receipt');
       }
 
       // Parse LoanRequested event to extract quotationId
@@ -350,7 +351,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from acceptOffer');
+        throw zendfiErr.contractRevert('loan.acceptOffer: no receipt');
       }
 
       this.client.logger.info('Offer accepted (early settlement)', {
@@ -382,7 +383,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from cancelLoan');
+        throw zendfiErr.contractRevert('loan.cancelLoan: no receipt');
       }
 
       this.client.logger.info('Loan cancelled', {
@@ -420,7 +421,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from exercise');
+        throw zendfiErr.contractRevert('loan.exerciseOption: no receipt');
       }
 
       this.client.logger.info('Option exercised', { txHash: receipt.hash, optionAddress });
@@ -449,7 +450,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from doNotExercise');
+        throw zendfiErr.contractRevert('loan.doNotExercise: no receipt');
       }
 
       this.client.logger.info('Option not exercised (walked away)', { txHash: receipt.hash, optionAddress });
@@ -486,7 +487,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from swapAndExercise');
+        throw zendfiErr.contractRevert('loan.swapAndExercise: no receipt');
       }
 
       this.client.logger.info('Swap and exercise completed', { txHash: receipt.hash, optionAddress });
@@ -516,7 +517,7 @@ export class LoanModule {
   ): Promise<TransactionReceipt> {
     validateAddress(optionAddress, 'optionAddress');
     if (splitCollateralAmount <= 0n) {
-      throw createError('INVALID_PARAMS', 'Split collateral amount must be positive');
+      throw zendfiErr.invalidParam('splitCollateralAmount', 'must be positive');
     }
 
     try {
@@ -528,7 +529,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from split');
+        throw zendfiErr.contractRevert('loan.splitOption: no receipt');
       }
 
       this.client.logger.info('Loan option split', {
@@ -575,7 +576,7 @@ export class LoanModule {
       const receipt = await tx.wait();
 
       if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from reclaimCollateral');
+        throw zendfiErr.contractRevert('loan.reclaimCollateral: no receipt');
       }
 
       this.client.logger.info('Loan option collateral reclaimed', {
@@ -638,7 +639,7 @@ export class LoanModule {
     try {
       const response = await fetch(url);
       if (!response.ok) {
-        throw createError('HTTP_ERROR', `Loan indexer error: ${response.status}`);
+        throw zendfiErr.indexerUnavailable(url, { meta: { status: response.status } });
       }
       const data = await response.json() as { loans?: Record<string, LoanIndexerLoan> | LoanIndexerLoan[] };
       const loans: LoanIndexerLoan[] = Array.isArray(data.loans)
@@ -724,7 +725,7 @@ export class LoanModule {
     } catch (error) {
       this.client.logger.error('Failed to fetch lending opportunities', { error });
       if (error instanceof Error && 'code' in error) throw error;
-      throw createError('HTTP_ERROR', 'Failed to fetch Loan lending opportunities');
+      throw zendfiErr.indexerUnavailable('lending opportunities', { cause: error });
     }
   }
 
@@ -773,7 +774,7 @@ export class LoanModule {
     try {
       const response = await fetch(url);
       if (!response.ok) {
-        throw createError('HTTP_ERROR', `Loan indexer error: ${response.status}`);
+        throw zendfiErr.indexerUnavailable(url, { meta: { status: response.status } });
       }
       const data = await response.json() as { loans?: Record<string, LoanIndexerLoan> | LoanIndexerLoan[] };
       const loans: LoanIndexerLoan[] = Array.isArray(data.loans)
@@ -786,7 +787,7 @@ export class LoanModule {
     } catch (error) {
       this.client.logger.error('Failed to get user loans', { error, address });
       if (error instanceof Error && 'code' in error) throw error;
-      throw createError('HTTP_ERROR', 'Failed to fetch user loans from Loan indexer');
+      throw zendfiErr.indexerUnavailable('user loans', { cause: error });
     }
   }
 
@@ -870,11 +871,11 @@ export class LoanModule {
     try {
       const response = await fetch(LOAN_CONFIG.pricingUrl);
       if (!response.ok) {
-        throw createError('HTTP_ERROR', `Pricing API error: ${response.status}`);
+        throw zendfiErr.pricingUnavailable(`pricing API status ${response.status}`);
       }
       const json: { data?: DeribitPricingMap } = await response.json() as { data?: DeribitPricingMap };
       if (!json || !json.data) {
-        throw createError('INVALID_PARAMS', 'Invalid pricing data format');
+        throw zendfiErr.pricingUnavailable('invalid pricing data format');
       }
 
       this.pricingCache = { data: json.data, fetchedAt: Date.now() };
@@ -882,7 +883,7 @@ export class LoanModule {
     } catch (error) {
       this.client.logger.error('Failed to fetch pricing', { error });
       if (error instanceof Error && 'code' in error) throw error;
-      throw createError('HTTP_ERROR', 'Failed to fetch option pricing data');
+      throw zendfiErr.pricingUnavailable('fetch failed', { cause: error });
     }
   }
 
@@ -1138,10 +1139,12 @@ export class LoanModule {
     // requesterPublicKey is required for offer encryption — without it, no MM can
     // deliver a fillable offer and the loan silently expires (TNU-AUDIT-0013).
     if (!params.requesterPublicKey || params.requesterPublicKey.trim() === '') {
-      throw createError(
-        'INVALID_PARAMS',
-        'requesterPublicKey is required for encodeRequestLoan. ' +
-          'Resolve via `client.rfqKeys.getOrCreateKeyPair()` before encoding.',
+      throw zendfiErr.invalidParam(
+        'requesterPublicKey',
+        'required for encodeRequestLoan',
+        {
+          actionable: 'Resolve via `client.rfqKeys.getOrCreateKeyPair()` before encoding.',
+        },
       );
     }
     const asset = getAssetConfig(params.underlying);
