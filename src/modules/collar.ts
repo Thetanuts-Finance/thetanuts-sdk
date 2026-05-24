@@ -579,6 +579,99 @@ export class CollarModule {
     return this.filterCapStrikes(pricingData, underlying, underlyingPrice, settings, overrides?.maxCapUsd);
   }
 
+  /**
+   * One-call cap-strike quote for the canonical "get me one number" path:
+   * fetches Deribit pricing, extracts spot, and returns a populated
+   * {@link CollarEstimate}. Hides {@link fetchPricing}, {@link extractUnderlyingPrice},
+   * and the `pricingData`/`underlyingPrice` plumbing from callers who already
+   * know their `(underlying, cap, expiry)` triple.
+   *
+   * Power users who need to share a pricing snapshot across multiple quotes,
+   * pass overrides, or inspect intermediate state should keep calling
+   * {@link estimateCollar} (and {@link filterCapStrikes}) directly — those
+   * remain the lower-level, allocation-free building blocks.
+   *
+   * @param underlying Collateral asset (`'ETH'` or `'BTC'`).
+   * @param collateralAmount Borrower's collateral N (in collateral units).
+   * @param capUsd Desired cap (upper strike `K_hi`) in USD; must match an OTM call on the Deribit chain.
+   * @param expiryLabel Deribit expiry tag (e.g. `'26DEC25'`).
+   * @param options Optional knobs. `mmMarginPct` overrides the default MM margin.
+   * @returns A populated {@link CollarEstimate} — never `null`.
+   * @throws {ZendfiError<'PRICING_UNAVAILABLE'>} when the Deribit feed has no live `underlying_price` for `underlying`.
+   * @throws {ZendfiError<'NO_MATCHING_STRIKE'>} when no OTM put fits the budget (no call leg at `capUsd`, or the cheapest-put fallback also fails). `err.meta.availableStrikes` lists nearby OTM puts.
+   * @see {@link estimateCollar} for the lower-level building block.
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#collar-quickquote | docs/zendfi/getting-started.md#collar-quickquote}
+   *
+   * @example
+   * ```typescript
+   * try {
+   *   const est = await client.collar.quickQuote('BTC', 0.5, 150000, '26DEC25');
+   *   console.log(`Loan: $${est.loanUsd}, trigger: $${est.triggerUsd}`);
+   * } catch (err) {
+   *   if (err instanceof ZendfiError && err.code === 'NO_MATCHING_STRIKE') {
+   *     // err.meta.availableStrikes lists nearby OTM put strikes.
+   *   }
+   * }
+   * ```
+   */
+  async quickQuote(
+    underlying: CollarUnderlying,
+    collateralAmount: number,
+    capUsd: number,
+    expiryLabel: string,
+    options?: { mmMarginPct?: number },
+  ): Promise<CollarEstimate> {
+    const pricingData = await this.fetchPricing();
+    const underlyingPrice = this.extractUnderlyingPrice(pricingData, underlying);
+    if (!underlyingPrice) {
+      throw zendfiErr.pricingUnavailable(underlying);
+    }
+    const est = this.estimateCollar({
+      underlying,
+      collateralAmount,
+      capUsd,
+      expiryLabel,
+      pricingData,
+      underlyingPrice,
+      ...(options?.mmMarginPct !== undefined ? { mmMarginPct: options.mmMarginPct } : {}),
+    });
+    if (!est) {
+      const availableStrikes = this.collectOtmPutStrikes(pricingData, underlying, expiryLabel, underlyingPrice);
+      throw zendfiErr.noMatchingStrike(capUsd, availableStrikes, {
+        meta: { underlying, expiryLabel },
+      });
+    }
+    return est;
+  }
+
+  /**
+   * Collect OTM put strikes at `expiryLabel` from the Deribit slot, sorted
+   * descending (closest to spot first). Used to populate `availableStrikes` on
+   * `NO_MATCHING_STRIKE` errors so callers can suggest a recoverable cap.
+   */
+  private collectOtmPutStrikes(
+    pricingData: DeribitPricingMap,
+    underlying: CollarUnderlying,
+    expiryLabel: string,
+    underlyingPrice: number,
+  ): number[] {
+    const slot = pricingData[underlying];
+    if (!slot || !underlyingPrice) return [];
+    const strikes: number[] = [];
+    for (const key of Object.keys(slot)) {
+      if (!key.endsWith('-P')) continue;
+      const parts = key.split('-');
+      if (parts.length !== 4) continue;
+      if (parts[1] !== expiryLabel) continue;
+      const strikeStr = parts[2];
+      if (!strikeStr) continue;
+      const k = parseInt(strikeStr, 10);
+      if (!Number.isFinite(k) || k <= 0 || k >= underlyingPrice) continue;
+      strikes.push(k);
+    }
+    return strikes.sort((a, b) => b - a);
+  }
+
   // ─── On-chain reads ───
 
   /**
