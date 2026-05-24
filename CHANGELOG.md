@@ -2,7 +2,7 @@
 
 All notable changes to `@thetanuts-finance/thetanuts-client` are documented here.
 
-## Unreleased
+## 0.2.4 — 2026-05-24
 
 ### Added
 
@@ -35,6 +35,80 @@ All notable changes to `@thetanuts-finance/thetanuts-client` are documented here
   Single 30s-cached call against `pricing.thetanuts.finance/all` shared across
   both modules — calling either module's `fetchPricing()` populates the same
   cache. Verified by smoke test.
+
+### Security
+
+Closes the full backlog from the `SECURITY_AUDIT_BETA.md` engagement — 1 Critical
++ 24 High + 73 Medium/Low/Informational findings remediated. Highlights below;
+see `SECURITY_AUDIT_BETA.md` for the per-finding tracker.
+
+- **Admin-only entrypoints removed from SDK ABIs and modules** (audit 0002, 0043,
+  0044, 0045). `WheelVault.trigger`, `OptionFactory.transferOwnership`,
+  `OptionFactory.withdrawFees`, `OptionFactory.renounceOwnership`, plus
+  `offerSignatures` / `pendingFees` / `referralOwner` are gone — they reverted for
+  non-owner callers and don't exist in r12 canonical ABIs.
+- **`BaseOption.payout()` removed from ABI** (audit 0046). Settlement is
+  automatic via factory callbacks on r12; the wrapper now throws
+  `INVALID_PARAMS` with migration guidance instead of silently failing.
+- **WheelVault deposit/withdraw allowance + log filtering** (audit 0003, 0009).
+  `deposit`, `depositSingle`, `depositDual`, `depositToBucket` now run
+  `ensureAllowance` against the correct spender before pulling tokens; event
+  parsers filter receipt logs by `log.address === vaultAddress` to block
+  signature-compatible event injection from co-emitting contracts.
+- **`marketFill` always validates swap router + approvalTarget against the
+  configured aggregator** (audit 0005). The dangerous `useSwap` gating is gone.
+- **`LoanModule.splitOption()` and `LoanModule.reclaimCollateral()` wrappers**
+  (audit 0006, 0007). Both read the on-chain fee (`getSplitFee` /
+  `getReclaimFee(ownedOption)`) and forward as `msg.value` — r12 made these
+  payable. Mirrors `OptionModule` / `RangerModule` semantics.
+- **`OptionBook.fillOrder` zero-address implementation guard** (audit 0047).
+- **MCP `encode_*` tools gated behind `THETANUTS_MCP_ENABLE_ENCODE=1`**
+  (audit 0053). `encode_approve` refuses `amount: "max"` and caps at `2^128 - 1`
+  regardless of flag.
+- **Numeric / input hardening across utils + modules** (audit 0011..0042,
+  0040, 0041, 0042, 0054). `toBigInt` rejects `NaN`/`Infinity`/scientific notation;
+  `floatToBigInt` throws past `2^53`; `parseDeribitKey` adds explicit radix +
+  NaN guard; iron-condor builders reject non-ascending strikes (was silent
+  sort); `calculateSlippagePrice` bounded `[0, 10000]`; expiry upper bound
+  capped at 5 years; CLI book orders use `1e8/collDec` premium scale instead of
+  hardcoded `1e6`.
+- **`validateAddress` returns checksummed string + new `validateHexBytes`
+  helper.** Surface-wide validation tightening.
+- **`api.ts` `safeNumber` helper** guards `NaN`/`Infinity` at the JSON
+  boundary.
+- **`erc20.ensureAllowance` zero-resets before non-zero approve** (USDT-style
+  semantics).
+- **`rfqKeyManager`:** case-insensitive `0X` nonce normalize, uint256-length
+  cap on encrypted offer fields, `exportPrivateKey` emits a warn log,
+  `InvalidKeyError` no longer leaks the ethers cause.
+- **`OptionFactory.makeOfferForQuotation` validates signing key + 65-byte
+  signature shape** before dispatch.
+- **Collar hardening:** longer offer window, expiry validation, `capUsd > 0`
+  check, gas-buffer pattern, cheapest-premium fallback put selector, finite-strike
+  guard.
+- **Supply chain:** `yarn.lock` removed, `packageManager` pinned to `npm@10.8.0`,
+  `prepublishOnly` gated on `npm ci`, transitive CVEs fixed via
+  `@modelcontextprotocol/sdk ^1.25.4` (clears hono / path-to-regexp / fast-uri /
+  ajv cluster — audit 0048..0052) plus picomatch + brace-expansion bumps.
+- **MCP server:** response-size caps with `truncated` flag, `sanitizeOnchainString`
+  for symbol/name, `requireAddress` validator on user/token/option inputs, RPC
+  URL redaction in the global catch, `generate_example_keypair` returns a static
+  example instead of a real key.
+- **CLI:** `--private-key` argv scrub + warn, `book check` threads underlying
+  through ticker formatter, `book preview` throws on unknown collateral,
+  `loadConfig` auto-tightens loose perms, `O_NOFOLLOW` on key/config reads,
+  `redactSecrets` extended for basic-auth + QuickNode + Etherscan URLs.
+
+Three findings remain explicitly **ACCEPTED** in the tracker: 0035 (ABI-interface
+test infra), 0038 (Multicall3 `aggregate3` migration), 0059 (defensive
+prototype-pollution lint).
+
+### Tests
+
+- **Property-based invariants:** 39 invariants across `tests/properties/invariants.test.ts`
+  (INV-1..INV-39). Adds INV-14..INV-19 specifically to lock in the
+  TNU-AUDIT-0002..0009 remediations, plus engagement-wide ABI parity verifier
+  for TNU-8.
 
 ## 0.2.3 — strategyVault rename (BREAKING)
 
