@@ -47,6 +47,7 @@ import {
   type CollarAssetConfig,
 } from '../chains/collar.js';
 import { createError } from '../utils/errors.js';
+import { validateAddress } from '../utils/validation.js';
 import { parseDeribitExpiry } from '../utils/expiry.js';
 import type { DeribitPricingMap } from '../types/loan.js';
 
@@ -194,6 +195,16 @@ export class CollarModule {
         'NETWORK_UNSUPPORTED',
         'CollarLoanCoordinator is not yet deployed on this chain. ' +
           'Pricing/read methods work; write methods are blocked until contracts ship.',
+      );
+    }
+  }
+
+  private requireNonZeroAddress(address: string, fieldName: string): void {
+    validateAddress(address, fieldName);
+    if (address === ethers.ZeroAddress) {
+      throw createError(
+        'INVALID_PARAMS',
+        `Invalid ${fieldName}: zero address`,
       );
     }
   }
@@ -517,17 +528,22 @@ export class CollarModule {
   // ─── Option contract helpers ───
 
   async exerciseCollar(optionAddress: string): Promise<ContractTransactionResponse> {
+    this.requireDeployed();
+    this.requireNonZeroAddress(optionAddress, 'optionAddress');
     const opt = this.getOptionWriteContract(optionAddress);
     return opt.exercise();
   }
 
   async walkAwayCollar(optionAddress: string): Promise<ContractTransactionResponse> {
+    this.requireDeployed();
+    this.requireNonZeroAddress(optionAddress, 'optionAddress');
     const opt = this.getOptionWriteContract(optionAddress);
     return opt.doNotExercise();
   }
 
   /** Read-only handle on a deployed CollaredCallOption proxy. */
   getOptionInfo(optionAddress: string) {
+    this.requireNonZeroAddress(optionAddress, 'optionAddress');
     return this.getOptionReadContract(optionAddress);
   }
 

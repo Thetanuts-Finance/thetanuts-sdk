@@ -53,7 +53,7 @@ export const WHEEL_VAULT_ABI = [
   'function withdraw(uint256 seriesId, uint256 sharesToBurn) returns (uint256 baseOut, uint256 quoteOut)',
   'function withdraw(uint256 seriesId, uint256 sharesToBurn, address recipient) returns (uint256 baseOut, uint256 quoteOut)',
   'function withdrawIdle(uint256 seriesId, uint256 sharesToBurn)',
-  'function trigger()',
+  // trigger() is admin/keeper-only and reverts for non-owner callers. Intentionally omitted from the SDK ABI.
   'function poke()',
 
   // --- Events ---

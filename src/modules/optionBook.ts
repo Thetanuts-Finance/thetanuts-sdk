@@ -127,6 +127,30 @@ export class OptionBookModule {
   }
 
   /**
+   * Resolve and validate the OptionBook target address from an API order.
+   *
+   * The API may attach `rawApiData.optionBookAddress` to support orders signed for
+   * a non-default OptionBook contract. To prevent a compromised API from redirecting
+   * fills to an attacker contract that drains pre-existing allowances, the address
+   * MUST match the chain-configured OptionBook for the current network.
+   */
+  private resolveOptionBookTarget(orderWithSig: OrderWithSignature): string {
+    const apiAddress = orderWithSig.rawApiData?.optionBookAddress;
+    const canonical = this.contractAddress;
+    if (apiAddress === undefined || apiAddress === null) {
+      return canonical;
+    }
+    validateAddress(apiAddress, 'rawApiData.optionBookAddress');
+    if (apiAddress.toLowerCase() !== canonical.toLowerCase()) {
+      throw createError(
+        'INVALID_ORDER',
+        `rawApiData.optionBookAddress (${apiAddress}) does not match configured OptionBook (${canonical}) for the current chain`,
+      );
+    }
+    return canonical;
+  }
+
+  /**
    * Build ContractOrder from OrderWithSignature and fill amount
    *
    * IMPORTANT: Do NOT modify the order fields from the API - the signature
@@ -412,9 +436,7 @@ export class OptionBookModule {
       numContracts = maxContracts;
     }
 
-    // Use the optionBookAddress from the order if available (the order may be signed for a different contract)
-    // This ensures we call the correct contract that the signature was created for
-    const targetContract = orderWithSig.rawApiData.optionBookAddress ?? this.contractAddress;
+    const targetContract = this.resolveOptionBookTarget(orderWithSig);
 
     this.client.logger.debug('Filling order', {
       maker: orderWithSig.order.maker,
@@ -533,9 +555,7 @@ export class OptionBookModule {
       ref
     ]);
 
-    // Use the optionBookAddress from the order if available (the order may be signed for a different contract)
-    // This ensures we call the correct contract that the signature was created for
-    const targetContract = orderWithSig.rawApiData.optionBookAddress ?? this.contractAddress;
+    const targetContract = this.resolveOptionBookTarget(orderWithSig);
 
     return {
       to: targetContract,
@@ -1112,7 +1132,7 @@ export class OptionBookModule {
       numContracts = maxContracts;
     }
 
-    const targetContract = orderWithSig.rawApiData.optionBookAddress ?? this.contractAddress;
+    const targetContract = this.resolveOptionBookTarget(orderWithSig);
 
     this.client.logger.debug('Simulating fillOrder (callStatic)', {
       maker: orderWithSig.order.maker,

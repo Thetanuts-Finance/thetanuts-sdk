@@ -88,6 +88,9 @@ interface VaultReadContract {
   }>>;
   getEpochExpiries(seriesId: number): Promise<bigint[]>;
   getShareValueInQuote(seriesId: number, shares: bigint): Promise<bigint>;
+  base(): Promise<string>;
+  quote(): Promise<string>;
+  seriesToken(seriesId: number): Promise<string>;
 }
 
 interface VaultWriteContract {
@@ -107,11 +110,6 @@ interface VaultWriteContract {
     estimateGas(seriesId: number, sharesToBurn: bigint): Promise<bigint>;
   };
   poke: {
-    (): Promise<ContractTransactionResponse>;
-    (overrides: { gasLimit: bigint }): Promise<ContractTransactionResponse>;
-    estimateGas(): Promise<bigint>;
-  };
-  trigger: {
     (): Promise<ContractTransactionResponse>;
     (overrides: { gasLimit: bigint }): Promise<ContractTransactionResponse>;
     estimateGas(): Promise<bigint>;
@@ -190,6 +188,7 @@ interface MarketsContract {
     (optionId: bigint, swapTarget: string, swapData: string, overrides: { gasLimit: bigint }): Promise<ContractTransactionResponse>;
     estimateGas(optionId: bigint, swapTarget: string, swapData: string): Promise<bigint>;
   };
+  vault(): Promise<string>;
 }
 
 interface MarketsLensContract {
@@ -666,6 +665,19 @@ export class WheelVaultModule {
     this.ensureEnabled();
     this.validateConfiguredVault(vaultAddress);
 
+    // TNU-AUDIT-0003: vault.deposit() pulls base and quote tokens from msg.sender
+    // via transferFrom — spender for both is the vault itself. Skip the read for
+    // zero amounts to avoid useless approvals on single-sided deposits.
+    const vaultRead = this.getVaultRead(vaultAddress);
+    if (baseAmt > 0n) {
+      const baseToken = await vaultRead.base();
+      await this.client.erc20.ensureAllowance(baseToken, vaultAddress, baseAmt);
+    }
+    if (quoteAmt > 0n) {
+      const quoteToken = await vaultRead.quote();
+      await this.client.erc20.ensureAllowance(quoteToken, vaultAddress, quoteAmt);
+    }
+
     const vault = this.getVaultWrite(vaultAddress);
 
     try {
@@ -682,10 +694,14 @@ export class WheelVaultModule {
         throw createError('CONTRACT_REVERT', 'No receipt returned from deposit');
       }
 
-      // Parse Deposit event for sharesToMint
+      // TNU-AUDIT-0009: Only parse logs emitted by the vault itself. Other
+      // contracts in the same tx (Aave, Uniswap NPM, ERC20s) could emit a
+      // signature-compatible event and spoof sharesToMint.
       const iface = new Interface(WHEEL_VAULT_ABI);
+      const vaultAddrLower = vaultAddress.toLowerCase();
       let sharesToMint = 0n;
       for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== vaultAddrLower) continue;
         try {
           const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
           if (parsed?.name === 'Deposit') {
@@ -741,11 +757,13 @@ export class WheelVaultModule {
         throw createError('CONTRACT_REVERT', 'No receipt returned from withdraw');
       }
 
-      // Parse Withdraw event for baseOut and quoteOut
+      // TNU-AUDIT-0009: Only parse logs emitted by the vault itself.
       const iface = new Interface(WHEEL_VAULT_ABI);
+      const vaultAddrLower = vaultAddress.toLowerCase();
       let baseOut = 0n;
       let quoteOut = 0n;
       for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== vaultAddrLower) continue;
         try {
           const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
           if (parsed?.name === 'Withdraw') {
@@ -845,35 +863,8 @@ export class WheelVaultModule {
     }
   }
 
-  /**
-   * Trigger epoch roll (admin/keeper operation).
-   *
-   * @param vaultAddress - The vault contract address
-   * @returns Transaction receipt
-   */
-  async trigger(vaultAddress: string): Promise<TransactionReceipt> {
-    this.ensureEnabled();
-    this.validateConfiguredVault(vaultAddress);
-
-    const vault = this.getVaultWrite(vaultAddress);
-
-    try {
-      const gasEstimate = await vault.trigger.estimateGas();
-      const gasLimit = (gasEstimate * 120n) / 100n;
-      const tx = await vault.trigger({ gasLimit });
-      const receipt = await tx.wait();
-
-      if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'No receipt returned from trigger');
-      }
-
-      this.client.logger.info('Vault trigger successful', { txHash: receipt.hash, vaultAddress });
-      return receipt;
-    } catch (error) {
-      this.client.logger.error('Failed to trigger vault', { error, vaultAddress });
-      throw mapContractError(error);
-    }
-  }
+  // NOTE: vault.trigger() (epoch roll) is admin/keeper-only and reverts for non-owner callers.
+  // Intentionally not exposed by this SDK module. See SECURITY_AUDIT_BETA.md TNU-AUDIT-0002.
 
   // ═══════════════════════════════════════════════════════
   // Router Operations (shared Router address from config)
@@ -890,6 +881,16 @@ export class WheelVaultModule {
     this.validateConfiguredVault(params.vaultAddress);
     validateAddress(params.depositToken, 'depositToken');
     this.validateConfiguredSwapRouter(params.aggregator, 'aggregator');
+
+    // TNU-AUDIT-0003: Router.depositSingle pulls depositToken from msg.sender —
+    // spender is the WheelVaultRouter contract.
+    if (params.depositAmount > 0n) {
+      await this.client.erc20.ensureAllowance(
+        params.depositToken,
+        WHEEL_VAULT_CONFIG.contracts.router,
+        params.depositAmount,
+      );
+    }
 
     const router = this.getRouter();
 
@@ -944,6 +945,27 @@ export class WheelVaultModule {
   async depositDual(params: DepositDualParams): Promise<TransactionReceipt> {
     this.ensureEnabled();
     this.validateConfiguredVault(params.vaultAddress);
+
+    // TNU-AUDIT-0003: Router.depositDual pulls base + quote from msg.sender —
+    // spender is the WheelVaultRouter contract. Read the tokens from the vault
+    // so we don't depend on a per-asset config lookup.
+    const vaultRead = this.getVaultRead(params.vaultAddress);
+    if (params.baseAmt > 0n) {
+      const baseToken = await vaultRead.base();
+      await this.client.erc20.ensureAllowance(
+        baseToken,
+        WHEEL_VAULT_CONFIG.contracts.router,
+        params.baseAmt,
+      );
+    }
+    if (params.quoteAmt > 0n) {
+      const quoteToken = await vaultRead.quote();
+      await this.client.erc20.ensureAllowance(
+        quoteToken,
+        WHEEL_VAULT_CONFIG.contracts.router,
+        params.quoteAmt,
+      );
+    }
 
     const router = this.getRouter();
 
@@ -1246,10 +1268,13 @@ export class WheelVaultModule {
   async marketFill(marketsAddress: string, params: MarketFillParams): Promise<TransactionReceipt> {
     this.ensureEnabled();
     this.validateConfiguredMarkets(marketsAddress);
-    if (params.useSwap) {
-      this.validateConfiguredSwapRouter(params.swap.router, 'swap.router');
-      this.validateConfiguredSwapRouter(params.swap.approvalTarget, 'swap.approvalTarget');
-    }
+    // TNU-AUDIT-0005: Validate swap.router / swap.approvalTarget unconditionally.
+    // The on-chain useSwap flag is decoupled from this struct: a future contract
+    // change or a buggy off-chain caller that flips useSwap to true could leak
+    // an unaudited router into a delegate-style swap call. Allowed values are
+    // the configured aggregator OR ZeroAddress (acceptable when useSwap=false).
+    this.validateConfiguredSwapRouter(params.swap.router, 'swap.router');
+    this.validateConfiguredSwapRouter(params.swap.approvalTarget, 'swap.approvalTarget');
 
     const markets = this.getMarkets(marketsAddress);
     const swapTuple: SwapTuple = [
@@ -1318,6 +1343,24 @@ export class WheelVaultModule {
   async depositToBucket(marketsAddress: string, params: DepositToBucketParams): Promise<TransactionReceipt> {
     this.ensureEnabled();
     this.validateConfiguredMarkets(marketsAddress);
+
+    // TNU-AUDIT-0003: Markets.depositToBucket pulls vault share tokens (the
+    // per-series ERC20) from msg.sender — spender is the Markets contract.
+    // We resolve the seriesToken from the Markets' vault rather than trusting
+    // a caller-supplied address.
+    if (params.shares > 0n) {
+      const markets = this.getMarkets(marketsAddress);
+      const vaultAddressFromMarkets = await markets.vault();
+      // The vault returned by the Markets contract must be one we already trust.
+      this.validateConfiguredVault(vaultAddressFromMarkets);
+      const vaultRead = this.getVaultRead(vaultAddressFromMarkets);
+      const seriesTokenAddress = await vaultRead.seriesToken(params.seriesId);
+      await this.client.erc20.ensureAllowance(
+        seriesTokenAddress,
+        marketsAddress,
+        params.shares,
+      );
+    }
 
     const markets = this.getMarkets(marketsAddress);
 
@@ -1780,14 +1823,18 @@ export class WheelVaultModule {
     try {
       const result = await lens.previewExercise(optionId);
 
+      const canExercise = Boolean(result.canExercise);
+      const exerciseProfit = BigInt(result.exerciseProfit);
+
       return {
         isCall: Boolean(result.isCall),
         lockAmount: BigInt(result.lockAmount),
         strikePayment: BigInt(result.strikePayment),
         spotValue: BigInt(result.spotValue),
-        exerciseProfit: BigInt(result.exerciseProfit),
+        exerciseProfit,
         expiry: BigInt(result.expiry),
-        canExercise: Boolean(result.canExercise),
+        canExercise,
+        shouldExercise: canExercise && exerciseProfit > 0n,
         isExpired: Boolean(result.isExpired),
       };
     } catch (error) {

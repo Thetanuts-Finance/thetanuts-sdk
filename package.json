@@ -26,6 +26,8 @@
     "test": "npx tsx scripts/run-mainnet-tests.ts",
     "test:collar": "npx tsx scripts/test-collar-module.ts",
     "test:collar:live": "npx tsx scripts/test-collar-module.ts --live",
+    "test:properties": "npx tsx tests/properties/invariants.test.ts",
+    "verify:abi": "npx tsx scripts/verify-abi-parity.ts",
     "test:benchmark": "npx tsx scripts/benchmark-indexer.ts",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
@@ -56,7 +58,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "axios": "^1.7.2",
+    "axios": "^1.16.1",
     "ethers": "^6.0.0",
     "viem": "^2.47.0"
   },
