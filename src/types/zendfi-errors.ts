@@ -32,6 +32,7 @@ export type ZendfiErrorCode =
   | 'EXPIRY_IN_PAST'
   | 'EXPIRY_TOO_SOON'
   | 'INVALID_CAP'
+  | 'INVALID_PARAM'
   | 'INSUFFICIENT_COLLATERAL'
   | 'INSUFFICIENT_LOAN_BUDGET'
   | 'OFFER_DECRYPTION_FAILED'
@@ -248,6 +249,25 @@ export const zendfiErr = {
         docsUrl: opts?.docsUrl ?? docsAnchor('INVALID_CAP'),
         ...(opts?.cause !== undefined ? { cause: opts.cause } : {}),
         meta: { capUsd, ...(opts?.meta ?? {}) },
+      },
+    ),
+
+  // Generic parameter-validation factory for call sites that don't fit a more
+  // specific code (e.g. `invalidCap`). Pass an `actionable` override in `opts`
+  // when the default canned text doesn't carry enough remediation detail.
+  invalidParam: (
+    fieldName: string,
+    reason: string,
+    opts?: ZendfiErrorOptions & { actionable?: string },
+  ) =>
+    new ZendfiError(
+      'INVALID_PARAM',
+      `Invalid ${fieldName}: ${reason}.`,
+      opts?.actionable ?? `Fix the ${fieldName} argument and retry. See the JSDoc on the calling method for accepted values.`,
+      {
+        docsUrl: opts?.docsUrl ?? docsAnchor('INVALID_PARAM'),
+        ...(opts?.cause !== undefined ? { cause: opts.cause } : {}),
+        meta: { fieldName, reason, ...(opts?.meta ?? {}) },
       },
     ),
 
