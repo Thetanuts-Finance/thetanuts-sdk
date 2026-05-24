@@ -1,7 +1,7 @@
 # Thetanuts SDK Beta — Security Audit Report
 
 **Status:** Section 3 (Critical) + Section 4 (High) + 8 Section-10.1 (High) findings **REMEDIATED** on `beta`. Section 10.2 (Medium), 10.3 (Low), and 10.4 (Informational) deferred to follow-on patches. CEO 3 review (Code Reviewer + Security Reviewer) still required on the merged remediation commits.
-**Branch audited:** `beta` (engagement start HEAD `32c527f`; W6 deliverable at `334bdbf`; consolidation at `46728b8`; first remediation `7d83ff2`; second remediation `a1b4532`; third remediation pending — TNU-14).
+**Branch audited:** `beta` (engagement start HEAD `32c527f`; W6 deliverable at `334bdbf`; consolidation at `46728b8`; first remediation `7d83ff2`; second remediation `a1b4532`; third remediation `6e2ddea`).
 **Engagement issue:** TNU-2 (Paperclip).
 **Engagement quality bar:** Trail of Bits — every finding cites file:line, severity, reproduction, remediation. No speculative findings.
 **Initial date:** 2026-05-23.
@@ -22,21 +22,21 @@
 | TNU-AUDIT-0008 | High | REMEDIATED | `7d83ff2` |
 | TNU-AUDIT-0009 | High | REMEDIATED | `a1b4532` |
 | TNU-AUDIT-0010 | High | REMEDIATED | `7d83ff2` |
-| TNU-AUDIT-0040 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0041 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0042 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0043 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0044 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0045 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0046 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0047 | High | REMEDIATED | TNU-14 (this commit) |
-| TNU-AUDIT-0048 | High | REMEDIATED | TNU-14 (this commit) — single mcp-sdk floor bump |
-| TNU-AUDIT-0049 | High | REMEDIATED (by 0048) | TNU-14 (this commit) |
-| TNU-AUDIT-0050 | High | REMEDIATED (by 0048) | TNU-14 (this commit) |
-| TNU-AUDIT-0051 | High | REMEDIATED (by 0048) | TNU-14 (this commit) |
-| TNU-AUDIT-0052 | High | REMEDIATED (by 0048) | TNU-14 (this commit) |
-| TNU-AUDIT-0053 | High | REMEDIATED | TNU-14 (this commit) — gated behind `THETANUTS_MCP_ENABLE_ENCODE=1`; `encode_approve` cap `(2^128 - 1)` and `"max"` refused |
-| TNU-AUDIT-0054 | High | REMEDIATED | TNU-14 (this commit) |
+| TNU-AUDIT-0040 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0041 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0042 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0043 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0044 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0045 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0046 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0047 | High | REMEDIATED | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0048 | High | REMEDIATED | `6e2ddea` (TNU-14) — single mcp-sdk floor bump |
+| TNU-AUDIT-0049 | High | REMEDIATED (by 0048) | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0050 | High | REMEDIATED (by 0048) | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0051 | High | REMEDIATED (by 0048) | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0052 | High | REMEDIATED (by 0048) | `6e2ddea` (TNU-14) |
+| TNU-AUDIT-0053 | High | REMEDIATED | `6e2ddea` (TNU-14) — gated behind `THETANUTS_MCP_ENABLE_ENCODE=1`; `encode_approve` cap `(2^128 - 1)` and `"max"` refused |
+| TNU-AUDIT-0054 | High | REMEDIATED | `6e2ddea` (TNU-14) |
 | TNU-AUDIT-0011..0039 | Medium / Low / Informational (Sections 5–7) | OPEN | — |
 | TNU-AUDIT-0055..0080 | Medium / Low (Section 10.2–10.3) | OPEN | — |
 | TNU-AUDIT-0081..0083 | Informational (Section 10.4) | OPEN | — |
