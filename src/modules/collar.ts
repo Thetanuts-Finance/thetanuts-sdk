@@ -295,8 +295,13 @@ export class CollarModule {
    * `walkAwayCollar`) throw `ZendfiError` with `code === 'PRICING_ONLY_MODE'`
    * when called in `pricing-only` mode.
    *
+   * Pure: does not perform any I/O.
+   *
+   * @returns The current {@link CollarCapability} for the active chain.
+   * @see {@link https://docs.thetanuts.finance/zendfi/pricing-only-mode | docs/zendfi/pricing-only-mode.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
    * @example
-   * ```ts
+   * ```typescript
    * const cap = client.collar.capability();
    * if (cap.mode === 'pricing-only') {
    *   showBanner(`Collar contracts not yet on chain ${cap.chainId}`);
@@ -320,17 +325,48 @@ export class CollarModule {
 
   /**
    * Type guard: narrows `this` to {@link CollarModuleWriteEnabled} when
-   * the collar contracts are deployed. Lets consumers gate write calls
-   * at compile time without runtime asserts.
+   * the collar contracts are deployed.
+   *
+   * Lets consumers gate write calls at compile time without runtime
+   * asserts. Inside the guard, `requestLoan` / `cancelLoan` /
+   * `acceptOffer` / `exerciseCollar` / `walkAwayCollar` show up on the
+   * type without a non-null assertion.
+   *
+   * Pure: does not perform any I/O.
+   *
+   * @returns `true` when the collar contracts are deployed on the current chain.
+   * @see {@link https://docs.thetanuts.finance/zendfi/pricing-only-mode | docs/zendfi/pricing-only-mode.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const { quotationId } = await client.collar.requestLoan(req);
+   * } else {
+   *   showBanner('Collar not yet live on this chain');
+   * }
+   * ```
    */
   isWriteEnabled(): this is CollarModuleWriteEnabled {
     return this.capability().mode === 'full';
   }
 
   /**
-   * Convenience: `true` exactly when {@link capability} returns
-   * `pricing-only`. Equivalent to `!isWriteEnabled()` but reads better
-   * at call sites that want the affirmative form.
+   * Returns `true` when {@link capability} returns `pricing-only`.
+   *
+   * Equivalent to `!isWriteEnabled()` but reads better at call sites
+   * that want the affirmative form ("am I in pricing-only mode?").
+   *
+   * Pure: does not perform any I/O.
+   *
+   * @returns `true` exactly when collar-v12 is not yet deployed on the current chain.
+   * @see {@link https://docs.thetanuts.finance/zendfi/pricing-only-mode | docs/zendfi/pricing-only-mode.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isPricingOnly()) {
+   *   showQuoteOnlyUi();
+   * }
+   * ```
    */
   isPricingOnly(): boolean {
     return this.capability().mode === 'pricing-only';
@@ -338,8 +374,23 @@ export class CollarModule {
 
   /**
    * @deprecated Use {@link capability} or {@link isWriteEnabled} instead.
+   *
    * Kept as a back-compat shim — returns the same boolean as before
-   * (`true` when collar-v12 is deployed on the current chain).
+   * (`true` when collar-v12 is deployed on the current chain). New code
+   * should call {@link isWriteEnabled} (which also narrows the type) or
+   * {@link capability} (which surfaces `missingContracts`).
+   *
+   * Pure: does not perform any I/O.
+   *
+   * @returns `true` when collar-v12 is deployed on the current chain.
+   * @see {@link https://docs.thetanuts.finance/zendfi/pricing-only-mode | docs/zendfi/pricing-only-mode.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isDeployed()) { // legacy — prefer isWriteEnabled()
+   *   await client.collar.requestLoan(req);
+   * }
+   * ```
    */
   isDeployed(): boolean {
     return this.capability().mode === 'full';
@@ -391,13 +442,45 @@ export class CollarModule {
   // ─── Pricing helpers ───
 
   /**
-   * Estimate the collar parameters from current Deribit data.
+   * Estimate collar parameters from a Deribit pricing snapshot.
    *
    * Math (zero-rate limit, MM zero-NPV):
+   * ```
    *   target_put_premium = call_premium × (1 − mm_margin)
-   *   K_lo = highest OTM put strike at the same expiry whose ask ≤ target
-   *   L    = K_lo · N
-   *   capPayout = (K_hi − K_lo) · N
+   *   K_lo               = highest OTM put strike at the same expiry whose ask ≤ target
+   *   L                  = K_lo · N
+   *   capPayout          = (K_hi − K_lo) · N
+   * ```
+   *
+   * Falls back to the cheapest OTM put on the book if no strike fits the
+   * call-premium budget (handles low-vol regimes where the call premium
+   * is below every available put ask — TNU-AUDIT-0025).
+   *
+   * Returns `null` when the inputs are zero/invalid or no OTM put can be
+   * found at the requested expiry — callers should treat `null` as
+   * "no quote available", not as an error.
+   *
+   * Pure: does not perform any I/O.
+   *
+   * @param params - Quote inputs: `underlying`, `collateralAmount`, `capUsd`, `expiryLabel`, `pricingData`, `underlyingPrice`, optional `mmMarginPct`.
+   * @returns A populated {@link CollarEstimate}, or `null` when no quote can be produced.
+   * @see {@link quickQuote} for the one-call wrapper that fetches pricing for you.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#estimatecollar | docs/zendfi/api-reference.md#estimatecollar}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * const pricing = await client.collar.fetchPricing();
+   * const spot = client.collar.extractUnderlyingPrice(pricing, 'BTC');
+   * const est = client.collar.estimateCollar({
+   *   underlying: 'BTC',
+   *   collateralAmount: 0.5,
+   *   capUsd: 150000,
+   *   expiryLabel: '26DEC25',
+   *   pricingData: pricing,
+   *   underlyingPrice: spot,
+   * });
+   * if (est) console.log(`loan ≈ $${est.loanUsd}`);
+   * ```
    */
   estimateCollar(params: {
     underlying: CollarUnderlying;
@@ -481,9 +564,34 @@ export class CollarModule {
   }
 
   /**
-   * Group of valid (cap, expiry) tuples ready to display to a borrower.
-   * Caps are OTM call strikes above spot, capped by the on-chain ceiling,
-   * deduped by implied K_lo (only the highest cap per trigger is kept).
+   * Build the set of valid (cap, expiry) tuples for a borrower UI.
+   *
+   * Caps are OTM call strikes above spot, capped by the on-chain
+   * ceiling, filtered by `settings.minCapStrikeUsd` /
+   * `settings.minDurationDays`, and deduped by implied `K_lo` (only the
+   * highest cap per trigger is kept). Truncates each expiry to
+   * `settings.maxStrikesPerExpiry`.
+   *
+   * Pure: does not perform any I/O. For the I/O-fetching version, see
+   * {@link getCapStrikeOptions}.
+   *
+   * @param pricingData - A Deribit-style pricing map (from {@link fetchPricing}).
+   * @param underlying - `'ETH'` or `'BTC'`.
+   * @param underlyingPrice - Current spot price; rows below or equal to spot are filtered out.
+   * @param settings - Filter/sort settings (`collateralAmount`, `mmMarginPct`, `minDurationDays`, `minCapGapPct`, `minCapStrikeUsd`, `maxStrikesPerExpiry`).
+   * @param maxCapUsd - Optional ceiling (e.g. from {@link getMaxCapStrike}); defaults to `Infinity`.
+   * @returns Cap-strike groups by expiry, each row carrying a pre-computed {@link CollarEstimate}.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#filtercapstrikes | docs/zendfi/api-reference.md#filtercapstrikes}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * const pricing = await client.collar.fetchPricing();
+   * const spot = client.collar.extractUnderlyingPrice(pricing, 'BTC');
+   * const groups = client.collar.filterCapStrikes(pricing, 'BTC', spot, {
+   *   ...client.collar.defaultSettings,
+   *   collateralAmount: 0.5,
+   * });
+   * ```
    */
   filterCapStrikes(
     pricingData: DeribitPricingMap,
@@ -564,8 +672,27 @@ export class CollarModule {
   }
 
   /**
-   * Convenience: fetch Deribit pricing via the SDK's pricing url and return
-   * cap-strike groups ready for UI display.
+   * Fetch Deribit pricing and return cap-strike groups ready for UI display.
+   *
+   * One-call wrapper around {@link fetchPricing} +
+   * {@link extractUnderlyingPrice} + {@link filterCapStrikes}. Pass an
+   * `overrides.pricingData` snapshot when reusing a cached pricing read
+   * across multiple quotes (e.g. ETH and BTC in the same render).
+   *
+   * @param underlying - `'ETH'` or `'BTC'`.
+   * @param settings - Filter/sort settings (`collateralAmount`, `mmMarginPct`, etc.).
+   * @param overrides - Optional: `pricingData`, `underlyingPrice`, `maxCapUsd`. Use to share a pricing snapshot across multiple calls.
+   * @returns Cap-strike groups by expiry. Empty array when the Deribit feed has no spot price for `underlying`.
+   * @throws {ZendfiError<'PRICING_UNAVAILABLE'>} when the underlying call to {@link fetchPricing} fails.
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#show-a-cap-strike-picker | docs/zendfi/getting-started.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_unavailable | docs/zendfi/errors.md#pricing_unavailable}
+   * @example
+   * ```typescript
+   * const groups = await client.collar.getCapStrikeOptions('BTC', {
+   *   ...client.collar.defaultSettings,
+   *   collateralAmount: 0.5,
+   * });
+   * ```
    */
   async getCapStrikeOptions(
     underlying: CollarUnderlying,
@@ -648,6 +775,8 @@ export class CollarModule {
    * Collect OTM put strikes at `expiryLabel` from the Deribit slot, sorted
    * descending (closest to spot first). Used to populate `availableStrikes` on
    * `NO_MATCHING_STRIKE` errors so callers can suggest a recoverable cap.
+   *
+   * @internal
    */
   private collectOtmPutStrikes(
     pricingData: DeribitPricingMap,
@@ -675,8 +804,26 @@ export class CollarModule {
   // ─── On-chain reads ───
 
   /**
-   * Per-asset coordinator-enforced ceiling on cap strikes. Returns null when
-   * the coordinator is unavailable (placeholder address) or the call fails.
+   * Read the coordinator-enforced ceiling on cap strikes for an asset.
+   *
+   * Returns `null` (rather than throwing) when the coordinator is not
+   * yet deployed on this chain or the call fails — this is a UI-facing
+   * read used to dim entries above the ceiling, not a load-bearing
+   * write-path guard. Use {@link capability} when you need to branch on
+   * the deployment state.
+   *
+   * Uses `tryGetMaxCapStrike` so the contract can return a (bool, max)
+   * tuple instead of reverting when an asset has no configured ceiling.
+   *
+   * @param underlying - `'ETH'` or `'BTC'`.
+   * @returns The ceiling as a bigint (raw `strikeDecimals`), or `null` when unavailable.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#getmaxcapstrike | docs/zendfi/api-reference.md#getmaxcapstrike}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * const max = await client.collar.getMaxCapStrike('BTC');
+   * if (max !== null) console.log(`max cap: ${max}`);
+   * ```
    */
   async getMaxCapStrike(underlying: CollarUnderlying): Promise<bigint | null> {
     if (!this.isDeployed()) return null;
@@ -694,6 +841,28 @@ export class CollarModule {
     }
   }
 
+  /**
+   * Read a collar loan's on-chain state from `CollarLoanCoordinator.loanRequests`.
+   *
+   * Authoritative source for "is this collar loan settled and what
+   * option contract was deployed?". Mirrors the loan-module
+   * `loanRequests` shape but with `capStrike` and `loanClaimed` in place
+   * of the put-leg fields.
+   *
+   * @param quotationId - The quotation id from {@link requestLoan}.
+   * @returns The on-chain loan record (requester, collateralAmount, capStrike, expiryTimestamp, settlement flags, deployed option address).
+   * @throws {ZendfiError<'PRICING_ONLY_MODE'>} when the collar contracts are not yet deployed on this chain. Call {@link isWriteEnabled} first to branch.
+   * @throws {ZendfiError<'CONTRACT_REVERT'>} when the on-chain read fails (e.g. unknown quotation id).
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#getloanrequest-collar | docs/zendfi/api-reference.md#getloanrequest-collar}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const rec = await client.collar.getLoanRequest(953n);
+   *   if (rec.isSettled) console.log('option at', rec.settledOptionContract);
+   * }
+   * ```
+   */
   async getLoanRequest(quotationId: bigint): Promise<CollarLoanRequestRecord> {
     if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('getLoanRequest');
     const coordinator = this.getCoordinatorReadContract();
@@ -702,6 +871,42 @@ export class CollarModule {
 
   // ─── On-chain writes ───
 
+  /**
+   * Submit a collar loan request to the on-chain coordinator.
+   *
+   * Validates expiry (`> now`, ≥ 1h ahead unless `offerEndTimestamp`
+   * is explicit) and `capUsd > 0` before any approval gas is spent
+   * (TNU-AUDIT-0012), then approves collateral and submits
+   * `CollarLoanCoordinator.requestLoan` with an estimateGas + 20% gas
+   * buffer for Base (TNU-AUDIT-0026). Parses the `LoanRequested` event
+   * to return the `quotationId`.
+   *
+   * @param req - Collar loan request: `underlying`, `collateralAmount` (string), `capUsd`, `minLoanUsd`, `expiryTimestamp`, optional `offerEndTimestamp` / `requesterPublicKey`.
+   * @returns `{ quotationId, txHash }` — the parsed quotation id and the submitting transaction's hash.
+   * @throws {ZendfiError<'PRICING_ONLY_MODE'>} when the collar contracts are not yet deployed on this chain.
+   * @throws {ZendfiError<'SIGNER_REQUIRED'>} when the client was constructed without a signer (raised by the allowance/coordinator write path).
+   * @throws {ZendfiError<'EXPIRY_IN_PAST'>} when `expiryTimestamp <= now`.
+   * @throws {ZendfiError<'EXPIRY_TOO_SOON'>} when `offerEndTimestamp` is omitted and `expiryTimestamp - now < 3600`.
+   * @throws {ZendfiError<'INVALID_CAP'>} when `capUsd <= 0`.
+   * @throws {ZendfiError<'INSUFFICIENT_ALLOWANCE'>} when collateral allowance to the coordinator cannot be set.
+   * @throws {ZendfiError<'CONTRACT_REVERT'>} when the on-chain `requestLoan` call reverts, the receipt is missing, or the `LoanRequested` event is absent.
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#submit-a-collar-loan-request | docs/zendfi/getting-started.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const keys = await client.rfqKeys.getOrCreateKeyPair();
+   *   const { quotationId } = await client.collar.requestLoan({
+   *     underlying: 'BTC',
+   *     collateralAmount: '0.5',
+   *     capUsd: 150000,
+   *     minLoanUsd: 40000,
+   *     expiryTimestamp: 1780041600,
+   *     requesterPublicKey: keys.compressedPublicKey,
+   *   });
+   * }
+   * ```
+   */
   async requestLoan(req: CollarLoanRequest): Promise<CollarLoanResult> {
     if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('requestLoan');
     const asset = COLLAR_CONFIG.assets[req.underlying];
@@ -767,6 +972,28 @@ export class CollarModule {
     throw zendfiErr.contractRevert('collar.requestLoan', 'LoanRequested event missing in receipt');
   }
 
+  /**
+   * Cancel a pending collar loan request before any maker offer is accepted.
+   *
+   * Returns the in-flight transaction handle (not the receipt) — `await
+   * tx.wait()` if you need the mined receipt. Mirrors loan-module
+   * cancellation semantics: only valid while the quotation is open.
+   *
+   * @param quotationId - The quotation id to cancel.
+   * @returns The transaction response (call `.wait()` for the receipt).
+   * @throws {ZendfiError<'PRICING_ONLY_MODE'>} when the collar contracts are not yet deployed on this chain.
+   * @throws {ZendfiError<'SIGNER_REQUIRED'>} when the client was constructed without a signer.
+   * @throws {ZendfiError<'CONTRACT_REVERT'>} when the on-chain `cancelLoan` call reverts (e.g. quotation already settled).
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#cancel-a-pending-loan | docs/zendfi/getting-started.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const tx = await client.collar.cancelLoan(953n);
+   *   await tx.wait();
+   * }
+   * ```
+   */
   async cancelLoan(quotationId: bigint): Promise<ContractTransactionResponse> {
     if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('cancelLoan');
     const coordinator = this.getCoordinatorWriteContract();
@@ -776,6 +1003,39 @@ export class CollarModule {
     return coordinator.cancelLoan(quotationId, { gasLimit });
   }
 
+  /**
+   * Accept a market maker's decrypted offer for a pending collar loan.
+   *
+   * Mirrors `client.loan.acceptOffer` but routes to the collar
+   * coordinator. The `nonce` is defensively coerced to `bigint` so
+   * callers may safely pass a `number` literal above `2^53`
+   * (TNU-AUDIT-0032). Estimates gas with a 20% Base buffer
+   * (TNU-AUDIT-0026).
+   *
+   * @param quotationId - The RFQ quotation id from {@link requestLoan}.
+   * @param offerAmount - Decrypted offer amount in USDC (6 decimals).
+   * @param nonce - Offer nonce from decryption (accepts `number` or `bigint`).
+   * @param offeror - Market maker's wallet address.
+   * @returns The transaction response (call `.wait()` for the receipt).
+   * @throws {ZendfiError<'PRICING_ONLY_MODE'>} when the collar contracts are not yet deployed on this chain.
+   * @throws {ZendfiError<'SIGNER_REQUIRED'>} when the client was constructed without a signer.
+   * @throws {ZendfiError<'CONTRACT_REVERT'>} when the on-chain `settleQuotationEarly` call reverts.
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#accept-an-offer | docs/zendfi/getting-started.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const decrypted = await client.rfqKeys.decryptOffer(encrypted, signingKey);
+   *   const tx = await client.collar.acceptOffer(
+   *     953n,
+   *     decrypted.offerAmount,
+   *     decrypted.nonce,
+   *     offerorAddr,
+   *   );
+   *   await tx.wait();
+   * }
+   * ```
+   */
   async acceptOffer(
     quotationId: bigint,
     offerAmount: bigint,
@@ -801,6 +1061,30 @@ export class CollarModule {
 
   // ─── Option contract helpers ───
 
+  /**
+   * Exercise a settled collar option at expiry — repay USDC and reclaim collateral.
+   *
+   * Use when the asset closes between `K_lo` and `K_hi` (or above and
+   * you want to keep upside — but cap settlement is automatic in that
+   * range). For the "walk away and forfeit collateral" path, see
+   * {@link walkAwayCollar}.
+   *
+   * @param optionAddress - The deployed `CollaredCallOption` contract address.
+   * @returns The transaction response (call `.wait()` for the receipt).
+   * @throws {ZendfiError<'PRICING_ONLY_MODE'>} when the collar contracts are not yet deployed on this chain.
+   * @throws {ZendfiError<'SIGNER_REQUIRED'>} when the client was constructed without a signer.
+   * @throws {ZendfiError<'INVALID_PARAM'>} when `optionAddress` is invalid or the zero address.
+   * @throws {ZendfiError<'CONTRACT_REVERT'>} when the on-chain `exercise` call reverts (e.g. outside exercise window, already settled).
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#exercise-or-walk-away | docs/zendfi/getting-started.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const tx = await client.collar.exerciseCollar(optionAddress);
+   *   await tx.wait();
+   * }
+   * ```
+   */
   async exerciseCollar(optionAddress: string): Promise<ContractTransactionResponse> {
     if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('exerciseCollar');
     this.requireNonZeroAddress(optionAddress, 'optionAddress');
@@ -808,6 +1092,28 @@ export class CollarModule {
     return opt.exercise();
   }
 
+  /**
+   * Walk away from a settled collar option — keep the borrowed USDC, forfeit collateral.
+   *
+   * Use when the asset closes below `K_lo` (default trigger): the
+   * borrower keeps the loan and the MM keeps the collateral.
+   *
+   * @param optionAddress - The deployed `CollaredCallOption` contract address.
+   * @returns The transaction response (call `.wait()` for the receipt).
+   * @throws {ZendfiError<'PRICING_ONLY_MODE'>} when the collar contracts are not yet deployed on this chain.
+   * @throws {ZendfiError<'SIGNER_REQUIRED'>} when the client was constructed without a signer.
+   * @throws {ZendfiError<'INVALID_PARAM'>} when `optionAddress` is invalid or the zero address.
+   * @throws {ZendfiError<'CONTRACT_REVERT'>} when the on-chain `doNotExercise` call reverts.
+   * @see {@link https://docs.thetanuts.finance/zendfi/getting-started#exercise-or-walk-away | docs/zendfi/getting-started.md}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_only_mode | docs/zendfi/errors.md#pricing_only_mode}
+   * @example
+   * ```typescript
+   * if (client.collar.isWriteEnabled()) {
+   *   const tx = await client.collar.walkAwayCollar(optionAddress);
+   *   await tx.wait();
+   * }
+   * ```
+   */
   async walkAwayCollar(optionAddress: string): Promise<ContractTransactionResponse> {
     if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('walkAwayCollar');
     this.requireNonZeroAddress(optionAddress, 'optionAddress');
@@ -815,7 +1121,25 @@ export class CollarModule {
     return opt.doNotExercise();
   }
 
-  /** Read-only handle on a deployed CollaredCallOption proxy. */
+  /**
+   * Return a read-only ethers handle on a deployed `CollaredCallOption` proxy.
+   *
+   * Unlike `LoanModule.getOptionInfo`, this returns the contract proxy
+   * itself rather than a snapshot — callers can read individual fields
+   * (`buyer()`, `seller()`, `expiryTimestamp()`, etc.) without paying
+   * for a `Promise.all` round-trip on every field.
+   *
+   * @param optionAddress - The deployed `CollaredCallOption` contract address.
+   * @returns A read-only ethers `Contract` typed as {@link CollaredOptionContract}.
+   * @throws {ZendfiError<'INVALID_PARAM'>} when `optionAddress` is invalid or the zero address.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#getoptioninfo-collar | docs/zendfi/api-reference.md#getoptioninfo-collar}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#invalid_param | docs/zendfi/errors.md#invalid_param}
+   * @example
+   * ```typescript
+   * const opt = client.collar.getOptionInfo(optionAddress);
+   * const [buyer, twap] = await Promise.all([opt.buyer(), opt.getTWAP()]);
+   * ```
+   */
   getOptionInfo(optionAddress: string) {
     this.requireNonZeroAddress(optionAddress, 'optionAddress');
     return this.getOptionReadContract(optionAddress);
@@ -824,14 +1148,48 @@ export class CollarModule {
   // ─── Pricing fetch ───
 
   /**
-   * Fetch the Deribit-style pricing map. Delegates to {@link LoanModule.fetchPricing}
-   * so the collar and loan modules share a single 30s-cached call against
-   * `pricing.thetanuts.finance/all`.
+   * Fetch the Deribit-style pricing map.
+   *
+   * Delegates to `client.loan.fetchPricing()` so the collar and loan
+   * modules share a single 30s-cached call against
+   * `pricing.thetanuts.finance/all` — calling either module's
+   * `fetchPricing()` populates the same cache.
+   *
+   * @returns A pricing map keyed by asset (`'ETH'`/`'BTC'`) then by Deribit instrument name.
+   * @throws {ZendfiError<'PRICING_UNAVAILABLE'>} when the pricing API is unreachable or returns an unexpected shape.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#fetchpricing-collar | docs/zendfi/api-reference.md#fetchpricing-collar}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors#pricing_unavailable | docs/zendfi/errors.md#pricing_unavailable}
+   * @example
+   * ```typescript
+   * const pricing = await client.collar.fetchPricing();
+   * ```
    */
   async fetchPricing(): Promise<DeribitPricingMap> {
     return this.client.loan.fetchPricing();
   }
 
+  /**
+   * Extract the spot price for an asset from a Deribit pricing snapshot.
+   *
+   * Scans the asset's instruments for the first non-zero
+   * `underlying_price`. Returns `0` (not `null`) when no entry carries a
+   * spot — callers should treat `0` as "no quote available" and skip
+   * downstream pricing work.
+   *
+   * Pure: does not perform any I/O.
+   *
+   * @param pricingData - A Deribit-style pricing map (from {@link fetchPricing}).
+   * @param underlying - `'ETH'` or `'BTC'`.
+   * @returns The spot price in USD, or `0` when unavailable.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#extractunderlyingprice | docs/zendfi/api-reference.md#extractunderlyingprice}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * const pricing = await client.collar.fetchPricing();
+   * const spot = client.collar.extractUnderlyingPrice(pricing, 'BTC');
+   * if (spot > 0) console.log(`BTC spot: $${spot}`);
+   * ```
+   */
   extractUnderlyingPrice(pricingData: DeribitPricingMap, underlying: CollarUnderlying): number {
     const slot = pricingData[underlying];
     if (!slot) return 0;
@@ -845,10 +1203,38 @@ export class CollarModule {
 
   // ─── Public accessors ───
 
+  /**
+   * The raw `COLLAR_CONFIG` for the active chain.
+   *
+   * Read-only — exposed for tooling that needs to introspect contract
+   * addresses, ABIs, default settings, or decimals. Most app code
+   * should prefer the higher-level methods on `client.collar`.
+   *
+   * @returns The `COLLAR_CONFIG` const (contracts, settlement token, assets, defaults).
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#collarconfig | docs/zendfi/api-reference.md#collarconfig}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * const decimals = client.collar.config.assets.BTC.decimals;
+   * ```
+   */
   get config() {
     return COLLAR_CONFIG;
   }
 
+  /**
+   * Per-asset collar config (`collateral`, `priceFeed`, `decimals`).
+   *
+   * @param underlying - `'ETH'` or `'BTC'`.
+   * @returns The {@link CollarAssetConfig} entry for the asset.
+   * @see {@link https://docs.thetanuts.finance/zendfi/api-reference#asset | docs/zendfi/api-reference.md#asset}
+   * @see {@link https://docs.thetanuts.finance/zendfi/errors | docs/zendfi/errors.md}
+   * @example
+   * ```typescript
+   * const cfg = client.collar.asset('BTC');
+   * console.log(cfg.collateral, cfg.priceFeed, cfg.decimals);
+   * ```
+   */
   asset(underlying: CollarUnderlying): CollarAssetConfig {
     return COLLAR_CONFIG.assets[underlying];
   }

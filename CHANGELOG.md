@@ -6,21 +6,48 @@ All notable changes to `@thetanuts-finance/thetanuts-client` are documented here
 
 ### Added
 
-- **`client.collar` — Collar Loan module.** Zero-interest, capped-upside loans via
-  Thetanuts V4 RFQ. Borrower buys a put at `K_lo` (default trigger) + sells a call
-  at `K_hi` (cap); MM funds an up-front USDC loan from the call premium it earns.
-  Three terminal outcomes at expiry: walk / repay / cap-settle.
-  - Pricing math against live Deribit quotes:
-    `target_put_premium = call_premium × (1 − mm_margin)`,
-    `K_lo = highest OTM put whose ask ≤ target`, `L = K_lo · N`.
-  - Surface: `estimateCollar`, `filterCapStrikes`, `getCapStrikeOptions`,
-    `requestLoan`, `cancelLoan`, `acceptOffer`, `exerciseCollar`, `walkAwayCollar`,
-    `getMaxCapStrike`, `getLoanRequest`, `getOptionInfo`, `fetchPricing`,
-    `extractUnderlyingPrice`, `isDeployed`.
-  - Status: `CollarLoanCoordinator` not yet deployed on Base. Pricing/read-only
-    methods work today against live Deribit. Write methods throw
-    `NETWORK_UNSUPPORTED` until `COLLAR_CONFIG.contracts.collarCoordinator` is
-    populated (`isCollarDeployed()` flips to `true` automatically).
+- **Zendfi SDK UX upgrade.** Bundle of integrator-facing improvements across
+  `client.loan` and `client.collar` so a UI can be built today and light up
+  cleanly once collar-v12 deploys.
+  - **`ZendfiError` typed error surface** (`src/types/zendfi-errors.ts`).
+    Stable discriminated union of `ZendfiErrorCode` strings, each constructed
+    via a typed factory in `zendfiErr` so call sites can't typo the code.
+    Every error carries a `humanMessage`, `actionable` hint, optional
+    `docsUrl`, and a structured `meta` payload. Existing `ThetanutsError`
+    `instanceof` / `error.code` consumers keep working unchanged.
+  - **`client.collar.quickQuote(underlying, n, capUsd, expiryLabel)`** — one-call
+    cap-strike quote. Hides `fetchPricing` / `extractUnderlyingPrice` /
+    `estimateCollar` plumbing; throws typed `PRICING_UNAVAILABLE` /
+    `NO_MATCHING_STRIKE` with `availableStrikes` in `err.meta` so callers can
+    suggest a recoverable cap.
+  - **`client.collar.capability()` + `isWriteEnabled()`** — runtime capability
+    surface for the pricing-only-vs-full deploy gate. `isWriteEnabled()` is a
+    TypeScript type guard, so write methods (`requestLoan`, `cancelLoan`,
+    `acceptOffer`, `exerciseCollar`, `walkAwayCollar`) narrow on the type
+    inside the guard. `isPricingOnly()` is the affirmative form. `isDeployed()`
+    is kept as a back-compat shim and marked `@deprecated`. When the contracts
+    aren't deployed yet, write methods throw `ZendfiError<'PRICING_ONLY_MODE'>`
+    (carrying the failing `operation` in `err.meta`).
+  - **Loan module typed-error migration.** `client.loan.requestLoan`,
+    `acceptOffer`, `cancelLoan`, `exerciseOption`, `doNotExercise`,
+    `swapAndExercise`, `splitOption`, `reclaimCollateral`, `lend`,
+    `getLendingOpportunities`, `getLoanRequest`, `getUserLoans`,
+    `getOptionInfo`, `isOptionITM`, `fetchPricing`, `getStrikeOptions`,
+    `encodeRequestLoan`, `encodeAcceptOffer`, `encodeCancelLoan` now throw
+    `ZendfiError` with typed codes (`SIGNER_REQUIRED`, `INVALID_PARAM`,
+    `INSUFFICIENT_BALANCE`, `INSUFFICIENT_ALLOWANCE`, `INSUFFICIENT_COLLATERAL`,
+    `CONTRACT_REVERT`, `INDEXER_UNAVAILABLE`, `PRICING_UNAVAILABLE`).
+  - **`docs/zendfi/`** — four new docs pages covering the upgraded surface:
+    [getting-started](docs/zendfi/getting-started.md),
+    [api-reference](docs/zendfi/api-reference.md),
+    [errors](docs/zendfi/errors.md) (one section per `ZendfiErrorCode` with
+    recovery snippets), and
+    [pricing-only-mode](docs/zendfi/pricing-only-mode.md).
+  - **JSDoc on every public method of `client.loan` and `client.collar`** with
+    `@param` / `@returns` / typed `@throws {ZendfiError<'CODE'>}` /
+    runnable `@example` / `@see` cross-links to the docs pages. Enforced by a
+    scoped `eslint-plugin-jsdoc` config that runs on `src/modules/loan.ts` and
+    `src/modules/collar.ts` only — out of scope for the rest of the codebase.
 - **`utils/expiry.ts` — shared Deribit expiry parser.** New exports:
   `parseDeribitExpiry`, `parseDeribitExpiryOrThrow`, `formatDeribitExpiry`,
   `MONTH_MAP`. Both `LoanModule` (put leg) and `CollarModule` (call leg) now
@@ -35,6 +62,13 @@ All notable changes to `@thetanuts-finance/thetanuts-client` are documented here
   Single 30s-cached call against `pricing.thetanuts.finance/all` shared across
   both modules — calling either module's `fetchPricing()` populates the same
   cache. Verified by smoke test.
+
+### Deprecated
+
+- **`client.collar.isDeployed()`** — superseded by `isWriteEnabled()`
+  (compile-time narrowing) and `capability()` (`missingContracts` surface).
+  The shim still returns the same boolean and won't be removed in this
+  release.
 
 ## 0.2.3 — strategyVault rename (BREAKING)
 

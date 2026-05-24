@@ -10,6 +10,7 @@ TypeScript client for trading options on **Base mainnet** via Thetanuts Finance 
 - [Two paths: read market data, or trade](#two-paths-read-market-data-or-trade)
 - [Choosing between OptionBook and RFQ](#choosing-between-optionbook-and-rfq)
 - [Modules](#modules)
+- [Zendfi loans](#zendfi-loans)
 - [Common workflows](#common-workflows)
 - [Error handling](#error-handling)
 - [Production checklist](#production-checklist)
@@ -162,6 +163,57 @@ The client exposes 14 modules. Pull what you need; the rest stay idle.
 Note: the pricing module is **`client.mmPricing`**, not `client.pricing`.
 
 See [`src/modules/README.md`](src/modules/README.md) for per-module reference.
+
+---
+
+## Zendfi loans
+
+`client.loan` and `client.collar` ship a typed, integrator-friendly surface for **non-liquidating, fixed-term loans on Base** — borrowers deposit ETH/BTC, receive USDC up front, and either repay or walk away at expiry. No margin calls, no oracle keepers, no liquidation engine.
+
+```typescript
+import { ethers } from 'ethers';
+import { ThetanutsClient, isZendfiError } from '@thetanuts-finance/thetanuts-client';
+
+const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
+const signer = wallet.connect(provider);
+const client = new ThetanutsClient({ chainId: 8453, provider, signer });
+
+// Collar quote (one call — hides pricing fetch + estimate plumbing)
+const est = await client.collar.quickQuote('BTC', 0.5, 150000, '26DEC25');
+console.log(`Loan: $${est.loanUsd}, default trigger: $${est.triggerUsd}`);
+
+// Submit a loan request, gated on the runtime capability so a UI built today
+// keeps working on chains where collar-v12 hasn't deployed yet.
+if (client.collar.isWriteEnabled()) {
+  try {
+    const keys = await client.rfqKeys.getOrCreateKeyPair();
+    const { quotationId, txHash } = await client.collar.requestLoan({
+      underlying: 'BTC',
+      collateralAmount: '0.5',
+      capUsd: 150000,
+      minLoanUsd: 40000,
+      expiryTimestamp: 1780041600,
+      requesterPublicKey: keys.compressedPublicKey,
+    });
+    console.log(`quotation ${quotationId} in tx ${txHash}`);
+  } catch (err) {
+    if (isZendfiError(err)) {
+      // err.code is a stable union — exhaustive switch keeps your UI honest.
+      // err.humanMessage / err.actionable are pre-formatted for direct rendering.
+      console.error(`[${err.code}] ${err.humanMessage} — ${err.actionable}`);
+    } else {
+      throw err;
+    }
+  }
+}
+```
+
+Single-leg loans (`client.loan.requestLoan`) follow the same shape with `strike` + `minSettlementAmount` in place of `capUsd` + `minLoanUsd`. Full walkthrough — including `lend`, `exerciseOption`, `swapAndExercise`, `splitOption`, and the `ZendfiError` catalogue — in [`docs/zendfi/getting-started.md`](docs/zendfi/getting-started.md).
+
+- 📖 [Getting started](docs/zendfi/getting-started.md) — install → quote → submit → settle, end to end.
+- 🧭 [API reference](docs/zendfi/api-reference.md) — every public method on `client.loan` and `client.collar`.
+- 🚨 [Errors](docs/zendfi/errors.md) — one section per `ZendfiErrorCode` with recovery snippets.
+- 🧱 [Pricing-only mode](docs/zendfi/pricing-only-mode.md) — how collar's runtime capability gate works.
 
 ---
 
