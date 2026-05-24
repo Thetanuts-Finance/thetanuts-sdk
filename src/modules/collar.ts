@@ -15,7 +15,16 @@
  *
  * Status: this module ships the pricing math + ABIs ahead of the collar-v12
  * deployment. Read-only methods that only need Deribit data work today; write
- * methods throw `NETWORK_UNSUPPORTED` until contract addresses are populated.
+ * methods throw `ZendfiError` with `code === 'PRICING_ONLY_MODE'` until contract
+ * addresses are populated. Branch at compile time with `isWriteEnabled()`:
+ *
+ * ```ts
+ * if (client.collar.isWriteEnabled()) {
+ *   await client.collar.requestLoan(req); // narrowed to write-enabled
+ * } else {
+ *   showBanner(client.collar.capability().missingContracts);
+ * }
+ * ```
  *
  * @example
  * ```typescript
@@ -42,14 +51,13 @@ import { COLLAR_COORDINATOR_ABI, COLLARED_CALL_OPTION_ABI } from '../abis/collar
 import {
   COLLAR_CONFIG,
   COLLAR_DEFAULT_SETTINGS,
-  isCollarDeployed,
   type CollarSettings,
   type CollarAssetConfig,
 } from '../chains/collar.js';
-import { createError } from '../utils/errors.js';
 import { validateAddress } from '../utils/validation.js';
 import { parseDeribitExpiry } from '../utils/expiry.js';
 import type { DeribitPricingMap } from '../types/loan.js';
+import { zendfiErr } from '../types/zendfi-errors.js';
 
 // ─── Public types ───
 
@@ -111,6 +119,24 @@ export interface CollarLoanResult {
 
 // ─── Typed Contract Interfaces ───
 
+/**
+ * On-chain shape of `CollarLoanCoordinator.loanRequests(quotationId)`.
+ * Surfaced as a named type so `CollarModule.getLoanRequest` can declare
+ * its return shape without re-typing the struct inline (which made TS
+ * 5.x fail to infer the method's return type — TNU-23).
+ */
+export interface CollarLoanRequestRecord {
+  requester: string;
+  collateralAmount: bigint;
+  capStrike: bigint;
+  expiryTimestamp: bigint;
+  collateralToken: string;
+  settlementToken: string;
+  isSettled: boolean;
+  settledOptionContract: string;
+  loanClaimed: boolean;
+}
+
 interface CollarRequestParams {
   collateralToken: string;
   priceFeed: string;
@@ -136,17 +162,7 @@ interface CollarCoordinatorContract {
     settlementToken: string,
     N: bigint,
   ): Promise<bigint>;
-  loanRequests(quotationId: bigint): Promise<{
-    requester: string;
-    collateralAmount: bigint;
-    capStrike: bigint;
-    expiryTimestamp: bigint;
-    collateralToken: string;
-    settlementToken: string;
-    isSettled: boolean;
-    settledOptionContract: string;
-    loanClaimed: boolean;
-  }>;
+  loanRequests(quotationId: bigint): Promise<CollarLoanRequestRecord>;
   fee(): Promise<bigint>;
   optionFactory(): Promise<string>;
   requestLoan: {
@@ -198,6 +214,65 @@ interface CollaredOptionContract {
   settled(): Promise<boolean>;
 }
 
+// ─── Capability surface ───
+
+/**
+ * Describes the runtime capability of a {@link CollarModule} on the
+ * current chain. Lets consumers branch at compile time over whether the
+ * write methods (`requestLoan`, `cancelLoan`, …) are usable.
+ *
+ * - `mode: 'full'` — the CollarLoanCoordinator (and friends) are deployed
+ *   and the write methods will reach a signer. Inside a
+ *   `client.collar.isWriteEnabled()` block, TypeScript narrows
+ *   `client.collar` to {@link CollarModuleWriteEnabled} so write methods
+ *   show up on the type without a non-null assertion.
+ * - `mode: 'pricing-only'` — collar-v12 has not shipped on this chain
+ *   yet. Read-only / Deribit-pricing methods still work; the write
+ *   methods throw a typed `ZendfiError` with `code === 'PRICING_ONLY_MODE'`.
+ *
+ * The shape is intentionally minimal; chain id is included so consumers
+ * can pin error UI to the active chain without re-reading client config.
+ */
+export interface CollarCapability {
+  readonly mode: 'pricing-only' | 'full';
+  readonly chainId: number;
+  /**
+   * Sorted, deduplicated list of collar contract slots that are still
+   * placeholder zero-addresses on the current chain. Populated only when
+   * `mode === 'pricing-only'`; an empty list means `mode === 'full'`.
+   *
+   * Stable subset of `keyof typeof COLLAR_CONFIG.contracts`, but typed
+   * as `readonly string[]` so future contract additions don't force a
+   * breaking change to consumers reading this field.
+   */
+  readonly missingContracts?: readonly string[];
+}
+
+/**
+ * `CollarModule` narrowed to the surface that's actually callable when
+ * the collar contracts are deployed. Returned by the type guard
+ * {@link CollarModule.isWriteEnabled} so consumers can use the write
+ * methods without runtime asserts.
+ *
+ * ```ts
+ * if (client.collar.isWriteEnabled()) {
+ *   const { quotationId } = await client.collar.requestLoan(req);
+ * }
+ * ```
+ */
+export interface CollarModuleWriteEnabled extends CollarModule {
+  requestLoan(req: CollarLoanRequest): Promise<CollarLoanResult>;
+  cancelLoan(qid: bigint): Promise<ContractTransactionResponse>;
+  acceptOffer(
+    qid: bigint,
+    offerAmount: bigint,
+    nonce: bigint,
+    offeror: string,
+  ): Promise<ContractTransactionResponse>;
+  exerciseCollar(optionAddress: string): Promise<ContractTransactionResponse>;
+  walkAwayCollar(optionAddress: string): Promise<ContractTransactionResponse>;
+}
+
 // ─── Module ───
 
 export class CollarModule {
@@ -207,28 +282,73 @@ export class CollarModule {
 
   // ─── Capability checks ───
 
-  /** True when CollarLoanCoordinator is populated (collar-v12 deployed). */
-  isDeployed(): boolean {
-    return isCollarDeployed();
+  /**
+   * Inspect the runtime capability surface on the current chain.
+   *
+   * Returns `{ mode: 'full' }` when the CollarLoanCoordinator is
+   * populated (collar-v12 deployed); otherwise `{ mode: 'pricing-only' }`
+   * with `missingContracts` listing the slots that are still zero
+   * placeholders.
+   *
+   * Pricing / read-only methods work in either mode. Write methods
+   * (`requestLoan`, `cancelLoan`, `acceptOffer`, `exerciseCollar`,
+   * `walkAwayCollar`) throw `ZendfiError` with `code === 'PRICING_ONLY_MODE'`
+   * when called in `pricing-only` mode.
+   *
+   * @example
+   * ```ts
+   * const cap = client.collar.capability();
+   * if (cap.mode === 'pricing-only') {
+   *   showBanner(`Collar contracts not yet on chain ${cap.chainId}`);
+   * }
+   * ```
+   */
+  capability(): CollarCapability {
+    const missing: string[] = [];
+    for (const [slot, addr] of Object.entries(COLLAR_CONFIG.contracts)) {
+      if (addr === ethers.ZeroAddress) missing.push(slot);
+    }
+    if (missing.length === 0) {
+      return { mode: 'full', chainId: this.client.chainId };
+    }
+    return {
+      mode: 'pricing-only',
+      chainId: this.client.chainId,
+      missingContracts: Object.freeze(missing.slice().sort()),
+    };
   }
 
-  private requireDeployed(): void {
-    if (!this.isDeployed()) {
-      throw createError(
-        'NETWORK_UNSUPPORTED',
-        'CollarLoanCoordinator is not yet deployed on this chain. ' +
-          'Pricing/read methods work; write methods are blocked until contracts ship.',
-      );
-    }
+  /**
+   * Type guard: narrows `this` to {@link CollarModuleWriteEnabled} when
+   * the collar contracts are deployed. Lets consumers gate write calls
+   * at compile time without runtime asserts.
+   */
+  isWriteEnabled(): this is CollarModuleWriteEnabled {
+    return this.capability().mode === 'full';
+  }
+
+  /**
+   * Convenience: `true` exactly when {@link capability} returns
+   * `pricing-only`. Equivalent to `!isWriteEnabled()` but reads better
+   * at call sites that want the affirmative form.
+   */
+  isPricingOnly(): boolean {
+    return this.capability().mode === 'pricing-only';
+  }
+
+  /**
+   * @deprecated Use {@link capability} or {@link isWriteEnabled} instead.
+   * Kept as a back-compat shim — returns the same boolean as before
+   * (`true` when collar-v12 is deployed on the current chain).
+   */
+  isDeployed(): boolean {
+    return this.capability().mode === 'full';
   }
 
   private requireNonZeroAddress(address: string, fieldName: string): void {
     validateAddress(address, fieldName);
     if (address === ethers.ZeroAddress) {
-      throw createError(
-        'INVALID_PARAMS',
-        `Invalid ${fieldName}: zero address`,
-      );
+      throw zendfiErr.invalidParam(fieldName, 'zero address');
     }
   }
 
@@ -481,8 +601,8 @@ export class CollarModule {
     }
   }
 
-  async getLoanRequest(quotationId: bigint) {
-    this.requireDeployed();
+  async getLoanRequest(quotationId: bigint): Promise<CollarLoanRequestRecord> {
+    if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('getLoanRequest');
     const coordinator = this.getCoordinatorReadContract();
     return coordinator.loanRequests(quotationId);
   }
@@ -490,22 +610,19 @@ export class CollarModule {
   // ─── On-chain writes ───
 
   async requestLoan(req: CollarLoanRequest): Promise<CollarLoanResult> {
-    this.requireDeployed();
+    if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('requestLoan');
     const asset = COLLAR_CONFIG.assets[req.underlying];
 
     // Pre-flight validation — fail fast before any approval gas is spent (TNU-AUDIT-0012).
     const now = Math.floor(Date.now() / 1000);
     if (req.expiryTimestamp <= now) {
-      throw createError('INVALID_PARAMS', 'expiryTimestamp must be in the future');
+      throw zendfiErr.expiryInPast(req.expiryTimestamp, now);
     }
     if (!req.offerEndTimestamp && req.expiryTimestamp - now < 3600) {
-      throw createError(
-        'INVALID_PARAMS',
-        'expiryTimestamp must be at least 1 hour in the future when offerEndTimestamp is omitted',
-      );
+      throw zendfiErr.expiryTooSoon(req.expiryTimestamp, now + 3600);
     }
     if (BigInt(req.capUsd) <= 0n) {
-      throw createError('INVALID_PARAMS', 'capUsd must be positive');
+      throw zendfiErr.invalidCap(req.capUsd);
     }
 
     const N = ethers.parseUnits(req.collateralAmount, asset.decimals);
@@ -538,7 +655,7 @@ export class CollarModule {
     const gasLimit = (gasEstimate * 120n) / 100n;
     const tx = await coordinator.requestLoan(requestParams, { gasLimit });
     const receipt = await tx.wait();
-    if (!receipt) throw createError('CONTRACT_REVERT', 'requestLoan receipt missing');
+    if (!receipt) throw zendfiErr.contractRevert('collar.requestLoan', 'receipt missing');
 
     const iface = new Interface(COLLAR_COORDINATOR_ABI);
     for (const log of receipt.logs) {
@@ -554,11 +671,11 @@ export class CollarModule {
         // not our log
       }
     }
-    throw createError('CONTRACT_REVERT', 'LoanRequested event not in receipt');
+    throw zendfiErr.contractRevert('collar.requestLoan', 'LoanRequested event missing in receipt');
   }
 
   async cancelLoan(quotationId: bigint): Promise<ContractTransactionResponse> {
-    this.requireDeployed();
+    if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('cancelLoan');
     const coordinator = this.getCoordinatorWriteContract();
     // Apply estimateGas + 20% buffer for Base (TNU-AUDIT-0026).
     const gasEstimate = await coordinator.cancelLoan.estimateGas(quotationId);
@@ -572,7 +689,7 @@ export class CollarModule {
     nonce: bigint,
     offeror: string,
   ): Promise<ContractTransactionResponse> {
-    this.requireDeployed();
+    if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('acceptOffer');
     // Defensive coercion for callers passing `number` literals > 2^53 (TNU-AUDIT-0032).
     const nonceBig = BigInt(nonce);
     const coordinator = this.getCoordinatorWriteContract();
@@ -592,14 +709,14 @@ export class CollarModule {
   // ─── Option contract helpers ───
 
   async exerciseCollar(optionAddress: string): Promise<ContractTransactionResponse> {
-    this.requireDeployed();
+    if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('exerciseCollar');
     this.requireNonZeroAddress(optionAddress, 'optionAddress');
     const opt = this.getOptionWriteContract(optionAddress);
     return opt.exercise();
   }
 
   async walkAwayCollar(optionAddress: string): Promise<ContractTransactionResponse> {
-    this.requireDeployed();
+    if (!this.isWriteEnabled()) throw zendfiErr.pricingOnlyMode('walkAwayCollar');
     this.requireNonZeroAddress(optionAddress, 'optionAddress');
     const opt = this.getOptionWriteContract(optionAddress);
     return opt.doNotExercise();
