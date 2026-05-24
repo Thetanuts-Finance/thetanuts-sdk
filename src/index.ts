@@ -33,6 +33,19 @@ export {
 
 export type { ThetanutsErrorCode } from './types/errors.js';
 
+// ============ Zendfi Errors (typed union + factories) ============
+export {
+  ZendfiError,
+  isZendfiError,
+  zendfiErr,
+} from './types/zendfi-errors.js';
+
+export type {
+  ZendfiErrorCode,
+  ZendfiErrorShape,
+  ZendfiErrorOptions,
+} from './types/zendfi-errors.js';
+
 export {
   createError,
   wrapError,
@@ -94,6 +107,7 @@ export { UtilsModule } from './modules/utils.js';
 export { RFQKeyManagerModule } from './modules/rfqKeyManager.js';
 export { MMPricingModule, parseTicker, buildTicker, applyFeeAdjustment, calculateCollateralCost } from './modules/mmPricing.js';
 export { LoanModule } from './modules/loan.js';
+export { CollarModule } from './modules/collar.js';
 export { WheelVaultModule } from './modules/wheelVault.js';
 export { StrategyVaultModule } from './modules/strategyVault.js';
 
