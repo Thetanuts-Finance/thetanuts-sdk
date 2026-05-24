@@ -1,5 +1,6 @@
 import type { ThetanutsClient } from '../client/ThetanutsClient.js';
 import { createError } from '../utils/errors.js';
+import { toBigInt as toBigIntSafe } from '../utils/decimals.js';
 
 /**
  * Option payout type
@@ -107,11 +108,15 @@ export class UtilsModule {
     if (decimals < 0 || decimals > 77) {
       throw createError('INVALID_PARAMS', 'Decimals must be between 0 and 77');
     }
-
-    const str = typeof value === 'number' ? value.toString() : value;
-    const [whole, fraction = ''] = str.split('.');
-    const paddedFraction = fraction.padEnd(decimals, '0').slice(0, decimals);
-    return BigInt(whole + paddedFraction);
+    try {
+      return toBigIntSafe(value, decimals);
+    } catch (err) {
+      throw createError(
+        'INVALID_PARAMS',
+        `Invalid numeric value for toBigInt: ${String(value)}`,
+        err
+      );
+    }
   }
 
   /**

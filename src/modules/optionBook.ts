@@ -165,6 +165,21 @@ export class OptionBookModule {
       throw createError('INVALID_ORDER', 'Order is missing rawApiData required for contract call');
     }
 
+    // Engagement invariant (TNU-AUDIT-0047): zero-address implementations on
+    // API responses indicate a misconfigured/rogue feed. The chain registry
+    // stores 0x000…000 for not-yet-deployed option implementations (e.g.
+    // physical multi-leg); filling against one would build calldata that
+    // reverts on-chain. Reject loudly at the SDK boundary.
+    if (
+      !rawData.implementation ||
+      rawData.implementation === '0x0000000000000000000000000000000000000000'
+    ) {
+      throw createError(
+        'INVALID_ORDER',
+        'OptionBook fill: order.implementation is zero-address — the option type is not deployed on this chain.'
+      );
+    }
+
     return {
       maker: orderWithSig.order.maker,
       orderExpiryTimestamp: BigInt(rawData.orderExpiryTimestamp),

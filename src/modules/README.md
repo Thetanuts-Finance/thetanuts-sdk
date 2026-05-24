@@ -386,12 +386,6 @@ const domain = await client.optionFactory.getEip712Domain();
 
 // Get historical TWAP consumer address
 const consumer = await client.optionFactory.getHistoricalTWAPConsumer();
-
-// Get offer signature for a quotation/offeror pair
-const sig = await client.optionFactory.getOfferSignature(quotationId, offerorAddress);
-
-// Get pending fees for a token
-const fees = await client.optionFactory.getPendingFees(tokenAddress);
 ```
 
 ### View Methods — Referral (read-only)
@@ -402,9 +396,6 @@ const tracking = await client.optionFactory.getQuotationTracking(quotationId);
 
 // Get accumulated fees for a referral
 const fees = await client.optionFactory.getReferralFees(referralId);
-
-// Get referral owner address
-const owner = await client.optionFactory.getReferralOwner(referralId);
 
 // Get full referral parameters
 const params = await client.optionFactory.getReferralParameters(referralId);
@@ -430,9 +421,6 @@ const receipt = await client.optionFactory.registerReferral(quotationParams);
 
 // Swap tokens and execute a call atomically
 const receipt = await client.optionFactory.swapAndCall(swapAndCallParams);
-
-// Withdraw accumulated referral fees
-const receipt = await client.optionFactory.withdrawFees(tokenAddress, referralIds);
 ```
 
 ### RFQ Lifecycle
@@ -464,8 +452,10 @@ const result = await client.option.transfer(optionAddress, isBuyer, target);
 // Split position by collateral amount (requires signer)
 const result = await client.option.split(optionAddress, splitCollateralAmount);
 
-// Execute payout after expiry (requires signer)
-const result = await client.option.payout(optionAddress);
+// Execute payout after expiry — REMOVED in r12 (TNU-AUDIT-0046)
+// Settlement is automatic via factory callbacks; calling client.option.payout()
+// now throws INVALID_PARAMS. Use `getOptionInfo(address).settled` to check
+// status and `calculatePayout(...)` (view) to compute the payout amount.
 
 // Approve address for position transfer (requires signer)
 const result = await client.option.approveTransfer(optionAddress, isBuyer, target, isApproved);

@@ -156,7 +156,9 @@ interface WETHContract {
 function parseDeribitKey(key: string): { asset: string; expiry: string; strike: number; type: string } | null {
   const parts = key.split('-');
   if (parts.length !== 4) return null;
-  return { asset: parts[0]!, expiry: parts[1]!, strike: parseInt(parts[2]!), type: parts[3]! };
+  const strike = parseInt(parts[2]!, 10);
+  if (!Number.isFinite(strike) || strike <= 0) return null;
+  return { asset: parts[0]!, expiry: parts[1]!, strike, type: parts[3]! };
 }
 
 function getAssetConfig(underlying: LoanUnderlying) {

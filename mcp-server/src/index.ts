@@ -1841,8 +1841,50 @@ const tools: Tool[] = [
   },
 ];
 
+// ============================================================================
+// TNU-AUDIT-0053 — `encode_*` MCP tools violate SPEC.md "no state-changing
+// operations" mandate. Default-off behind THETANUTS_MCP_ENABLE_ENCODE=1.
+// When disabled (default), the tools are removed from the ListTools response
+// and any CallTool invocation returns a structured error. encode_approve also
+// rejects `amount: "max"` and caps at a per-call ceiling regardless of flag.
+// ============================================================================
+const ENCODE_TOOLS = new Set<string>([
+  'encode_request_for_quotation',
+  'encode_settle_quotation',
+  'encode_settle_quotation_early',
+  'encode_cancel_quotation',
+  'encode_cancel_offer',
+  'encode_fill_order',
+  'encode_approve',
+]);
+
+const ENCODE_ENABLED = process.env.THETANUTS_MCP_ENABLE_ENCODE === '1';
+
+// Per-call ceiling for encode_approve when the gate is on: 2^128 - 1. Refuses
+// infinite-allowance (`"max"`) and bigint values above this cap. Operator can
+// still escalate at the wallet layer; the MCP must never emit `0xff…ff`.
+const ENCODE_APPROVE_MAX = (1n << 128n) - 1n;
+
+// Trim the listed tool surface when the gate is off so LLMs cannot discover
+// the encode_* surface.
+const publicTools: Tool[] = ENCODE_ENABLED
+  ? tools
+  : tools.filter(t => !ENCODE_TOOLS.has(t.name));
+
 // ============ Tool Handlers ============
 async function handleTool(name: string, args: Record<string, unknown>): Promise<string> {
+  // TNU-AUDIT-0053 enforcement at the dispatch boundary. Even if a caller
+  // names a gated tool directly (e.g. by stale tool listing), refuse.
+  if (ENCODE_TOOLS.has(name) && !ENCODE_ENABLED) {
+    return JSON.stringify({
+      error: 'TOOL_DISABLED',
+      tool: name,
+      reason:
+        'encode_* tools are disabled by default per SPEC.md ("no state-changing operations"). ' +
+        'Set THETANUTS_MCP_ENABLE_ENCODE=1 on the MCP server process to enable. See TNU-AUDIT-0053.',
+    }, null, 2);
+  }
+
   // SDK context tools don't need a chain connection — return embedded docs and exit early.
   switch (name) {
     case 'get_sdk_context':
@@ -2838,14 +2880,42 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         const tokenAddr = args.tokenAddress as string;
         const spender = args.spenderAddress as string;
         const amountStr = args.amount as string;
-        const amount = amountStr.toLowerCase() === 'max'
-          ? BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
-          : BigInt(amountStr);
+        // TNU-AUDIT-0053: refuse infinite-allowance "max" and cap at
+        // ENCODE_APPROVE_MAX so the MCP can never emit `0xff…ff` (or anything
+        // close to it) regardless of LLM prompt injection.
+        if (typeof amountStr !== 'string') {
+          return JSON.stringify({ error: 'amount must be a decimal string' }, null, 2);
+        }
+        if (amountStr.toLowerCase() === 'max') {
+          return JSON.stringify({
+            error: 'INFINITE_ALLOWANCE_FORBIDDEN',
+            reason:
+              'amount: "max" is disabled. Pass a bounded decimal string. See TNU-AUDIT-0053.',
+          }, null, 2);
+        }
+        let amount: bigint;
+        try {
+          amount = BigInt(amountStr);
+        } catch {
+          return JSON.stringify({ error: 'amount must parse as a non-negative integer' }, null, 2);
+        }
+        if (amount < 0n) {
+          return JSON.stringify({ error: 'amount must be non-negative' }, null, 2);
+        }
+        if (amount > ENCODE_APPROVE_MAX) {
+          return JSON.stringify({
+            error: 'AMOUNT_EXCEEDS_CAP',
+            cap: ENCODE_APPROVE_MAX.toString(),
+            requested: amount.toString(),
+            reason:
+              'encode_approve hard-caps amount at 2^128 - 1 to prevent runaway allowances. See TNU-AUDIT-0053.',
+          }, null, 2);
+        }
         const encoded = c.erc20.encodeApprove(tokenAddr, spender, amount);
         return JSON.stringify({
           to: encoded.to,
           data: encoded.data,
-          description: `Approve ${spender} to spend ${amountStr === 'max' ? 'unlimited' : amount.toString()} tokens`,
+          description: `Approve ${spender} to spend ${amount.toString()} tokens`,
           tokenAddress: tokenAddr,
           spender,
           amount: amount.toString(),
@@ -3247,7 +3317,9 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
+  // TNU-AUDIT-0053: encode_* tools are hidden from ListTools when the env
+  // flag THETANUTS_MCP_ENABLE_ENCODE=1 is not set.
+  return { tools: publicTools };
 });
 
 // Handle tool calls

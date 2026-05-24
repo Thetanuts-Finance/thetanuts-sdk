@@ -299,13 +299,15 @@ function summarizeOrderHuman(
   const underlyingSym =
     underlyingSymbolByPriceFeed(order.rawApiData?.priceFeed, client.chainConfig.priceFeeds) ??
     'UNKNOWN';
-  // pricePerContract is in 8 decimals on the order, but for USDC fills the
-  // SDK surfaces it as a USDC-decimal quantity (6 dec) when consumed via
-  // `previewFillOrder`. For the `book orders` list we humanize against USDC
-  // (6 dec) to match what the user actually pays per contract. Multiply by
-  // 1 if the maker fills in raw USDC; here we follow the user spec verbatim.
-  const premiumHuman = Number(order.order.price) / 1e6;
-  const availableHuman = Number(order.availableAmount) / 1e6;
+  // TNU-AUDIT-0054: previously hardcoded /1e6, which mis-rendered premiums
+  // by 100x against the SDK's 8-decimal pricing convention. Derive scale from
+  // the order's collateral token so the table matches what `book check` and
+  // `humanizePreview` show pre-broadcast.
+  const collDec = collateralDecimalsFromOrder(order, client);
+  const priceScale = 10 ** 8;
+  const collScale = 10 ** collDec;
+  const premiumHuman = Number(order.order.price) / priceScale;
+  const availableHuman = Number(order.availableAmount) / collScale;
   const collSym =
     tokenSymbolByAddress(order.rawApiData?.collateral, client.chainConfig.tokens) ?? 'UNKNOWN';
 

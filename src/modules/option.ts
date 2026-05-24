@@ -59,7 +59,10 @@ interface OptionContract {
 
   // === Write Functions ===
   close(): Promise<ContractTransactionResponse>;
-  payout(): Promise<ContractTransactionResponse>;
+  // Removed in audit fix (TNU-AUDIT-0046): zero-arg `payout()` is not present
+  // on the r12 BaseOption canonical ABI. Settlement on r12 is initiated via
+  // factory-side `notifyTradeSettled` callbacks; the SDK no longer surfaces
+  // a `payout()` write entry.
   split(splitCollateralAmount: bigint, overrides?: { value?: bigint }): Promise<ContractTransactionResponse>;
   transfer(isBuyer: boolean, target: string): Promise<ContractTransactionResponse>;
   approveTransfer(isBuyer: boolean, target: string, isApproved: boolean): Promise<ContractTransactionResponse>;
@@ -277,40 +280,37 @@ export class OptionModule {
   }
 
   /**
-   * Execute payout for an expired option.
-   * Can be called by buyer after expiry to claim winnings.
+   * @deprecated Removed in audit fix TNU-AUDIT-0046.
    *
-   * @param optionAddress - Option contract address
-   * @returns Payout result
+   * The pre-r12 BaseOption contract exposed a zero-arg `payout()` write
+   * entrypoint. On the r12 deployment (canonical `BaseOption.json`) this
+   * function does not exist — only `calculatePayout(uint256)` (view) and
+   * `simulatePayout(...)` (pure). Settlement is automatic via the factory's
+   * `notifyTradeSettled` callback; there is no user-callable settlement
+   * trigger on the option contract itself.
+   *
+   * This method now throws `INVALID_PARAMS` instead of silently broadcasting
+   * a guaranteed-revert transaction. Callers should:
+   *  - Query settlement status via `getOptionInfo(optionAddress).settled`;
+   *  - For payout amount, call `calculatePayout(optionAddress, ...)` (view).
+   *
+   * The method signature is retained (vs. deletion) to preserve API surface
+   * and produce a clear error path for downstream code that was previously
+   * burning gas on the revert.
    */
+  // eslint-disable-next-line @typescript-eslint/require-await -- preserves async signature for API back-compat; throws synchronously into the Promise chain.
   async payout(optionAddress: string): Promise<PayoutResult> {
     validateAddress(optionAddress, 'optionAddress');
-
-    this.client.logger.debug('Executing payout', { optionAddress });
-
-    try {
-      const contract = this.getWriteContract(optionAddress);
-      const tx = await contract.payout();
-
-      this.client.logger.info('Payout executed successfully', {
-        txHash: tx.hash,
-        optionAddress,
-      });
-
-      return {
-        txHash: tx.hash,
-        tx,
-        wait: (confirmations?: number) => tx.wait(confirmations).then((receipt) => {
-          if (!receipt) {
-            throw createError('CONTRACT_REVERT', 'Transaction failed - no receipt returned');
-          }
-          return receipt;
-        }),
-      };
-    } catch (error) {
-      this.client.logger.error('Failed to execute payout', { error, optionAddress });
-      throw mapContractError(error);
-    }
+    this.client.logger.warn('OptionModule.payout removed (TNU-AUDIT-0046)', {
+      optionAddress,
+    });
+    throw createError(
+      'INVALID_PARAMS',
+      'OptionModule.payout() is not available on the r12 deployment. ' +
+        'Settlement on r12 is triggered automatically via factory callbacks; ' +
+        'there is no user-callable payout() entrypoint on BaseOption. ' +
+        'See TNU-AUDIT-0046 in SECURITY_AUDIT_BETA.md.'
+    );
   }
 
   /**
