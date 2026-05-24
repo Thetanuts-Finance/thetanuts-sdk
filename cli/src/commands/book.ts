@@ -137,11 +137,21 @@ function collateralDecimalsFromOrder(
   client: GetClientResult['client']
 ): number {
   const addr = order.rawApiData?.collateral?.toLowerCase();
-  if (!addr) return 6; // safe default (USDC)
+  if (!addr) {
+    throw new Error(
+      'book preview: order is missing rawApiData.collateral. Cannot determine ' +
+        'decimal scale — refusing to fall back to 6-decimal default (TNU-AUDIT-0080).',
+    );
+  }
   for (const cfg of Object.values(client.chainConfig.tokens)) {
     if (cfg.address.toLowerCase() === addr) return cfg.decimals;
   }
-  return 6;
+  // Fail loudly instead of silently rendering at 6-decimal — a future order with
+  // an unknown collateral token would otherwise mislead the trader.
+  throw new Error(
+    `book preview: unknown collateral token ${addr}. ` +
+      'Add it to client.chainConfig.tokens before previewing (TNU-AUDIT-0080).',
+  );
 }
 
 /**
@@ -691,9 +701,10 @@ function registerCheck(grp: Command): void {
 
           return {
             index,
-            // Preserve OpenClaw quirk: ticker formatter hardcodes 'ETH'. Don't
-            // "fix" this — number alignment requires byte-for-byte parity.
-            ticker: formatCheckTicker('ETH', expiry, strike, optionType),
+            // Thread the actual underlying through — BTC orders were rendered
+            // with an `ETH-…` ticker prefix and misled traders selecting rows
+            // by ticker (TNU-AUDIT-0068).
+            ticker: formatCheckTicker(params.underlying, expiry, strike, optionType),
             type: optionType,
             strike,
             expiry,

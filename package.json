@@ -33,8 +33,9 @@
     "lint:fix": "eslint src --ext .ts --fix",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm ci && npm run build"
   },
+  "packageManager": "npm@10.8.0",
   "keywords": [
     "thetanuts",
     "options",

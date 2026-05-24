@@ -197,7 +197,8 @@ export const BASE_OPTION_ABI = [
       { name: '_numContracts', type: 'uint256', internalType: 'uint256' },
     ],
     outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
-    stateMutability: 'pure',
+    // Canonical r12 ABI declares this `view`, not `pure` (TNU-AUDIT-0069).
+    stateMutability: 'view',
   },
   {
     type: 'function',
@@ -287,7 +288,8 @@ export const BASE_OPTION_ABI = [
       { name: '_collateralAmount', type: 'uint256', internalType: 'uint256' },
     ],
     outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
-    stateMutability: 'pure',
+    // Canonical r12 ABI declares this `view`, not `pure` (TNU-AUDIT-0069).
+    stateMutability: 'view',
   },
 
   // ============ Write Functions ============
@@ -383,7 +385,8 @@ export const BASE_OPTION_ABI = [
       { name: '_strikes', type: 'uint256[]', internalType: 'uint256[]' },
     ],
     outputs: [],
-    stateMutability: 'pure',
+    // Canonical r12 ABI declares this `view`, not `pure` (TNU-AUDIT-0069).
+    stateMutability: 'view',
   },
 
   // ============ Events ============

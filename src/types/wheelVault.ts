@@ -44,6 +44,13 @@ export interface VaultState {
   baseValueInQuote: bigint;
   totalBaseAmt: bigint;
   totalQuoteAmt: bigint;
+  /**
+   * Third return of `totalAssets()` — total vault value in quote-decimals,
+   * sourced from the same accounting view as `totalBaseAmt`/`totalQuoteAmt`.
+   * Surfaced separately from `tvl` (which derives from `seriesTotalValue`)
+   * so callers can detect divergence (TNU-AUDIT-0018).
+   */
+  totalValueFromAssets: bigint;
   ivBps: number;
   baseDecimals: number;
   quoteDecimals: number;
@@ -52,6 +59,10 @@ export interface VaultState {
   baseIsToken0: boolean;
   seriesTokenAddress: string;
   vaultMathAddress: string;
+  /**
+   * Epoch expiry timestamps as Unix seconds (NOT milliseconds).
+   * To produce a JS `Date`, multiply by 1000 (TNU-AUDIT-0019).
+   */
   epochExpiries: number[];
   paused: boolean;
 }

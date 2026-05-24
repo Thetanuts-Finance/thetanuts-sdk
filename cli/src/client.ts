@@ -81,6 +81,28 @@ function resolveRpcUrl(opts: OptionValues, cfg: Config | null, _chainId: number)
 // Defined inline (not imported) to avoid pulling a command module into client bootstrap
 const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
 
+/**
+ * Best-effort wipe of `--private-key <value>` from `process.argv` so the key
+ * does not persist in `/proc/PID/cmdline` for longer than necessary
+ * (TNU-AUDIT-0016).
+ *
+ * Note: this cannot redact shell history, `ps aux` snapshots, or
+ * Node-internal copies — pass the key via env, stdin, or config instead.
+ */
+function scrubPrivateKeyFromArgv(): void {
+  const argv = process.argv;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--private-key' || arg === '-p') {
+      if (i + 1 < argv.length) {
+        argv[i + 1] = '[REDACTED]';
+      }
+    } else if (typeof arg === 'string' && arg.startsWith('--private-key=')) {
+      argv[i] = '--private-key=[REDACTED]';
+    }
+  }
+}
+
 function resolvePrivateKey(opts: OptionValues, cfg: Config | null): string | undefined {
   let key: string | undefined;
   let source: string | undefined;
@@ -88,6 +110,16 @@ function resolvePrivateKey(opts: OptionValues, cfg: Config | null): string | und
   if (fromFlag) {
     key = fromFlag;
     source = '--private-key flag';
+    // Emit one-time warning so users see this risk surface — argv is visible
+    // via `ps aux` and persists in shell history (TNU-AUDIT-0016).
+    if (!process.env.THETANUTS_SUPPRESS_PRIVATE_KEY_WARNING) {
+      process.stderr.write(
+        'thetanuts: warning — passing --private-key on the command line exposes ' +
+          'the key in shell history and process listings. Prefer THETANUTS_PRIVATE_KEY ' +
+          'env var or `thetanuts wallet import` for persistent storage.\n',
+      );
+    }
+    scrubPrivateKeyFromArgv();
   } else {
     const fromEnv = process.env.THETANUTS_PRIVATE_KEY;
     if (fromEnv) {

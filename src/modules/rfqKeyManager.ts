@@ -197,6 +197,13 @@ export class RFQKeyManagerModule {
    */
   async exportPrivateKey(): Promise<string> {
     const keyPair = await this.loadKeyPair();
+    // Emit a warning so silent leak via accidental logging/exfiltration of the
+    // return value is visible in observability streams. We do NOT log the key
+    // value itself (TNU-AUDIT-0029).
+    this.client.logger.warn(
+      'RFQ private key exported via exportPrivateKey() — handle with care; ' +
+        'do not log or transmit this value over insecure channels.',
+    );
     return keyPair.privateKey;
   }
 
@@ -223,8 +230,12 @@ export class RFQKeyManagerModule {
       }
 
       return keyPair;
-    } catch (error) {
-      throw new InvalidKeyError('Invalid private key format. Expected 32-byte hex string.', error);
+    } catch (_error) {
+      // Drop the original cause — ethers' SigningKey error may carry the
+      // offending private key value in nested `info`, and downstream error
+      // reporters (Sentry/Datadog/Bugsnag) serialize `cause` chains. Do not
+      // give them the chance to exfiltrate the raw key (TNU-AUDIT-0076).
+      throw new InvalidKeyError('Invalid private key format. Expected 32-byte hex string.');
     }
   }
 
@@ -331,19 +342,30 @@ export class RFQKeyManagerModule {
       const decoded = new TextDecoder().decode(plaintext);
       const parsed = JSON.parse(decoded) as { offerAmount: string; nonce: string };
 
-      // Convert to BigInt - nonce might be hex string (MM bot) or decimal string (SDK)
+      // Convert to BigInt - nonce might be hex string (MM bot) or decimal string (SDK).
+      // Cap input lengths first so adversarial payloads can't DoS via huge-string
+      // BigInt parsing (TNU-AUDIT-0074). uint256 max is 78 decimal digits / 64 hex digits.
+      if (typeof parsed.offerAmount !== 'string' || parsed.offerAmount.length > 80) {
+        throw new DecryptionError('offerAmount exceeds maximum allowed length');
+      }
+      if (typeof parsed.nonce !== 'string' || parsed.nonce.length > 80) {
+        throw new DecryptionError('nonce exceeds maximum allowed length');
+      }
       const offerAmount = BigInt(parsed.offerAmount);
       let nonce: bigint;
 
       // MM bot sends hex nonces (16 chars hex like "987563ef5fde9655")
       // SDK sends decimal nonces (large numeric strings)
-      // We detect hex if: starts with 0x OR (is 16 hex chars AND contains letters a-f)
-      const isHexNonce = parsed.nonce.startsWith('0x') ||
+      // Normalize both `0x` and `0X` prefixes; otherwise uppercase `0X` produces
+      // a malformed `0x0X…` literal that throws (TNU-AUDIT-0017).
+      const nonceLower = parsed.nonce.toLowerCase();
+      const isHexNonce = nonceLower.startsWith('0x') ||
         (parsed.nonce.length === 16 && /^[0-9a-fA-F]+$/.test(parsed.nonce) && /[a-fA-F]/.test(parsed.nonce));
 
       if (isHexNonce) {
-        // Hex nonce (MM bot format)
-        nonce = BigInt('0x' + parsed.nonce.replace('0x', ''));
+        // Strip any leading 0x/0X (case-insensitive) and reparse from hex.
+        const stripped = parsed.nonce.replace(/^0[xX]/, '');
+        nonce = BigInt('0x' + stripped);
       } else {
         // Decimal nonce (SDK format)
         nonce = BigInt(parsed.nonce);

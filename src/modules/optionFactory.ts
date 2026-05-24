@@ -31,7 +31,7 @@ import type { CallStaticResult } from '../types/callStatic.js';
 import type { ImplementationAddresses } from '../chains/index.js';
 import { createError, mapContractError } from '../utils/errors.js';
 import { NotFoundError } from '../types/errors.js';
-import { validateAddress } from '../utils/validation.js';
+import { validateAddress, validateHexBytes } from '../utils/validation.js';
 
 /**
  * Contract-level interface matching the OptionFactory ABI exactly.
@@ -360,6 +360,13 @@ export class OptionFactoryModule {
    * @returns Transaction receipt
    */
   async makeOfferForQuotation(params: MakeOfferParams): Promise<TransactionReceipt> {
+    // Validate signingKey at the SDK boundary so callers get a clean
+    // INVALID_PARAMS error instead of a generic on-chain revert
+    // (TNU-AUDIT-0061; sibling `revealOffer` already validates `offeror`).
+    validateAddress(params.signingKey, 'signingKey');
+    // 65-byte vrs signature shape check — catches malformed signatures
+    // before paying gas for a guaranteed revert (TNU-AUDIT-0082).
+    validateHexBytes(params.signature, 65, 'signature');
     this.client.logger.debug('Making offer for quotation', {
       quotationId: params.quotationId.toString(),
     });

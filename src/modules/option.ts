@@ -1,5 +1,5 @@
 import { Contract } from 'ethers';
-import type { ContractTransactionResponse } from 'ethers';
+import type { ContractTransactionResponse, TransactionReceipt } from 'ethers';
 
 import type { ThetanutsClient } from '../client/ThetanutsClient.js';
 import { BASE_OPTION_ABI } from '../abis/option.js';
@@ -64,6 +64,14 @@ interface OptionContract {
   // factory-side `notifyTradeSettled` callbacks; the SDK no longer surfaces
   // a `payout()` write entry.
   split(splitCollateralAmount: bigint, overrides?: { value?: bigint }): Promise<ContractTransactionResponse>;
+  /**
+   * Reclaim collateral from an owned option position. Sends `getReclaimFee(ownedOption)`
+   * as `msg.value` per the r12 payable signature (TNU-AUDIT-0070).
+   */
+  reclaimCollateral(
+    ownedOption: string,
+    overrides?: { value?: bigint }
+  ): Promise<ContractTransactionResponse>;
   transfer(isBuyer: boolean, target: string): Promise<ContractTransactionResponse>;
   approveTransfer(isBuyer: boolean, target: string, isApproved: boolean): Promise<ContractTransactionResponse>;
   rescueERC20(token: string): Promise<ContractTransactionResponse>;
@@ -275,6 +283,58 @@ export class OptionModule {
       };
     } catch (error) {
       this.client.logger.error('Failed to split position', { error, optionAddress });
+      throw mapContractError(error);
+    }
+  }
+
+  /**
+   * Reclaim collateral from an owned option position.
+   *
+   * The r12 `BaseOption.reclaimCollateral(address ownedOption)` is `payable`:
+   * the contract demands `getReclaimFee(ownedOption)` as `msg.value`, with the
+   * fee keyed on the option being reclaimed (not on the caller). Reclaimed
+   * collateral is sent to `msg.sender`.
+   *
+   * Mirrors `RangerModule.reclaimCollateral` so callers do not need to drop
+   * down to raw `Contract` instances and risk forgetting the `value` field
+   * (TNU-AUDIT-0070; companion informational TNU-AUDIT-0081).
+   *
+   * @param optionAddress - The option contract to call `reclaimCollateral` on
+   * @param ownedOption - The address of the option position whose collateral is being reclaimed
+   * @returns Transaction receipt
+   */
+  async reclaimCollateral(
+    optionAddress: string,
+    ownedOption: string,
+  ): Promise<TransactionReceipt> {
+    validateAddress(optionAddress, 'optionAddress');
+    validateAddress(ownedOption, 'ownedOption');
+    this.client.requireSigner();
+
+    try {
+      const readContract = this.getReadContract(optionAddress);
+      const reclaimFee = await readContract.getReclaimFee(ownedOption);
+
+      const contract = this.getWriteContract(optionAddress);
+      const tx = await contract.reclaimCollateral(ownedOption, { value: reclaimFee });
+      const receipt = await tx.wait();
+      if (!receipt) {
+        throw createError('CONTRACT_REVERT', 'Transaction failed - no receipt returned');
+      }
+
+      this.client.logger.info('Option collateral reclaimed', {
+        optionAddress,
+        ownedOption,
+        reclaimFee: reclaimFee.toString(),
+        txHash: receipt.hash,
+      });
+      return receipt;
+    } catch (error) {
+      this.client.logger.error('Failed to reclaim collateral', {
+        error,
+        optionAddress,
+        ownedOption,
+      });
       throw mapContractError(error);
     }
   }

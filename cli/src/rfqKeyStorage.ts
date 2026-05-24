@@ -1,4 +1,5 @@
-import { access, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import type { KeyStorageProvider } from '@thetanuts-finance/thetanuts-client';
@@ -27,14 +28,37 @@ export class CliFileKeyStorage implements KeyStorageProvider {
   private async ensureDirectory(): Promise<void> {
     try {
       await access(this.basePath);
+      // Enforce 0o700 even on a pre-existing directory created by another tool
+      // (e.g. mkdir with default 0o755). Without this, key files written into a
+      // world-readable directory would be visible to other local users
+      // (TNU-AUDIT-0023). chmod is a no-op on Windows.
+      try {
+        await chmod(this.basePath, 0o700);
+      } catch {
+        // ignore (non-POSIX FS / permission already correct / not owned by us)
+      }
     } catch {
       await mkdir(this.basePath, { recursive: true, mode: 0o700 });
     }
   }
 
   async get(keyId: string): Promise<string | null> {
+    const filePath = this.getFilePath(keyId);
     try {
-      const content = await readFile(this.getFilePath(keyId), 'utf8');
+      // Open with O_NOFOLLOW on POSIX so a planted symlink at this path
+      // cannot redirect the read to an attacker-controlled file
+      // (TNU-AUDIT-0078).
+      const NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+      if (process.platform !== 'win32' && typeof NOFOLLOW === 'number') {
+        const handle = await open(filePath, fsConstants.O_RDONLY | NOFOLLOW);
+        try {
+          const content = await handle.readFile('utf8');
+          return content.trim();
+        } finally {
+          await handle.close();
+        }
+      }
+      const content = await readFile(filePath, 'utf8');
       return content.trim();
     } catch (err: unknown) {
       if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {

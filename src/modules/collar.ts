@@ -149,14 +149,37 @@ interface CollarCoordinatorContract {
   }>;
   fee(): Promise<bigint>;
   optionFactory(): Promise<string>;
-  requestLoan(params: CollarRequestParams): Promise<ContractTransactionResponse>;
-  settleQuotationEarly(
-    quotationId: bigint,
-    offerAmount: bigint,
-    nonce: bigint,
-    offeror: string,
-  ): Promise<ContractTransactionResponse>;
-  cancelLoan(quotationId: bigint): Promise<ContractTransactionResponse>;
+  requestLoan: {
+    (params: CollarRequestParams): Promise<ContractTransactionResponse>;
+    (params: CollarRequestParams, overrides: { gasLimit: bigint }): Promise<ContractTransactionResponse>;
+    estimateGas(params: CollarRequestParams): Promise<bigint>;
+  };
+  settleQuotationEarly: {
+    (
+      quotationId: bigint,
+      offerAmount: bigint,
+      nonce: bigint,
+      offeror: string,
+    ): Promise<ContractTransactionResponse>;
+    (
+      quotationId: bigint,
+      offerAmount: bigint,
+      nonce: bigint,
+      offeror: string,
+      overrides: { gasLimit: bigint },
+    ): Promise<ContractTransactionResponse>;
+    estimateGas(
+      quotationId: bigint,
+      offerAmount: bigint,
+      nonce: bigint,
+      offeror: string,
+    ): Promise<bigint>;
+  };
+  cancelLoan: {
+    (quotationId: bigint): Promise<ContractTransactionResponse>;
+    (quotationId: bigint, overrides: { gasLimit: bigint }): Promise<ContractTransactionResponse>;
+    estimateGas(quotationId: bigint): Promise<bigint>;
+  };
 }
 
 interface CollaredOptionContract {
@@ -301,7 +324,7 @@ export class CollarModule {
       }
     }
 
-    // 3. Fallback: cheapest OTM put on the book if call premium is too small.
+    // 3. Fallback: cheapest OTM put on the book if call premium is too small (TNU-AUDIT-0025).
     if (bestKLo === null) {
       for (const key of Object.keys(slot)) {
         if (!key.endsWith('-P')) continue;
@@ -311,10 +334,15 @@ export class CollarModule {
         const strikePart = parts[2];
         if (expiryPart !== params.expiryLabel || !strikePart) continue;
         const k = parseInt(strikePart, 10);
-        if (!k || k >= spot) continue;
+        if (!Number.isFinite(k) || k <= 0 || k >= spot) continue;
         const putData = slot[key];
-        const px = Number(putData?.ask_price ?? putData?.mark_price ?? 0);
-        if (bestKLo === null || k < bestKLo) {
+        if (!putData) continue;
+        const rawPx = putData.ask_price ?? putData.mark_price;
+        if (rawPx == null) continue;
+        const px = typeof rawPx === 'string' ? parseFloat(rawPx) : Number(rawPx);
+        if (!Number.isFinite(px) || px < 0) continue;
+        // Pick minimum premium (true "cheapest"), not lowest strike.
+        if (bestPutBtc === null || px < bestPutBtc) {
           bestKLo = k;
           bestPutBtc = px;
         }
@@ -360,7 +388,8 @@ export class CollarModule {
       const strikeStr = parts[2];
       if (!expiry || !strikeStr) continue;
       const strike = parseInt(strikeStr, 10);
-      if (!strike) continue;
+      // Explicit Number.isFinite check (NaN is falsy, but defensive — TNU-AUDIT-0060).
+      if (!Number.isFinite(strike) || strike <= 0) continue;
       const ts = parseDeribitExpiry(expiry);
       if (!ts || ts - now < minDurSec) continue;
       if (strike <= underlyingPrice) continue;
@@ -463,21 +492,37 @@ export class CollarModule {
   async requestLoan(req: CollarLoanRequest): Promise<CollarLoanResult> {
     this.requireDeployed();
     const asset = COLLAR_CONFIG.assets[req.underlying];
+
+    // Pre-flight validation — fail fast before any approval gas is spent (TNU-AUDIT-0012).
+    const now = Math.floor(Date.now() / 1000);
+    if (req.expiryTimestamp <= now) {
+      throw createError('INVALID_PARAMS', 'expiryTimestamp must be in the future');
+    }
+    if (!req.offerEndTimestamp && req.expiryTimestamp - now < 3600) {
+      throw createError(
+        'INVALID_PARAMS',
+        'expiryTimestamp must be at least 1 hour in the future when offerEndTimestamp is omitted',
+      );
+    }
+    if (BigInt(req.capUsd) <= 0n) {
+      throw createError('INVALID_PARAMS', 'capUsd must be positive');
+    }
+
     const N = ethers.parseUnits(req.collateralAmount, asset.decimals);
     const cap = BigInt(req.capUsd) * 10n ** BigInt(COLLAR_CONFIG.strikeDecimals);
-    const minLoanBN = ethers.parseUnits(req.minLoanUsd.toFixed(6), 6);
+    const minLoanBN = ethers.parseUnits(
+      req.minLoanUsd.toFixed(COLLAR_CONFIG.settlementDecimals),
+      COLLAR_CONFIG.settlementDecimals,
+    );
+    // Auction window now tracks the configured duration, not expiry proximity (TNU-AUDIT-0011).
     const offerEnd =
-      req.offerEndTimestamp ??
-      Math.min(
-        req.expiryTimestamp - 3600,
-        Math.floor(Date.now() / 1000) + COLLAR_CONFIG.defaultOfferDurationSeconds,
-      );
+      req.offerEndTimestamp ?? now + COLLAR_CONFIG.defaultOfferDurationSeconds;
 
     // Approve collateral
     await this.client.erc20.ensureAllowance(asset.collateral, COLLAR_CONFIG.contracts.collarCoordinator, N);
 
     const coordinator = this.getCoordinatorWriteContract();
-    const tx = await coordinator.requestLoan({
+    const requestParams = {
       collateralToken: asset.collateral,
       priceFeed: asset.priceFeed,
       settlementToken: COLLAR_CONFIG.settlement,
@@ -487,7 +532,11 @@ export class CollarModule {
       offerEndTimestamp: offerEnd,
       minLoan: minLoanBN,
       requesterPublicKey: req.requesterPublicKey ?? '',
-    });
+    };
+    // Apply estimateGas + 20% buffer for Base (TNU-AUDIT-0026).
+    const gasEstimate = await coordinator.requestLoan.estimateGas(requestParams);
+    const gasLimit = (gasEstimate * 120n) / 100n;
+    const tx = await coordinator.requestLoan(requestParams, { gasLimit });
     const receipt = await tx.wait();
     if (!receipt) throw createError('CONTRACT_REVERT', 'requestLoan receipt missing');
 
@@ -511,7 +560,10 @@ export class CollarModule {
   async cancelLoan(quotationId: bigint): Promise<ContractTransactionResponse> {
     this.requireDeployed();
     const coordinator = this.getCoordinatorWriteContract();
-    return coordinator.cancelLoan(quotationId);
+    // Apply estimateGas + 20% buffer for Base (TNU-AUDIT-0026).
+    const gasEstimate = await coordinator.cancelLoan.estimateGas(quotationId);
+    const gasLimit = (gasEstimate * 120n) / 100n;
+    return coordinator.cancelLoan(quotationId, { gasLimit });
   }
 
   async acceptOffer(
@@ -521,8 +573,20 @@ export class CollarModule {
     offeror: string,
   ): Promise<ContractTransactionResponse> {
     this.requireDeployed();
+    // Defensive coercion for callers passing `number` literals > 2^53 (TNU-AUDIT-0032).
+    const nonceBig = BigInt(nonce);
     const coordinator = this.getCoordinatorWriteContract();
-    return coordinator.settleQuotationEarly(quotationId, offerAmount, nonce, offeror);
+    // Apply estimateGas + 20% buffer for Base (TNU-AUDIT-0026).
+    const gasEstimate = await coordinator.settleQuotationEarly.estimateGas(
+      quotationId,
+      offerAmount,
+      nonceBig,
+      offeror,
+    );
+    const gasLimit = (gasEstimate * 120n) / 100n;
+    return coordinator.settleQuotationEarly(quotationId, offerAmount, nonceBig, offeror, {
+      gasLimit,
+    });
   }
 
   // ─── Option contract helpers ───

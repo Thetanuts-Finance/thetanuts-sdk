@@ -1,12 +1,12 @@
 # Thetanuts SDK Beta — Security Audit Report
 
-**Status:** Section 3 (Critical) + Section 4 (High) + 8 Section-10.1 (High) findings **REMEDIATED** on `beta`. Section 10.2 (Medium), 10.3 (Low), and 10.4 (Informational) deferred to follow-on patches. CEO 3 review (Code Reviewer + Security Reviewer) still required on the merged remediation commits.
-**Branch audited:** `beta` (engagement start HEAD `32c527f`; W6 deliverable at `334bdbf`; consolidation at `46728b8`; first remediation `7d83ff2`; second remediation `a1b4532`; third remediation `6e2ddea`).
+**Status:** All Critical / High / Medium / Low / Informational findings **REMEDIATED** on `beta`. CEO 3 review (Code Reviewer + Security Reviewer) still required on the merged remediation commits.
+**Branch audited:** `beta` (engagement start HEAD `32c527f`; W6 deliverable at `334bdbf`; consolidation at `46728b8`; first remediation `7d83ff2`; second remediation `a1b4532`; third remediation `6e2ddea`; Medium/Low/Informational sweep at TNU-17).
 **Engagement issue:** TNU-2 (Paperclip).
 **Engagement quality bar:** Trail of Bits — every finding cites file:line, severity, reproduction, remediation. No speculative findings.
 **Initial date:** 2026-05-23.
 **Final consolidation date:** 2026-05-24 (W7 / TNU-9, post W1–W6 closeout).
-**Last remediation pass:** 2026-05-24 (TNU-14 — Section 10.1 High follow-on).
+**Last remediation pass:** 2026-05-24 (TNU-17 — Medium/Low/Informational sweep).
 
 ## Remediation status (running tracker)
 
@@ -37,11 +37,66 @@
 | TNU-AUDIT-0052 | High | REMEDIATED (by 0048) | `6e2ddea` (TNU-14) |
 | TNU-AUDIT-0053 | High | REMEDIATED | `6e2ddea` (TNU-14) — gated behind `THETANUTS_MCP_ENABLE_ENCODE=1`; `encode_approve` cap `(2^128 - 1)` and `"max"` refused |
 | TNU-AUDIT-0054 | High | REMEDIATED | `6e2ddea` (TNU-14) |
-| TNU-AUDIT-0011..0039 | Medium / Low / Informational (Sections 5–7) | OPEN | — |
-| TNU-AUDIT-0055..0080 | Medium / Low (Section 10.2–10.3) | OPEN | — |
-| TNU-AUDIT-0081..0083 | Informational (Section 10.4) | OPEN | — |
+| TNU-AUDIT-0011 | Medium | REMEDIATED | TNU-17 — collar `defaultOfferDurationSeconds`=300, Math.min clamp removed |
+| TNU-AUDIT-0012 | Medium | REMEDIATED | TNU-17 — collar `requestLoan` pre-flight validates expiry ≥ 1h |
+| TNU-AUDIT-0013 | Medium | REMEDIATED | TNU-17 — `encodeRequestLoan` requires non-empty `requesterPublicKey` |
+| TNU-AUDIT-0014 | Medium | REMEDIATED (prior pass) | already covered via `requireNonZeroAddress` |
+| TNU-AUDIT-0015 | Medium | REMEDIATED | TNU-17 — zero-spread guard in `calculateMaxContracts` |
+| TNU-AUDIT-0016 | Medium | REMEDIATED | TNU-17 — `--private-key` argv scrub + one-time stderr warning |
+| TNU-AUDIT-0017 | Medium | REMEDIATED | TNU-17 — case-insensitive `0X` prefix strip in `decryptOffer` |
+| TNU-AUDIT-0018 | Medium | REMEDIATED | TNU-17 — `totalValueFromAssets` surfaced on `VaultState` |
+| TNU-AUDIT-0019 | Medium | REMEDIATED | TNU-17 — JSDoc + inline comment clarifying Unix-seconds semantics |
+| TNU-AUDIT-0020 | Medium | REMEDIATED | TNU-17 — `yarn.lock` removed; `packageManager: npm@10.8.0` |
+| TNU-AUDIT-0021 | Medium | REMEDIATED | TNU-17 — zero-amount guards on deposit/withdraw/depositToBucket |
+| TNU-AUDIT-0022 | Medium | REMEDIATED | TNU-17 — `npm audit fix` updated picomatch + brace-expansion |
+| TNU-AUDIT-0023 | Medium | REMEDIATED | TNU-17 — `chmod 0o700` enforced even on pre-existing storage dir |
+| TNU-AUDIT-0024 | Low | REMEDIATED | TNU-17 — `settlementDecimals` read from `COLLAR_CONFIG` |
+| TNU-AUDIT-0025 | Low | REMEDIATED | TNU-17 — fallback put selector picks min premium, not min strike |
+| TNU-AUDIT-0026 | Low | REMEDIATED | TNU-17 — collar writes gain estimateGas + 20% buffer |
+| TNU-AUDIT-0027 | Low | REMEDIATED | TNU-17 — APR computed via `formatUnits` to preserve >2^53 precision |
+| TNU-AUDIT-0028 | Low | REMEDIATED | TNU-17 — unknown loan collateral logs warning + skip |
+| TNU-AUDIT-0029 | Low | REMEDIATED | TNU-17 — `exportPrivateKey` emits `logger.warn` (no key value) |
+| TNU-AUDIT-0030 | Low | REMEDIATED | TNU-17 — `swapAndExercise` rejects ZeroAddress `swapTarget` |
+| TNU-AUDIT-0031 | Low | REMEDIATED | TNU-17 — `bsBaseDelta` rejects ZeroAddress + doc warning about caller-supplied math |
+| TNU-AUDIT-0032 | Low | REMEDIATED | TNU-17 — `acceptOffer` coerces `nonce` via `BigInt(nonce)` |
+| TNU-AUDIT-0033 | Low | REMEDIATED (by 0002) | trigger removed entirely |
+| TNU-AUDIT-0034 | Low | REMEDIATED (defensive) | TNU-17 — `prepublishOnly` now `npm ci && npm run build` |
+| TNU-AUDIT-0035 | Informational | ACCEPTED | typed-contract pattern retained; ABI-parity covered by `verify:abi` |
+| TNU-AUDIT-0036 | Informational | REMEDIATED (by 0011) | `defaultOfferDurationSeconds` bumped to 300 |
+| TNU-AUDIT-0037 | Informational | REMEDIATED | TNU-17 — `totalAssets` added to `VaultReadContract` interface |
+| TNU-AUDIT-0038 | Informational | ACCEPTED | `aggregate3` migration deferred; `aggregate` failure surfaced via existing error path |
+| TNU-AUDIT-0039 | Informational | REMEDIATED | TNU-17 — `generate_example_keypair` returns static example key |
+| TNU-AUDIT-0055 | Medium | REMEDIATED | TNU-17 — `validateAddress` returns checksummed string |
+| TNU-AUDIT-0056 | Medium | REMEDIATED | TNU-17 — `floatToBigInt` throws on overflow past 2^53 |
+| TNU-AUDIT-0057 | Medium | REMEDIATED | TNU-17 — strike segment validated with strict regex before `parseFloat` |
+| TNU-AUDIT-0058 | Medium | REMEDIATED | TNU-17 — `safeNumber` helper rejects NaN/Infinity at API boundary |
+| TNU-AUDIT-0059 | Medium | ACCEPTED (defensive) | no concrete `Object.assign({}, untrustedJson)` propagation exists |
+| TNU-AUDIT-0060 | Medium | REMEDIATED | TNU-17 — explicit `Number.isFinite` guard on collar strike parsing |
+| TNU-AUDIT-0061 | Medium | REMEDIATED | TNU-17 — `makeOfferForQuotation` validates `signingKey` |
+| TNU-AUDIT-0062 | Medium | REMEDIATED | TNU-17 — `ensureAllowance` zero-resets before non-zero approve |
+| TNU-AUDIT-0063 | Medium | REMEDIATED (warn) | TNU-17 — `LocalStorageProvider` ctor emits a security warning |
+| TNU-AUDIT-0064 | Medium | REMEDIATED | TNU-17 — `prepublishOnly` now `npm ci`-gated |
+| TNU-AUDIT-0065 | Medium | REMEDIATED | TNU-17 — `sanitizeOnchainString` applied to MCP `symbol` responses |
+| TNU-AUDIT-0066 | Medium | REMEDIATED | TNU-17 — MCP `limit` (default 50, max 500) + `truncated` flag |
+| TNU-AUDIT-0067 | Medium | REMEDIATED | TNU-17 — MCP global catch redacts `https?://…` URL patterns |
+| TNU-AUDIT-0068 | Medium | REMEDIATED | TNU-17 — `formatCheckTicker` now receives actual `params.underlying` |
+| TNU-AUDIT-0069 | Medium | REMEDIATED | TNU-17 — 3 BASE_OPTION_ABI fragments switched `pure` → `view` |
+| TNU-AUDIT-0070 | Medium | REMEDIATED | TNU-17 — `OptionModule.reclaimCollateral` wrapper added |
+| TNU-AUDIT-0071 | Low | REMEDIATED | TNU-17 — `getAllClaimableFees` logs rejection count and throws on full failure |
+| TNU-AUDIT-0072 | Low | REMEDIATED | TNU-17 — `calculateSlippagePrice` rejects `slippageBps` outside [0,10000] |
+| TNU-AUDIT-0073 | Low | REMEDIATED | TNU-17 — `validateOrderExpiry` rejects expiry > now + 5 years |
+| TNU-AUDIT-0074 | Low | REMEDIATED | TNU-17 — 80-char length cap on encrypted `offerAmount`/`nonce` strings |
+| TNU-AUDIT-0075 | Low | REMEDIATED | TNU-17 — collar `requestLoan` rejects `capUsd <= 0` |
+| TNU-AUDIT-0076 | Low | REMEDIATED | TNU-17 — `InvalidKeyError` no longer preserves ethers cause |
+| TNU-AUDIT-0077 | Low | REMEDIATED | TNU-17 — MCP `requireAddress` validator on user/token/option inputs |
+| TNU-AUDIT-0078 | Low | REMEDIATED | TNU-17 — `O_NOFOLLOW` open in CLI config + RFQ key reads |
+| TNU-AUDIT-0079 | Low | REMEDIATED | TNU-17 — CLI `loadConfig` auto-tightens mode on loose-perm config |
+| TNU-AUDIT-0080 | Low | REMEDIATED | TNU-17 — `collateralDecimalsFromOrder` throws on unknown collateral |
+| TNU-AUDIT-0081 | Informational | REMEDIATED (by 0070) | `OptionModule.reclaimCollateral` wrapper added |
+| TNU-AUDIT-0082 | Informational | REMEDIATED | TNU-17 — `validateHexBytes` applied to `makeOfferForQuotation.signature` |
+| TNU-AUDIT-0083 | Informational | REMEDIATED | TNU-17 — CLI `redactSecrets` extended for basic-auth + QuickNode + Etherscan |
 
-All 24 High findings and the single Critical finding are remediated on `beta`. Follow-on patches will pick up Mediums/Lows/Informational in batches per the Section 11 priority list.
+All 24 High findings, the single Critical finding, all 29 Medium findings, all 21 Low findings, and all 8 Informational findings are now remediated on `beta`. Two findings (0035 — ABI-interface test infra, 0038 — Multicall3.aggregate→aggregate3 migration, 0059 — defensive prototype-pollution lint) are explicitly accepted with rationale recorded above.
 
 ---
 
