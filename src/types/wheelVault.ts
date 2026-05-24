@@ -115,9 +115,19 @@ export interface ExercisePreview {
   lockAmount: bigint;
   strikePayment: bigint;
   spotValue: bigint;
+  /**
+   * int256 — signed bigint. NEGATIVE for OTM options (exercise would lose funds).
+   * Use `canExercise` and `shouldExercise` to gate exercise decisions, NOT this value.
+   * Never coerce to Number() — values can exceed 2^53 and lose precision.
+   */
   exerciseProfit: bigint;
   expiry: bigint;
   canExercise: boolean;
+  /**
+   * Convenience gate: true iff `canExercise === true` AND `exerciseProfit > 0n`.
+   * Authoritative guard for automated exercise decisions; safer than reading `exerciseProfit` directly.
+   */
+  shouldExercise: boolean;
   isExpired: boolean;
 }
 

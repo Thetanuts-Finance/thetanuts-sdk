@@ -436,13 +436,74 @@ test('INV-9: PHYSICAL_CALL and PHYSICAL_PUT have non-zero addresses (deployed)',
     'PHYSICAL_PUT must have a real (non-zero) deployment address');
 });
 
-test('INV-9: OptionBook fillOrder lacks zero-address implementation guard (KNOWN GAP)', () => {
+// ---------------------------------------------------------------------------
+// INVARIANTS 10–13: Fix regressions for SECURITY_AUDIT_BETA.md findings
+// (TNU-AUDIT-0001, 0004, 0008, 0010)
+// ---------------------------------------------------------------------------
+
+test('INV-10 (TNU-AUDIT-0001): ExercisePreview exposes shouldExercise convenience gate', () => {
+  const typesSrc = loadSrc('src/types/wheelVault.ts');
+  assert(
+    /shouldExercise:\s*boolean/.test(typesSrc),
+    'ExercisePreview must expose `shouldExercise: boolean` to gate exercise decisions safely',
+  );
+  assert(
+    /NEGATIVE for OTM|signed bigint|int256/i.test(typesSrc),
+    'ExercisePreview.exerciseProfit must carry a JSDoc warning that it is signed (negative for OTM)',
+  );
+  const modSrc = loadSrc('src/modules/wheelVault.ts');
+  assert(
+    /shouldExercise:\s*canExercise\s*&&\s*exerciseProfit\s*>\s*0n/.test(modSrc),
+    'previewExercise() must compute shouldExercise = canExercise && exerciseProfit > 0n',
+  );
+});
+
+test('INV-11 (TNU-AUDIT-0004): OptionBook fillOrder validates rawApiData.optionBookAddress against chain config', () => {
   const src = loadSrc('src/modules/optionBook.ts');
-  // fillOrder passes implementation from API response without checking for zero address
-  // This is a documented gap — the factory path is guarded but optionBook.fillOrder is not
-  const hasFillOrderZeroGuard = /fillOrder[\s\S]{0,500}assertImplementationDeployed|fillOrder[\s\S]{0,500}zero.address/i.test(src);
-  assert(!hasFillOrderZeroGuard,
-    'GAP confirmed: fillOrder does not check for zero-address implementation. This is a known vulnerability — see findings.');
+  assert(
+    /resolveOptionBookTarget/.test(src),
+    'optionBook.ts must define a resolveOptionBookTarget helper that validates the API-supplied address',
+  );
+  // No remaining unchecked use of rawApiData.optionBookAddress as a tx target
+  const unchecked = src.match(/rawApiData\.optionBookAddress\s*\?\?\s*this\.contractAddress/g);
+  assert(
+    !unchecked,
+    `optionBook.ts must NOT have unchecked "rawApiData.optionBookAddress ?? this.contractAddress" \
+patterns as tx targets (found ${unchecked?.length ?? 0})`,
+  );
+  // The helper must compare to the canonical configured address
+  assert(
+    /apiAddress\.toLowerCase\(\)\s*!==\s*canonical\.toLowerCase\(\)/.test(src),
+    'resolveOptionBookTarget must compare the API-supplied address to the canonical configured OptionBook',
+  );
+});
+
+test('INV-12 (TNU-AUDIT-0008): collar exerciseCollar/walkAwayCollar guarded by requireDeployed + non-zero address', () => {
+  const src = loadSrc('src/modules/collar.ts');
+  // exerciseCollar must call requireDeployed and validate optionAddress
+  const exerciseFn = src.match(/async exerciseCollar[\s\S]{0,400}?\n\s{2}\}/);
+  assert(exerciseFn !== null, 'exerciseCollar method must exist');
+  assert(/requireDeployed\(\)/.test(exerciseFn![0]), 'exerciseCollar must call requireDeployed()');
+  assert(/requireNonZeroAddress\(optionAddress/.test(exerciseFn![0]), 'exerciseCollar must validate optionAddress is non-zero');
+
+  const walkAwayFn = src.match(/async walkAwayCollar[\s\S]{0,400}?\n\s{2}\}/);
+  assert(walkAwayFn !== null, 'walkAwayCollar method must exist');
+  assert(/requireDeployed\(\)/.test(walkAwayFn![0]), 'walkAwayCollar must call requireDeployed()');
+  assert(/requireNonZeroAddress\(optionAddress/.test(walkAwayFn![0]), 'walkAwayCollar must validate optionAddress is non-zero');
+});
+
+test('INV-13 (TNU-AUDIT-0010): axios pinned to a version above the SSRF CVE range (>= 1.15.2)', () => {
+  const pkgRaw = loadSrc('package.json');
+  const pkg = JSON.parse(pkgRaw);
+  const axiosRange: string = pkg.dependencies?.axios ?? '';
+  assert(axiosRange.length > 0, 'axios must be declared as a dependency');
+  // Extract major.minor from range like "^1.16.1" or "~1.15.2"
+  const m = axiosRange.match(/(\d+)\.(\d+)\.(\d+)/);
+  assert(m !== null, `axios range "${axiosRange}" must be parseable`);
+  const [_, major, minor, patch] = m!.map(Number);
+  // Vulnerable range: 1.0.0 - 1.15.1. Fixed at >= 1.15.2.
+  const fixed = major > 1 || (major === 1 && (minor > 15 || (minor === 15 && patch >= 2)));
+  assert(fixed, `axios pin "${axiosRange}" is still inside the SSRF CVE range (1.0.0 - 1.15.1)`);
 });
 
 // ---------------------------------------------------------------------------

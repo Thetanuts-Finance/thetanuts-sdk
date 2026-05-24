@@ -1780,14 +1780,18 @@ export class WheelVaultModule {
     try {
       const result = await lens.previewExercise(optionId);
 
+      const canExercise = Boolean(result.canExercise);
+      const exerciseProfit = BigInt(result.exerciseProfit);
+
       return {
         isCall: Boolean(result.isCall),
         lockAmount: BigInt(result.lockAmount),
         strikePayment: BigInt(result.strikePayment),
         spotValue: BigInt(result.spotValue),
-        exerciseProfit: BigInt(result.exerciseProfit),
+        exerciseProfit,
         expiry: BigInt(result.expiry),
-        canExercise: Boolean(result.canExercise),
+        canExercise,
+        shouldExercise: canExercise && exerciseProfit > 0n,
         isExpired: Boolean(result.isExpired),
       };
     } catch (error) {
