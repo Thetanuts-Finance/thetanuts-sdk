@@ -1,10 +1,16 @@
-import { isAddress } from 'ethers';
+import { getAddress, isAddress } from 'ethers';
 import { createError } from './errors.js';
 
 /**
- * Validate that a value is a valid Ethereum address
+ * Validate that a value is a valid Ethereum address. Returns the EIP-55
+ * checksummed form so callers can normalize at the boundary (TNU-AUDIT-0055).
+ *
+ * Existing callsites that ignore the return value remain correct — they
+ * just keep using their lowercase/mixed-case input. New code should consume
+ * the return value to ensure consistent checksum casing in calldata and
+ * round-trip equality with checksummed config strings.
  */
-export function validateAddress(address: string, fieldName: string): void {
+export function validateAddress(address: string, fieldName: string): string {
   if (!isAddress(address)) {
     const invalidAddress = address as string;
     throw createError(
@@ -12,10 +18,37 @@ export function validateAddress(address: string, fieldName: string): void {
       `Invalid ${fieldName}: ${invalidAddress} is not a valid Ethereum address`
     );
   }
+  return getAddress(address);
 }
 
 /**
- * Validate that an order has not expired
+ * Validate that a string is `0x`-prefixed hex of the expected byte length.
+ * Catches malformed signatures (and any other fixed-width hex inputs) at the
+ * SDK boundary so callers do not pay gas for a guaranteed on-chain revert
+ * (TNU-AUDIT-0082).
+ *
+ * @param value - The candidate hex string
+ * @param byteLength - Expected length in bytes (e.g. 65 for a vrs signature)
+ * @param fieldName - Field name surfaced in the error message
+ */
+export function validateHexBytes(value: string, byteLength: number, fieldName: string): void {
+  if (typeof value !== 'string') {
+    throw createError('INVALID_PARAMS', `${fieldName} must be a hex string`);
+  }
+  const expectedLen = 2 + byteLength * 2; // "0x" + 2 hex chars per byte
+  const hexPattern = new RegExp(`^0x[0-9a-fA-F]{${byteLength * 2}}$`);
+  if (value.length !== expectedLen || !hexPattern.test(value)) {
+    throw createError(
+      'INVALID_PARAMS',
+      `${fieldName} must be a 0x-prefixed ${byteLength}-byte hex string (got length ${value.length})`,
+    );
+  }
+}
+
+/**
+ * Validate that an order has not expired and is not absurdly far in the future.
+ * A 5-year upper bound catches the common off-by-1000 milliseconds-vs-seconds
+ * bug that would otherwise sign a 50,000-year-future order (TNU-AUDIT-0073).
  */
 export function validateOrderExpiry(expiry: number, bufferSeconds = 60): void {
   const now = Math.floor(Date.now() / 1000);
@@ -25,6 +58,16 @@ export function validateOrderExpiry(expiry: number, bufferSeconds = 60): void {
       `Order has expired or will expire within ${bufferSeconds} seconds`,
       undefined,
       { expiry, now, bufferSeconds }
+    );
+  }
+  const maxFutureSeconds = 86400 * 365 * 5; // 5 years
+  if (expiry - now > maxFutureSeconds) {
+    throw createError(
+      'INVALID_PARAMS',
+      `Order expiry is too far in the future (${expiry - now} seconds). ` +
+        'Did you accidentally pass milliseconds instead of seconds?',
+      undefined,
+      { expiry, now, maxFutureSeconds },
     );
   }
 }
@@ -103,6 +146,14 @@ export function calculateSlippagePrice(
   slippageBps: number,
   isBuy: boolean
 ): bigint {
+  // Reject negative/non-integer/>100% slippage — negative inverts direction
+  // and >10000 underflows the BigInt formula for sells (TNU-AUDIT-0072).
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 10000) {
+    throw createError(
+      'INVALID_PARAMS',
+      `slippageBps must be an integer in [0, 10000]; got ${slippageBps}`,
+    );
+  }
   const basisPoints = 10000n;
   const slippage = BigInt(slippageBps);
 

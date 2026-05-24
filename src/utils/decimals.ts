@@ -17,15 +17,32 @@ export const FLOAT_SCALE = 10n ** 12n;
 export const FLOAT_SCALE_NUM = 1e12;
 
 /**
- * Convert a float to a scaled bigint representation
- * Useful for converting API float prices to bigint before doing math
+ * Convert a float to a scaled bigint representation.
+ * Useful for converting API float prices to bigint before doing math.
  *
  * @param value - Float value (e.g., 0.05, 1800.50)
  * @param scale - Scale factor as number (default: 1e12 for 12 decimal places)
  * @returns Scaled bigint (e.g., 0.05 * 1e12 = 50000000000n)
+ *
+ * @throws If the scaled value exceeds JS Number safe-integer precision.
+ *   With the default `scale = 1e12`, the safe input range is roughly
+ *   |value| < 9007. Larger inputs (e.g. BTC > $9,007) silently lose low
+ *   digits via `Math.round` — reject loudly rather than return a wrong
+ *   bigint (TNU-AUDIT-0056). Use `toBigInt(value, decimals)` for string
+ *   inputs that preserve full precision.
  */
 export function floatToBigInt(value: number, scale: number = FLOAT_SCALE_NUM): bigint {
-  return BigInt(Math.round(value * scale));
+  if (!Number.isFinite(value)) {
+    throw new Error(`floatToBigInt: value must be finite; got ${value}`);
+  }
+  const scaled = value * scale;
+  if (!Number.isFinite(scaled) || Math.abs(scaled) >= Number.MAX_SAFE_INTEGER) {
+    throw new Error(
+      `floatToBigInt: scaled value ${scaled} exceeds Number safe-integer range. ` +
+        `Use toBigInt(value, decimals) with a string input instead.`,
+    );
+  }
+  return BigInt(Math.round(scaled));
 }
 
 /**

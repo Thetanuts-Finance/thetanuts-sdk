@@ -1567,22 +1567,18 @@ function registerWrites(grp: Command): void {
           process.exit(0);
         }
 
-        const ok = await confirm('Proceed with payout?', {
-          yes: opts.yes,
-          dryRun: opts.dryRun,
-        });
-        if (!ok) process.exit(3);
-
-        const result = await client.option.payout(local.address);
-        const receipt = await result.wait();
-        render(
-          {
-            txHash: receipt.hash,
-            status: receipt.status,
-            gasUsed: receipt.gasUsed.toString(),
-          },
-          renderOpts(opts)
+        // TNU-AUDIT-0046: client.option.payout() has been removed because the
+        // r12 BaseOption contract has no user-callable payout() entrypoint;
+        // settlement is automatic via factory callbacks. Surface this clearly
+        // to the user instead of broadcasting a guaranteed-revert tx.
+        process.stderr.write(
+          'position payout: settlement is automatic on r12 — no on-chain payout() call is needed.\n' +
+            '  Buyer payout (if any) is delivered to your address by the factory once ' +
+            'the option settles. To verify status, run:\n' +
+            `    thetanuts-cli position info ${local.address}\n` +
+            '  (see TNU-AUDIT-0046 in SECURITY_AUDIT_BETA.md)\n'
         );
+        process.exit(0);
       } catch (err) {
         renderError(err, renderOpts(opts));
         process.exit(1);

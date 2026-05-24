@@ -54,6 +54,33 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
+/**
+ * Validate that `value` is a syntactically valid Ethereum address. Throws
+ * with a structured message so the MCP error catch produces a useful
+ * INVALID_INPUT response instead of forwarding ethers' raw "invalid BytesLike"
+ * message (TNU-AUDIT-0077).
+ */
+function requireAddress(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !ethers.isAddress(value)) {
+    throw new Error(`INVALID_INPUT: ${field} must be a valid Ethereum address`);
+  }
+  return value;
+}
+
+/**
+ * Sanitize free-text strings sourced from on-chain reads before they enter
+ * the LLM transcript. Drops control characters, restricts to a printable
+ * subset, and caps length so an attacker-controlled `symbol`/`name`/`memo`
+ * cannot inject prompt instructions (TNU-AUDIT-0065).
+ */
+function sanitizeOnchainString(value: unknown, maxLen = 64): string {
+  if (typeof value !== 'string') return String(value ?? '');
+  // Restrict to alphanumerics + a small printable symbol set; everything else
+  // (control chars, unicode, HTML/markdown) is stripped before length cap.
+  const cleaned = value.replace(/[^A-Za-z0-9 .\-_+]/g, '');
+  return cleaned.slice(0, maxLen);
+}
+
 // ============ Initialize Client (read-only, no signer) ============
 let client: ThetanutsClient | null = null;
 
@@ -1841,8 +1868,50 @@ const tools: Tool[] = [
   },
 ];
 
+// ============================================================================
+// TNU-AUDIT-0053 — `encode_*` MCP tools violate SPEC.md "no state-changing
+// operations" mandate. Default-off behind THETANUTS_MCP_ENABLE_ENCODE=1.
+// When disabled (default), the tools are removed from the ListTools response
+// and any CallTool invocation returns a structured error. encode_approve also
+// rejects `amount: "max"` and caps at a per-call ceiling regardless of flag.
+// ============================================================================
+const ENCODE_TOOLS = new Set<string>([
+  'encode_request_for_quotation',
+  'encode_settle_quotation',
+  'encode_settle_quotation_early',
+  'encode_cancel_quotation',
+  'encode_cancel_offer',
+  'encode_fill_order',
+  'encode_approve',
+]);
+
+const ENCODE_ENABLED = process.env.THETANUTS_MCP_ENABLE_ENCODE === '1';
+
+// Per-call ceiling for encode_approve when the gate is on: 2^128 - 1. Refuses
+// infinite-allowance (`"max"`) and bigint values above this cap. Operator can
+// still escalate at the wallet layer; the MCP must never emit `0xff…ff`.
+const ENCODE_APPROVE_MAX = (1n << 128n) - 1n;
+
+// Trim the listed tool surface when the gate is off so LLMs cannot discover
+// the encode_* surface.
+const publicTools: Tool[] = ENCODE_ENABLED
+  ? tools
+  : tools.filter(t => !ENCODE_TOOLS.has(t.name));
+
 // ============ Tool Handlers ============
 async function handleTool(name: string, args: Record<string, unknown>): Promise<string> {
+  // TNU-AUDIT-0053 enforcement at the dispatch boundary. Even if a caller
+  // names a gated tool directly (e.g. by stale tool listing), refuse.
+  if (ENCODE_TOOLS.has(name) && !ENCODE_ENABLED) {
+    return JSON.stringify({
+      error: 'TOOL_DISABLED',
+      tool: name,
+      reason:
+        'encode_* tools are disabled by default per SPEC.md ("no state-changing operations"). ' +
+        'Set THETANUTS_MCP_ENABLE_ENCODE=1 on the MCP server process to enable. See TNU-AUDIT-0053.',
+    }, null, 2);
+  }
+
   // SDK context tools don't need a chain connection — return embedded docs and exit early.
   switch (name) {
     case 'get_sdk_context':
@@ -1897,7 +1966,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           );
         }
         
-        const summary = filtered.map((o, i) => ({
+        // Cap responses — full order book can be hundreds of KiB
+        // (TNU-AUDIT-0066). Default 50, max 500.
+        const limit = Math.min(Math.max(1, Number(args.limit ?? 50)), 500);
+        const truncated = filtered.length > limit;
+        const summary = filtered.slice(0, limit).map((o, i) => ({
           index: i,
           isCall: o.rawApiData?.isCall,
           isLong: o.rawApiData?.isLong,
@@ -1905,7 +1978,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           orderExpiry: o.rawApiData?.orderExpiryTimestamp,
           availableAmount: o.availableAmount?.toString(),
         }));
-        return JSON.stringify({ count: filtered.length, orders: summary }, null, 2);
+        return JSON.stringify(
+          { count: filtered.length, limit, truncated, orders: summary },
+          null,
+          2,
+        );
       }
 
       // === Protocol Stats (Indexer API) ===
@@ -1916,39 +1993,57 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
 
       // === User Data (Indexer API) ===
       case 'get_user_positions': {
-        const positions = await c.api.getUserPositionsFromIndexer(args.address as string);
-        return JSON.stringify(positions, null, 2);
+        const address = requireAddress(args.address, 'address');
+        const positions = await c.api.getUserPositionsFromIndexer(address);
+        // Cap response size — heavy traders can blow LLM context / host memory
+        // (TNU-AUDIT-0066). Default 50, max 500.
+        const limit = Math.min(Math.max(1, Number(args.limit ?? 50)), 500);
+        const truncated = positions.length > limit;
+        return JSON.stringify(
+          { count: positions.length, limit, truncated, positions: positions.slice(0, limit) },
+          null,
+          2,
+        );
       }
       case 'get_user_history': {
-        const history = await c.api.getUserHistoryFromIndexer(args.address as string);
-        return JSON.stringify(history, null, 2);
+        const address = requireAddress(args.address, 'address');
+        const history = await c.api.getUserHistoryFromIndexer(address);
+        const limit = Math.min(Math.max(1, Number(args.limit ?? 50)), 500);
+        const truncated = history.length > limit;
+        return JSON.stringify(
+          { count: history.length, limit, truncated, history: history.slice(0, limit) },
+          null,
+          2,
+        );
       }
 
       // === Token Data ===
       case 'get_token_balance': {
-        const balance = await c.erc20.getBalance(
-          args.tokenAddress as string,
-          args.ownerAddress as string
-        );
+        const tokenAddress = requireAddress(args.tokenAddress, 'tokenAddress');
+        const ownerAddress = requireAddress(args.ownerAddress, 'ownerAddress');
+        const balance = await c.erc20.getBalance(tokenAddress, ownerAddress);
         return JSON.stringify({ balance: balance.toString() }, null, 2);
       }
       case 'get_token_allowance': {
-        const allowance = await c.erc20.getAllowance(
-          args.tokenAddress as string,
-          args.owner as string,
-          args.spender as string
-        );
+        const tokenAddress = requireAddress(args.tokenAddress, 'tokenAddress');
+        const owner = requireAddress(args.owner, 'owner');
+        const spender = requireAddress(args.spender, 'spender');
+        const allowance = await c.erc20.getAllowance(tokenAddress, owner, spender);
         return JSON.stringify({ allowance: allowance.toString() }, null, 2);
       }
       case 'get_token_info': {
-        const decimals = await c.erc20.getDecimals(args.tokenAddress as string);
-        const symbol = await c.erc20.getSymbol(args.tokenAddress as string);
-        return JSON.stringify({ decimals, symbol }, null, 2);
+        const tokenAddress = requireAddress(args.tokenAddress, 'tokenAddress');
+        const decimals = await c.erc20.getDecimals(tokenAddress);
+        const symbol = await c.erc20.getSymbol(tokenAddress);
+        // Sanitize `symbol` — attacker-controlled ERC20 symbols can include
+        // markdown/control chars and be used for prompt injection
+        // (TNU-AUDIT-0065).
+        return JSON.stringify({ decimals, symbol: sanitizeOnchainString(symbol) }, null, 2);
       }
 
       // === Option Info ===
       case 'get_option_info': {
-        const optionAddr = args.optionAddress as string;
+        const optionAddr = requireAddress(args.optionAddress, 'optionAddress');
         const info = await c.option.getOptionInfo(optionAddr);
         
         // Get additional info via separate calls
@@ -2710,11 +2805,17 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
 
       // === Example Keypair Generation ===
       case 'generate_example_keypair': {
-        const keyPair = c.rfqKeys.generateKeyPair();
+        // Return a static example public key rather than generating a live
+        // keypair. Generating real cryptographic material for a "demonstration
+        // only" endpoint is unnecessary and misleads readers into thinking the
+        // private key half is reachable somewhere (TNU-AUDIT-0039).
         return JSON.stringify({
           warning: 'FOR DEMONSTRATION ONLY - Generate real keys locally via SDK',
           exampleFormat: {
-            compressedPublicKey: keyPair.compressedPublicKey,
+            // Hardcoded example secp256k1 compressed public key (33 bytes hex).
+            // No private key is generated or returned by this endpoint.
+            compressedPublicKey:
+              '0x02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5',
             publicKeyFormat: 'Compressed public key starts with 02 or 03 (33 bytes hex)',
             privateKeyFormat: '32 bytes hex (do NOT share or transmit)',
           },
@@ -2838,14 +2939,42 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         const tokenAddr = args.tokenAddress as string;
         const spender = args.spenderAddress as string;
         const amountStr = args.amount as string;
-        const amount = amountStr.toLowerCase() === 'max'
-          ? BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
-          : BigInt(amountStr);
+        // TNU-AUDIT-0053: refuse infinite-allowance "max" and cap at
+        // ENCODE_APPROVE_MAX so the MCP can never emit `0xff…ff` (or anything
+        // close to it) regardless of LLM prompt injection.
+        if (typeof amountStr !== 'string') {
+          return JSON.stringify({ error: 'amount must be a decimal string' }, null, 2);
+        }
+        if (amountStr.toLowerCase() === 'max') {
+          return JSON.stringify({
+            error: 'INFINITE_ALLOWANCE_FORBIDDEN',
+            reason:
+              'amount: "max" is disabled. Pass a bounded decimal string. See TNU-AUDIT-0053.',
+          }, null, 2);
+        }
+        let amount: bigint;
+        try {
+          amount = BigInt(amountStr);
+        } catch {
+          return JSON.stringify({ error: 'amount must parse as a non-negative integer' }, null, 2);
+        }
+        if (amount < 0n) {
+          return JSON.stringify({ error: 'amount must be non-negative' }, null, 2);
+        }
+        if (amount > ENCODE_APPROVE_MAX) {
+          return JSON.stringify({
+            error: 'AMOUNT_EXCEEDS_CAP',
+            cap: ENCODE_APPROVE_MAX.toString(),
+            requested: amount.toString(),
+            reason:
+              'encode_approve hard-caps amount at 2^128 - 1 to prevent runaway allowances. See TNU-AUDIT-0053.',
+          }, null, 2);
+        }
         const encoded = c.erc20.encodeApprove(tokenAddr, spender, amount);
         return JSON.stringify({
           to: encoded.to,
           data: encoded.data,
-          description: `Approve ${spender} to spend ${amountStr === 'max' ? 'unlimited' : amount.toString()} tokens`,
+          description: `Approve ${spender} to spend ${amount.toString()} tokens`,
           tokenAddress: tokenAddr,
           spender,
           amount: amount.toString(),
@@ -3228,7 +3357,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return JSON.stringify({ error: message }, null, 2);
+    // Redact any embedded RPC URL (Alchemy/Infura/QuickNode/etc.) so API keys
+    // can't leak into the LLM transcript via ethers' network-error messages
+    // (TNU-AUDIT-0067).
+    const redacted = message.replace(/https?:\/\/[^\s"']+/g, '[REDACTED_URL]');
+    return JSON.stringify({ error: redacted }, null, 2);
   }
 }
 
@@ -3247,7 +3380,9 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
+  // TNU-AUDIT-0053: encode_* tools are hidden from ListTools when the env
+  // flag THETANUTS_MCP_ENABLE_ENCODE=1 is not set.
+  return { tools: publicTools };
 });
 
 // Handle tool calls

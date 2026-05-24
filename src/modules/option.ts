@@ -1,5 +1,5 @@
 import { Contract } from 'ethers';
-import type { ContractTransactionResponse } from 'ethers';
+import type { ContractTransactionResponse, TransactionReceipt } from 'ethers';
 
 import type { ThetanutsClient } from '../client/ThetanutsClient.js';
 import { BASE_OPTION_ABI } from '../abis/option.js';
@@ -59,8 +59,19 @@ interface OptionContract {
 
   // === Write Functions ===
   close(): Promise<ContractTransactionResponse>;
-  payout(): Promise<ContractTransactionResponse>;
+  // Removed in audit fix (TNU-AUDIT-0046): zero-arg `payout()` is not present
+  // on the r12 BaseOption canonical ABI. Settlement on r12 is initiated via
+  // factory-side `notifyTradeSettled` callbacks; the SDK no longer surfaces
+  // a `payout()` write entry.
   split(splitCollateralAmount: bigint, overrides?: { value?: bigint }): Promise<ContractTransactionResponse>;
+  /**
+   * Reclaim collateral from an owned option position. Sends `getReclaimFee(ownedOption)`
+   * as `msg.value` per the r12 payable signature (TNU-AUDIT-0070).
+   */
+  reclaimCollateral(
+    ownedOption: string,
+    overrides?: { value?: bigint }
+  ): Promise<ContractTransactionResponse>;
   transfer(isBuyer: boolean, target: string): Promise<ContractTransactionResponse>;
   approveTransfer(isBuyer: boolean, target: string, isApproved: boolean): Promise<ContractTransactionResponse>;
   rescueERC20(token: string): Promise<ContractTransactionResponse>;
@@ -277,40 +288,89 @@ export class OptionModule {
   }
 
   /**
-   * Execute payout for an expired option.
-   * Can be called by buyer after expiry to claim winnings.
+   * Reclaim collateral from an owned option position.
    *
-   * @param optionAddress - Option contract address
-   * @returns Payout result
+   * The r12 `BaseOption.reclaimCollateral(address ownedOption)` is `payable`:
+   * the contract demands `getReclaimFee(ownedOption)` as `msg.value`, with the
+   * fee keyed on the option being reclaimed (not on the caller). Reclaimed
+   * collateral is sent to `msg.sender`.
+   *
+   * Mirrors `RangerModule.reclaimCollateral` so callers do not need to drop
+   * down to raw `Contract` instances and risk forgetting the `value` field
+   * (TNU-AUDIT-0070; companion informational TNU-AUDIT-0081).
+   *
+   * @param optionAddress - The option contract to call `reclaimCollateral` on
+   * @param ownedOption - The address of the option position whose collateral is being reclaimed
+   * @returns Transaction receipt
    */
-  async payout(optionAddress: string): Promise<PayoutResult> {
+  async reclaimCollateral(
+    optionAddress: string,
+    ownedOption: string,
+  ): Promise<TransactionReceipt> {
     validateAddress(optionAddress, 'optionAddress');
-
-    this.client.logger.debug('Executing payout', { optionAddress });
+    validateAddress(ownedOption, 'ownedOption');
+    this.client.requireSigner();
 
     try {
+      const readContract = this.getReadContract(optionAddress);
+      const reclaimFee = await readContract.getReclaimFee(ownedOption);
+
       const contract = this.getWriteContract(optionAddress);
-      const tx = await contract.payout();
+      const tx = await contract.reclaimCollateral(ownedOption, { value: reclaimFee });
+      const receipt = await tx.wait();
+      if (!receipt) {
+        throw createError('CONTRACT_REVERT', 'Transaction failed - no receipt returned');
+      }
 
-      this.client.logger.info('Payout executed successfully', {
-        txHash: tx.hash,
+      this.client.logger.info('Option collateral reclaimed', {
         optionAddress,
+        ownedOption,
+        reclaimFee: reclaimFee.toString(),
+        txHash: receipt.hash,
       });
-
-      return {
-        txHash: tx.hash,
-        tx,
-        wait: (confirmations?: number) => tx.wait(confirmations).then((receipt) => {
-          if (!receipt) {
-            throw createError('CONTRACT_REVERT', 'Transaction failed - no receipt returned');
-          }
-          return receipt;
-        }),
-      };
+      return receipt;
     } catch (error) {
-      this.client.logger.error('Failed to execute payout', { error, optionAddress });
+      this.client.logger.error('Failed to reclaim collateral', {
+        error,
+        optionAddress,
+        ownedOption,
+      });
       throw mapContractError(error);
     }
+  }
+
+  /**
+   * @deprecated Removed in audit fix TNU-AUDIT-0046.
+   *
+   * The pre-r12 BaseOption contract exposed a zero-arg `payout()` write
+   * entrypoint. On the r12 deployment (canonical `BaseOption.json`) this
+   * function does not exist — only `calculatePayout(uint256)` (view) and
+   * `simulatePayout(...)` (pure). Settlement is automatic via the factory's
+   * `notifyTradeSettled` callback; there is no user-callable settlement
+   * trigger on the option contract itself.
+   *
+   * This method now throws `INVALID_PARAMS` instead of silently broadcasting
+   * a guaranteed-revert transaction. Callers should:
+   *  - Query settlement status via `getOptionInfo(optionAddress).settled`;
+   *  - For payout amount, call `calculatePayout(optionAddress, ...)` (view).
+   *
+   * The method signature is retained (vs. deletion) to preserve API surface
+   * and produce a clear error path for downstream code that was previously
+   * burning gas on the revert.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await -- preserves async signature for API back-compat; throws synchronously into the Promise chain.
+  async payout(optionAddress: string): Promise<PayoutResult> {
+    validateAddress(optionAddress, 'optionAddress');
+    this.client.logger.warn('OptionModule.payout removed (TNU-AUDIT-0046)', {
+      optionAddress,
+    });
+    throw createError(
+      'INVALID_PARAMS',
+      'OptionModule.payout() is not available on the r12 deployment. ' +
+        'Settlement on r12 is triggered automatically via factory callbacks; ' +
+        'there is no user-callable payout() entrypoint on BaseOption. ' +
+        'See TNU-AUDIT-0046 in SECURITY_AUDIT_BETA.md.'
+    );
   }
 
   /**

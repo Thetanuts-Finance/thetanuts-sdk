@@ -100,9 +100,14 @@ export function parseTicker(ticker: string): ParsedTicker {
   const expiryDate = new Date(Date.UTC(year, month, day, 8, 0, 0));
   const expiry = Math.floor(expiryDate.getTime() / 1000);
 
-  // Parse strike
-  const strike = parseFloat(strikeStr ?? '0');
-  if (isNaN(strike) || strike <= 0) {
+  // Parse strike — require strictly numeric input. `parseFloat("123abc")` returns
+  // 123 (silent truncation), so reject anything that isn't a clean decimal
+  // (TNU-AUDIT-0057).
+  if (!strikeStr || !/^\d+(\.\d+)?$/.test(strikeStr)) {
+    throw new Error(`Invalid strike price: ${strikeStr}`);
+  }
+  const strike = parseFloat(strikeStr);
+  if (!Number.isFinite(strike) || strike <= 0) {
     throw new Error(`Invalid strike price: ${strikeStr}`);
   }
 

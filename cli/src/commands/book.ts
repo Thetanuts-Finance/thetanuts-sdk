@@ -137,11 +137,21 @@ function collateralDecimalsFromOrder(
   client: GetClientResult['client']
 ): number {
   const addr = order.rawApiData?.collateral?.toLowerCase();
-  if (!addr) return 6; // safe default (USDC)
+  if (!addr) {
+    throw new Error(
+      'book preview: order is missing rawApiData.collateral. Cannot determine ' +
+        'decimal scale — refusing to fall back to 6-decimal default (TNU-AUDIT-0080).',
+    );
+  }
   for (const cfg of Object.values(client.chainConfig.tokens)) {
     if (cfg.address.toLowerCase() === addr) return cfg.decimals;
   }
-  return 6;
+  // Fail loudly instead of silently rendering at 6-decimal — a future order with
+  // an unknown collateral token would otherwise mislead the trader.
+  throw new Error(
+    `book preview: unknown collateral token ${addr}. ` +
+      'Add it to client.chainConfig.tokens before previewing (TNU-AUDIT-0080).',
+  );
 }
 
 /**
@@ -299,13 +309,15 @@ function summarizeOrderHuman(
   const underlyingSym =
     underlyingSymbolByPriceFeed(order.rawApiData?.priceFeed, client.chainConfig.priceFeeds) ??
     'UNKNOWN';
-  // pricePerContract is in 8 decimals on the order, but for USDC fills the
-  // SDK surfaces it as a USDC-decimal quantity (6 dec) when consumed via
-  // `previewFillOrder`. For the `book orders` list we humanize against USDC
-  // (6 dec) to match what the user actually pays per contract. Multiply by
-  // 1 if the maker fills in raw USDC; here we follow the user spec verbatim.
-  const premiumHuman = Number(order.order.price) / 1e6;
-  const availableHuman = Number(order.availableAmount) / 1e6;
+  // TNU-AUDIT-0054: previously hardcoded /1e6, which mis-rendered premiums
+  // by 100x against the SDK's 8-decimal pricing convention. Derive scale from
+  // the order's collateral token so the table matches what `book check` and
+  // `humanizePreview` show pre-broadcast.
+  const collDec = collateralDecimalsFromOrder(order, client);
+  const priceScale = 10 ** 8;
+  const collScale = 10 ** collDec;
+  const premiumHuman = Number(order.order.price) / priceScale;
+  const availableHuman = Number(order.availableAmount) / collScale;
   const collSym =
     tokenSymbolByAddress(order.rawApiData?.collateral, client.chainConfig.tokens) ?? 'UNKNOWN';
 
@@ -689,9 +701,10 @@ function registerCheck(grp: Command): void {
 
           return {
             index,
-            // Preserve OpenClaw quirk: ticker formatter hardcodes 'ETH'. Don't
-            // "fix" this — number alignment requires byte-for-byte parity.
-            ticker: formatCheckTicker('ETH', expiry, strike, optionType),
+            // Thread the actual underlying through — BTC orders were rendered
+            // with an `ETH-…` ticker prefix and misled traders selecting rows
+            // by ticker (TNU-AUDIT-0068).
+            ticker: formatCheckTicker(params.underlying, expiry, strike, optionType),
             type: optionType,
             strike,
             expiry,

@@ -165,6 +165,21 @@ export class OptionBookModule {
       throw createError('INVALID_ORDER', 'Order is missing rawApiData required for contract call');
     }
 
+    // Engagement invariant (TNU-AUDIT-0047): zero-address implementations on
+    // API responses indicate a misconfigured/rogue feed. The chain registry
+    // stores 0x000…000 for not-yet-deployed option implementations (e.g.
+    // physical multi-leg); filling against one would build calldata that
+    // reverts on-chain. Reject loudly at the SDK boundary.
+    if (
+      !rawData.implementation ||
+      rawData.implementation === '0x0000000000000000000000000000000000000000'
+    ) {
+      throw createError(
+        'INVALID_ORDER',
+        'OptionBook fill: order.implementation is zero-address — the option type is not deployed on this chain.'
+      );
+    }
+
     return {
       maker: orderWithSig.order.maker,
       orderExpiryTimestamp: BigInt(rawData.orderExpiryTimestamp),
@@ -276,6 +291,13 @@ export class OptionBookModule {
       const strike0 = strikes[0]!;
       const strike1 = strikes[1]!;
       const spreadWidth = strike0 > strike1 ? strike0 - strike1 : strike1 - strike0;
+      // Reject zero-width spreads — would otherwise throw RangeError (TNU-AUDIT-0015).
+      if (spreadWidth === 0n) {
+        throw createError(
+          'INVALID_ORDER',
+          'Option structure has zero spread width — invalid strikes',
+        );
+      }
       return (maxCollateral * 100000000n) / spreadWidth;
     }
 
@@ -286,6 +308,13 @@ export class OptionBookModule {
       const firstStrike = sortedStrikes[0]!;
       const lastStrike = sortedStrikes[sortedStrikes.length - 1]!;
       const maxSpread = lastStrike - firstStrike;
+      // Reject degenerate (all-equal) strikes — would otherwise throw RangeError (TNU-AUDIT-0015).
+      if (maxSpread === 0n) {
+        throw createError(
+          'INVALID_ORDER',
+          'Option structure has zero spread width — invalid strikes',
+        );
+      }
       return (maxCollateral * 100000000n) / maxSpread;
     }
 
@@ -622,11 +651,32 @@ export class OptionBookModule {
     );
 
     const results: ClaimableFee[] = [];
+    let rejectedCount = 0;
+    const rejectionReasons: unknown[] = [];
     for (const result of settled) {
-      if (result.status === 'fulfilled' && result.value.amount > 0n) {
-        results.push(result.value);
+      if (result.status === 'fulfilled') {
+        if (result.value.amount > 0n) {
+          results.push(result.value);
+        }
+      } else {
+        rejectedCount += 1;
+        rejectionReasons.push(result.reason);
       }
-      // Rejected promises (RPC errors, invalid tokens) are silently skipped
+    }
+    // Surface partial-failure visibility — previously rejections were silently
+    // swallowed, hiding RPC degradation from callers (TNU-AUDIT-0071).
+    if (rejectedCount > 0) {
+      this.client.logger.warn('getAllClaimableFees: some token reads failed', {
+        rejectedCount,
+        totalQueried: entries.length,
+        firstError: rejectionReasons[0],
+      });
+      if (rejectedCount === entries.length) {
+        throw createError(
+          'NETWORK_UNSUPPORTED',
+          `All ${entries.length} token fee reads failed; check RPC connectivity.`,
+        );
+      }
     }
 
     return results;

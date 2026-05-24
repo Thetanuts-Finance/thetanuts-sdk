@@ -27,17 +27,44 @@ export function defaultConfigPath(): string {
 export function loadConfig(configPath?: string): Config | null {
   const p = configPath ?? defaultConfigPath();
   if (!fs.existsSync(p)) return null;
-  const raw = fs.readFileSync(p, 'utf8');
+  // Open with O_NOFOLLOW so a pre-planted symlink cannot redirect the read to
+  // an attacker-controlled path (TNU-AUDIT-0078). O_NOFOLLOW is unsupported
+  // on Windows — fall back to the previous read path there.
+  let raw: string;
+  if (process.platform !== 'win32') {
+    const NOFOLLOW = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+    if (typeof NOFOLLOW === 'number') {
+      const fd = fs.openSync(p, fs.constants.O_RDONLY | NOFOLLOW);
+      try {
+        raw = fs.readFileSync(fd, 'utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } else {
+      raw = fs.readFileSync(p, 'utf8');
+    }
+  } else {
+    raw = fs.readFileSync(p, 'utf8');
+  }
   const parsed = JSON.parse(raw) as Config;
-  // Loose-permissions warning
+  // Auto-tighten loose perms rather than just warning to stderr — CI piping
+  // stderr to /dev/null silently swallowed the warning (TNU-AUDIT-0079).
   if (process.platform !== 'win32') {
     try {
       const stat = fs.statSync(p);
       if ((stat.mode & 0o077) !== 0) {
         const oct = (stat.mode & 0o777).toString(8);
-        process.stderr.write(
-          `warning: ${p} has loose permissions (mode ${oct}); run 'chmod 600 <path>' to tighten\n`
-        );
+        try {
+          fs.chmodSync(p, 0o600);
+          process.stderr.write(
+            `notice: tightened ${p} from mode ${oct} → 600 (was world/group-readable).\n`,
+          );
+        } catch {
+          // chmod may fail on non-owned file or unusual FS — keep the warning.
+          process.stderr.write(
+            `warning: ${p} has loose permissions (mode ${oct}); run 'chmod 600 <path>' to tighten\n`,
+          );
+        }
       }
     } catch {
       // best-effort; never block load on a stat failure

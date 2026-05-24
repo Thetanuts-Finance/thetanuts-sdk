@@ -197,7 +197,8 @@ export const BASE_OPTION_ABI = [
       { name: '_numContracts', type: 'uint256', internalType: 'uint256' },
     ],
     outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
-    stateMutability: 'pure',
+    // Canonical r12 ABI declares this `view`, not `pure` (TNU-AUDIT-0069).
+    stateMutability: 'view',
   },
   {
     type: 'function',
@@ -287,7 +288,8 @@ export const BASE_OPTION_ABI = [
       { name: '_collateralAmount', type: 'uint256', internalType: 'uint256' },
     ],
     outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
-    stateMutability: 'pure',
+    // Canonical r12 ABI declares this `view`, not `pure` (TNU-AUDIT-0069).
+    stateMutability: 'view',
   },
 
   // ============ Write Functions ============
@@ -312,13 +314,12 @@ export const BASE_OPTION_ABI = [
     outputs: [],
     stateMutability: 'nonpayable',
   },
-  {
-    type: 'function',
-    name: 'payout',
-    inputs: [],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
+  // Removed in audit fix (TNU-AUDIT-0046): zero-arg `payout()` does NOT exist
+  // on the r12 BaseOption contract. The canonical ABI only declares
+  // `calculatePayout(uint256)` (view) and `simulatePayout(...)` (pure); on r12
+  // settlement is driven via the `notifyTradeSettled` callback wired by the
+  // factory, not by an end-user `payout()` call. Generating calldata for a
+  // non-existent selector results in a silent on-chain revert.
   {
     type: 'function',
     name: 'split',
@@ -384,7 +385,8 @@ export const BASE_OPTION_ABI = [
       { name: '_strikes', type: 'uint256[]', internalType: 'uint256[]' },
     ],
     outputs: [],
-    stateMutability: 'pure',
+    // Canonical r12 ABI declares this `view`, not `pure` (TNU-AUDIT-0069).
+    stateMutability: 'view',
   },
 
   // ============ Events ============

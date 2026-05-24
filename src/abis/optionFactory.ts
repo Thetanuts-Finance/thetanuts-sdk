@@ -167,26 +167,9 @@ export const OPTION_FACTORY_ABI = [
   },
   {
     type: 'function',
-    name: 'offerSignatures',
-    inputs: [
-      { name: '', type: 'uint256', internalType: 'uint256' },
-      { name: '', type: 'address', internalType: 'address' },
-    ],
-    outputs: [{ name: '', type: 'bytes', internalType: 'bytes' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
     name: 'owner',
     inputs: [],
     outputs: [{ name: '', type: 'address', internalType: 'address' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
-    name: 'pendingFees',
-    inputs: [{ name: '', type: 'address', internalType: 'address' }],
-    outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
     stateMutability: 'view',
   },
   {
@@ -224,13 +207,6 @@ export const OPTION_FACTORY_ABI = [
     name: 'referralFees',
     inputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
     outputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
-    stateMutability: 'view',
-  },
-  {
-    type: 'function',
-    name: 'referralOwner',
-    inputs: [{ name: '', type: 'uint256', internalType: 'uint256' }],
-    outputs: [{ name: '', type: 'address', internalType: 'address' }],
     stateMutability: 'view',
   },
   // r12-additive views
@@ -366,13 +342,6 @@ export const OPTION_FACTORY_ABI = [
   },
   {
     type: 'function',
-    name: 'renounceOwnership',
-    inputs: [],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
-  {
-    type: 'function',
     name: 'requestForQuotation',
     inputs: [
       {
@@ -462,23 +431,6 @@ export const OPTION_FACTORY_ABI = [
     ],
     outputs: [],
     stateMutability: 'payable',
-  },
-  {
-    type: 'function',
-    name: 'transferOwnership',
-    inputs: [{ name: 'newOwner', type: 'address', internalType: 'address' }],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
-  {
-    type: 'function',
-    name: 'withdrawFees',
-    inputs: [
-      { name: 'token', type: 'address', internalType: 'address' },
-      { name: 'referralIds', type: 'uint256[]', internalType: 'uint256[]' },
-    ],
-    outputs: [],
-    stateMutability: 'nonpayable',
   },
 
   // ============ Events ============

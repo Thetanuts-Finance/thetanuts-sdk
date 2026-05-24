@@ -212,6 +212,18 @@ export class ERC20Module {
       required: amount.toString(),
     });
 
+    // USDT-style tokens (USDT, OMG, KNC-legacy) revert when approve is called
+    // with a non-zero target while the current allowance is also non-zero.
+    // Zero-reset first to stay compatible if integrators wire such a token
+    // through this helper (TNU-AUDIT-0062). The current Base chain config
+    // does not include USDT-style tokens; this is defensive.
+    if (currentAllowance > 0n) {
+      this.client.logger.debug('Zeroing existing allowance before top-up', {
+        currentAllowance: currentAllowance.toString(),
+      });
+      await this.approve(token, spender, 0n);
+    }
+
     return this.approve(token, spender, amount);
   }
 

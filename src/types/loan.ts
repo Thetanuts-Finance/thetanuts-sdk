@@ -63,6 +63,13 @@ export interface LoanRequest {
   keepOrderOpen?: boolean;
   /** Custom offer duration in seconds (default: 30) */
   offerDurationSeconds?: number;
+  /**
+   * ECDH compressed public key (hex string) the MM uses to encrypt offers.
+   * Required by `encodeRequestLoan` (viem/wagmi integrations) so MMs can
+   * deliver encrypted offers. `requestLoan()` resolves this automatically via
+   * `client.rfqKeys.getOrCreateKeyPair()`.
+   */
+  requesterPublicKey?: string;
 }
 
 /** Result of a successful loan request */

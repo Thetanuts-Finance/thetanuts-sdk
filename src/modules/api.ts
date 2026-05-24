@@ -54,6 +54,25 @@ function deriveUnderlyingFromPriceFeed(priceFeed: string): string {
 }
 
 /**
+ * Coerce a JSON numeric field to a finite `number`, returning a fallback on
+ * null/undefined and throwing on `NaN` / `Infinity` (TNU-AUDIT-0058).
+ *
+ * NOTE: this still silently truncates values beyond `2^53` because the
+ * underlying JSON value has already been parsed by V8. For uint64-shaped
+ * fields (block numbers, large counters) prefer `BigInt(raw)` from the raw
+ * string when the indexer emits one — but a defensive finite-number gate is
+ * a strict improvement over the previous bare `Number(...)` call.
+ */
+function safeNumber(value: unknown, fallback = 0): number {
+  if (value == null) return fallback;
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`API field was not a finite number: ${String(value)}`);
+  }
+  return n;
+}
+
+/**
  * Module for API interactions
  *
  * Provides methods for fetching orders, positions, history, and stats.
@@ -310,13 +329,14 @@ export class APIModule {
     const positions = (response['positions'] as Record<string, number>) ?? {};
 
     return {
-      totalOptionsTracked: Number(response['totalOptionsTracked'] ?? 0),
-      openPositions: Number(response['openPositions'] ?? 0),
-      settledPositions: Number(response['settledPositions'] ?? 0),
-      closedPositions: Number(response['closedPositions'] ?? 0),
-      uniqueUsers: Number(response['uniqueUsers'] ?? 0),
-      lastProcessedBlock: Number(response['lastProcessedBlock'] ?? 0),
-      lastUpdateTimestamp: Number(response['lastUpdateTimestamp'] ?? 0),
+      // Use `safeNumber` to reject NaN/Infinity at the boundary (TNU-AUDIT-0058).
+      totalOptionsTracked: safeNumber(response['totalOptionsTracked']),
+      openPositions: safeNumber(response['openPositions']),
+      settledPositions: safeNumber(response['settledPositions']),
+      closedPositions: safeNumber(response['closedPositions']),
+      uniqueUsers: safeNumber(response['uniqueUsers']),
+      lastProcessedBlock: safeNumber(response['lastProcessedBlock']),
+      lastUpdateTimestamp: safeNumber(response['lastUpdateTimestamp']),
       positions: {
         total: Number(positions['total'] ?? 0),
         open: Number(positions['open'] ?? 0),
@@ -432,13 +452,16 @@ export class APIModule {
 
     return {
       status: (response['status'] as 'ok' | 'unhealthy') ?? 'unhealthy',
-      chainId: Number(response['chain_id'] ?? 0),
-      lastIndexedBlock: Number(response['last_indexed_block'] ?? 0),
-      headBlock: Number(response['head_block'] ?? 0),
-      lagBlocks: Number(response['lag_blocks'] ?? 0),
-      lastPing: Number(response['last_ping'] ?? 0),
-      secondsSincePing: response['seconds_since_ping'] != null ? Number(response['seconds_since_ping']) : null,
-      timestamp: Number(response['timestamp'] ?? 0),
+      // safeNumber rejects NaN/Infinity at the API boundary (TNU-AUDIT-0058).
+      chainId: safeNumber(response['chain_id']),
+      lastIndexedBlock: safeNumber(response['last_indexed_block']),
+      headBlock: safeNumber(response['head_block']),
+      lagBlocks: safeNumber(response['lag_blocks']),
+      lastPing: safeNumber(response['last_ping']),
+      secondsSincePing: response['seconds_since_ping'] != null
+        ? safeNumber(response['seconds_since_ping'])
+        : null,
+      timestamp: safeNumber(response['timestamp']),
     };
   }
 

@@ -156,7 +156,9 @@ interface WETHContract {
 function parseDeribitKey(key: string): { asset: string; expiry: string; strike: number; type: string } | null {
   const parts = key.split('-');
   if (parts.length !== 4) return null;
-  return { asset: parts[0]!, expiry: parts[1]!, strike: parseInt(parts[2]!), type: parts[3]! };
+  const strike = parseInt(parts[2]!, 10);
+  if (!Number.isFinite(strike) || strike <= 0) return null;
+  return { asset: parts[0]!, expiry: parts[1]!, strike, type: parts[3]! };
 }
 
 function getAssetConfig(underlying: LoanUnderlying) {
@@ -657,7 +659,22 @@ export class LoanModule {
         if (loan.expiryTimestamp <= now) continue;
 
         const ethCollateral = LOAN_CONFIG.assets.ETH.collateral.toLowerCase();
-        const underlying = loan.collateralToken.toLowerCase() === ethCollateral ? 'ETH' : 'BTC';
+        const btcCollateral = LOAN_CONFIG.assets.BTC.collateral.toLowerCase();
+        const collateralLower = loan.collateralToken.toLowerCase();
+        let underlying: 'ETH' | 'BTC';
+        if (collateralLower === ethCollateral) {
+          underlying = 'ETH';
+        } else if (collateralLower === btcCollateral) {
+          underlying = 'BTC';
+        } else {
+          // Skip rather than mis-decimalize an unknown collateral token. The
+          // previous default-to-BTC branch silently produced garbage APR rows
+          // (TNU-AUDIT-0028).
+          this.client.logger.warn('Skipping lending opportunity — unknown collateral token', {
+            collateralToken: loan.collateralToken,
+          });
+          continue;
+        }
 
         if (options?.underlying && underlying !== options.underlying) continue;
         if (options?.excludeAddress && loan.requester.toLowerCase() === options.excludeAddress.toLowerCase()) continue;
@@ -673,7 +690,14 @@ export class LoanModule {
         if (durationSeconds <= 0) continue;
 
         const profit = owe - lendAmount;
-        const apr = (Number(profit) / Number(lendAmount)) * (365.25 * 86400 / durationSeconds) * 100;
+        // Both `profit` and `lendAmount` are 6-decimal bigints; converting via
+        // `formatUnits` first preserves precision for USDC amounts > $9B
+        // (TNU-AUDIT-0027).
+        const profitFloat = parseFloat(ethers.formatUnits(profit, 6));
+        const lendAmountFloat = parseFloat(ethers.formatUnits(lendAmount, 6));
+        const apr = lendAmountFloat > 0
+          ? (profitFloat / lendAmountFloat) * (365.25 * 86400 / durationSeconds) * 100
+          : 0;
 
         const expiryDate = new Date(loan.expiryTimestamp * 1000);
         const expiryFormatted = expiryDate.toLocaleDateString('en-US', {
@@ -1111,6 +1135,15 @@ export class LoanModule {
    * @returns Encoded transaction { to, data }
    */
   encodeRequestLoan(params: LoanRequest): { to: string; data: string } {
+    // requesterPublicKey is required for offer encryption — without it, no MM can
+    // deliver a fillable offer and the loan silently expires (TNU-AUDIT-0013).
+    if (!params.requesterPublicKey || params.requesterPublicKey.trim() === '') {
+      throw createError(
+        'INVALID_PARAMS',
+        'requesterPublicKey is required for encodeRequestLoan. ' +
+          'Resolve via `client.rfqKeys.getOrCreateKeyPair()` before encoding.',
+      );
+    }
     const asset = getAssetConfig(params.underlying);
 
     const collateralAmount = typeof params.collateralAmount === 'string'
@@ -1131,7 +1164,7 @@ export class LoanModule {
       expiryTimestamp: params.expiryTimestamp,
       offerEndTimestamp,
       minSettlementAmount: params.minSettlementAmount,
-      requesterPublicKey: '',
+      requesterPublicKey: params.requesterPublicKey,
     }]);
 
     return { to: LOAN_CONFIG.contracts.loanCoordinator, data };

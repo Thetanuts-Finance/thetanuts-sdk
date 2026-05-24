@@ -57,8 +57,11 @@ export const COLLAR_CONFIG = {
   /** Pricing reference (shared with LoanModule). */
   pricingUrl: 'https://pricing.thetanuts.finance/all',
 
-  /** Default offer duration when posting an RFQ. */
-  defaultOfferDurationSeconds: 60,
+  /** Default offer duration when posting an RFQ. Matches the broader RFQ convention (~5 min). */
+  defaultOfferDurationSeconds: 300,
+
+  /** Settlement token decimals (USDC on Base). */
+  settlementDecimals: 6,
 
   /** Per-asset collateral configuration. */
   assets: {

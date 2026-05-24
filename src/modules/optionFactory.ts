@@ -31,7 +31,7 @@ import type { CallStaticResult } from '../types/callStatic.js';
 import type { ImplementationAddresses } from '../chains/index.js';
 import { createError, mapContractError } from '../utils/errors.js';
 import { NotFoundError } from '../types/errors.js';
-import { validateAddress } from '../utils/validation.js';
+import { validateAddress, validateHexBytes } from '../utils/validation.js';
 
 /**
  * Contract-level interface matching the OptionFactory ABI exactly.
@@ -79,13 +79,10 @@ interface OptionFactoryContract {
   authorizedRouters(router: string): Promise<boolean>;
   eip712Domain(): Promise<[string, string, string, bigint, string, string, bigint[]]>;
   historicalTWAPConsumer(): Promise<string>;
-  offerSignatures(quotationId: bigint, offeror: string): Promise<string>;
-  pendingFees(token: string): Promise<bigint>;
 
   // View: referral
   quotationTracking(quotationId: bigint): Promise<[bigint, bigint]>;
   referralFees(referralId: bigint): Promise<bigint>;
-  referralOwner(referralId: bigint): Promise<string>;
   returnReferralParameters(referralId: bigint): Promise<[string, string, string, bigint[], bigint, boolean, string]>;
 
   // Write: referral + swap
@@ -98,7 +95,6 @@ interface OptionFactoryContract {
     swapCallData: string,
     selfCallData: string,
   ): Promise<ContractTransactionResponse>;
-  withdrawFees(token: string, referralIds: bigint[]): Promise<ContractTransactionResponse>;
 }
 
 /**
@@ -364,6 +360,13 @@ export class OptionFactoryModule {
    * @returns Transaction receipt
    */
   async makeOfferForQuotation(params: MakeOfferParams): Promise<TransactionReceipt> {
+    // Validate signingKey at the SDK boundary so callers get a clean
+    // INVALID_PARAMS error instead of a generic on-chain revert
+    // (TNU-AUDIT-0061; sibling `revealOffer` already validates `offeror`).
+    validateAddress(params.signingKey, 'signingKey');
+    // 65-byte vrs signature shape check — catches malformed signatures
+    // before paying gas for a guaranteed revert (TNU-AUDIT-0082).
+    validateHexBytes(params.signature, 65, 'signature');
     this.client.logger.debug('Making offer for quotation', {
       quotationId: params.quotationId.toString(),
     });
@@ -750,46 +753,10 @@ export class OptionFactoryModule {
     }
   }
 
-  /**
-   * Get the offer signature for a specific quotation and offeror
-   *
-   * @param quotationId - Quotation ID
-   * @param offeror - Offeror address
-   * @returns Offer signature bytes as hex string
-   */
-  async getOfferSignature(quotationId: bigint, offeror: string): Promise<string> {
-    validateAddress(offeror, 'offeror');
-
-    try {
-      const contract = this.getReadContract();
-      return await contract.offerSignatures(quotationId, offeror);
-    } catch (error) {
-      this.client.logger.error('Failed to get offer signature', {
-        error,
-        quotationId: quotationId.toString(),
-        offeror,
-      });
-      throw mapContractError(error);
-    }
-  }
-
-  /**
-   * Get pending fees for a token
-   *
-   * @param token - Token address to check pending fees for
-   * @returns Pending fee amount as bigint
-   */
-  async getPendingFees(token: string): Promise<bigint> {
-    validateAddress(token, 'token');
-
-    try {
-      const contract = this.getReadContract();
-      return await contract.pendingFees(token);
-    } catch (error) {
-      this.client.logger.error('Failed to get pending fees', { error, token });
-      throw mapContractError(error);
-    }
-  }
+  // Removed in audit fix (TNU-AUDIT-0045): getOfferSignature and
+  // getPendingFees relied on offerSignatures/pendingFees view functions that
+  // do not exist on the r12 OptionFactory deployment. Calls were silently
+  // generating valid-looking calldata that reverted on-chain.
 
   // ============================================================
   // View methods — Referral
@@ -835,24 +802,10 @@ export class OptionFactoryModule {
     }
   }
 
-  /**
-   * Get the owner address of a referral
-   *
-   * @param referralId - Referral ID
-   * @returns Owner address
-   */
-  async getReferralOwner(referralId: bigint): Promise<string> {
-    try {
-      const contract = this.getReadContract();
-      return await contract.referralOwner(referralId);
-    } catch (error) {
-      this.client.logger.error('Failed to get referral owner', {
-        error,
-        referralId: referralId.toString(),
-      });
-      throw mapContractError(error);
-    }
-  }
+  // Removed in audit fix (TNU-AUDIT-0045): getReferralOwner relied on a
+  // referralOwner view function not present on r12 OptionFactory. Use
+  // referral-emitted events (ReferralRegistered) or off-chain indexer if you
+  // need to resolve referral → owner.
 
   /**
    * Get the full referral parameters for a referral ID
@@ -1013,51 +966,10 @@ export class OptionFactoryModule {
     }
   }
 
-  /**
-   * Withdraw accumulated referral fees for specified referral IDs
-   *
-   * @param token - Token address to withdraw fees in
-   * @param referralIds - Array of referral IDs to withdraw fees for
-   * @returns Transaction receipt
-   *
-   * @remarks Requires contract owner authorization. Reverts for non-owner callers.
-   *
-   * @example
-   * ```typescript
-   * const receipt = await client.optionFactory.withdrawFees(
-   *   '0xUSDC',
-   *   [1n, 2n, 3n]
-   * );
-   * ```
-   */
-  async withdrawFees(token: string, referralIds: bigint[]): Promise<TransactionReceipt> {
-    validateAddress(token, 'token');
-
-    this.client.logger.debug('Withdrawing fees', {
-      token,
-      referralIds: referralIds.map(String),
-    });
-
-    try {
-      const contract = this.getWriteContract();
-      const tx = await contract.withdrawFees(token, referralIds);
-      const receipt = await tx.wait();
-
-      if (!receipt) {
-        throw createError('CONTRACT_REVERT', 'Transaction failed - no receipt returned');
-      }
-
-      this.client.logger.info('Fees withdrawn successfully', {
-        txHash: receipt.hash,
-        token,
-      });
-
-      return receipt;
-    } catch (error) {
-      this.client.logger.error('Failed to withdraw fees', { error, token });
-      throw mapContractError(error);
-    }
-  }
+  // Removed in audit fix (TNU-AUDIT-0044): withdrawFees is admin-only on the
+  // OptionFactory contract per CLAUDE.md policy ("Never include admin-only
+  // contract functions in SDK ABIs — they revert for non-owner callers"). The
+  // ABI entry has been removed alongside this wrapper.
 
   // ============ Encode Methods (for external wallet use) ============
 
@@ -1650,6 +1562,20 @@ export class OptionFactoryModule {
     // Validate all strikes are positive
     if (strikesInput.some(s => s <= 0)) {
       throw createError('INVALID_PARAMS', 'All strike prices must be positive');
+    }
+
+    // Iron condor invariant (engagement spec): strikes must already be strictly
+    // ascending. Auto-sorting for iron condor hides caller bugs and can cross
+    // leg legs (PUT_LO < PUT_HI < CALL_LO < CALL_HI) — TNU-AUDIT-0042.
+    if (params.isIronCondor) {
+      for (let i = 1; i < strikesInput.length; i++) {
+        if (strikesInput[i]! <= strikesInput[i - 1]!) {
+          throw createError(
+            'INVALID_PARAMS',
+            'Iron condor strikes must be in ascending order: strike1 < strike2 < strike3 < strike4'
+          );
+        }
+      }
     }
 
     // Sort strikes based on option type AND strike count
@@ -2730,9 +2656,22 @@ export class OptionFactoryModule {
       throw createError('INVALID_PARAMS', `No price feed found for underlying: ${underlying}`);
     }
 
-    // Iron condors always use ascending strike order
+    // Iron condor invariant: callers must pass strikes already in strict
+    // ascending order. Auto-sorting hides bugs where put/call legs were
+    // crossed — TNU-AUDIT-0042.
     const strikes = [strike1, strike2, strike3, strike4];
-    const sortedStrikes = [...strikes].sort((a, b) => a - b);
+    for (let i = 1; i < strikes.length; i++) {
+      if (strikes[i]! <= strikes[i - 1]!) {
+        throw createError(
+          'INVALID_PARAMS',
+          'Iron condor strikes must be in ascending order: strike1 < strike2 < strike3 < strike4'
+        );
+      }
+    }
+    if (strikes.some(s => s <= 0)) {
+      throw createError('INVALID_PARAMS', 'All strike prices must be positive');
+    }
+    const sortedStrikes = strikes;
 
     // Convert strikes to on-chain format (8 decimals) using precision-safe method
     const strikesOnChain = sortedStrikes.map(s => this.client.utils.strikeToChain(s));

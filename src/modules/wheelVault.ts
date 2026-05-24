@@ -91,6 +91,12 @@ interface VaultReadContract {
   base(): Promise<string>;
   quote(): Promise<string>;
   seriesToken(seriesId: number): Promise<string>;
+  /**
+   * `totalAssets()` is used via `Interface.encodeFunctionData` in the
+   * `getVaultState` multicall batch. Declared here so ABI/usage drift would
+   * surface as a TypeScript error (TNU-AUDIT-0037).
+   */
+  totalAssets(): Promise<[bigint, bigint, bigint]>;
 }
 
 interface VaultWriteContract {
@@ -418,6 +424,9 @@ export class WheelVaultModule {
       const totalAssetsResult = iface.decodeFunctionResult('totalAssets', returnData[3]!);
       const totalBaseAmt = BigInt(totalAssetsResult[0] as bigint);
       const totalQuoteAmt = BigInt(totalAssetsResult[1] as bigint);
+      // Surface the third return (`totalValue`, in quote-decimals) so callers
+      // computing TVL can cross-check against `seriesTotalValue` (TNU-AUDIT-0018).
+      const totalValueFromAssets = BigInt(totalAssetsResult[2] as bigint);
 
       const ivBps = Number(iface.decodeFunctionResult('ivBps', returnData[4]!)[0]);
 
@@ -428,6 +437,7 @@ export class WheelVaultModule {
       const tvl = BigInt(seriesValueResult[1] as bigint);
 
       const epochExpiriesRaw = iface.decodeFunctionResult('getEpochExpiries', returnData[7]!)[0] as bigint[];
+      // Unix seconds — multiply by 1000 before passing to the Date constructor (TNU-AUDIT-0019).
       const epochExpiries = epochExpiriesRaw.map((e) => Number(e));
 
       const vaultMathAddress = String(iface.decodeFunctionResult('vaultMath', returnData[8]!)[0]);
@@ -457,6 +467,7 @@ export class WheelVaultModule {
         baseValueInQuote,
         totalBaseAmt,
         totalQuoteAmt,
+        totalValueFromAssets,
         ivBps,
         baseDecimals,
         quoteDecimals,
@@ -629,6 +640,14 @@ export class WheelVaultModule {
   ): Promise<bigint> {
     this.ensureEnabled();
     validateAddress(vaultMathAddress, 'vaultMathAddress');
+    // TNU-AUDIT-0031: vaultMathAddress is not in the chain config (each vault
+    // exposes its own `vaultMath()` accessor), so we cannot statically
+    // allowlist. Callers should resolve this address from a configured vault
+    // via `getVaultState().vaultMathAddress` rather than accepting it from
+    // user input. Reject the zero address as a minimum defensive check.
+    if (vaultMathAddress === ZeroAddress) {
+      throw createError('INVALID_PARAMS', 'vaultMathAddress cannot be the zero address');
+    }
 
     const mathContract = this.getVaultMath(vaultMathAddress);
 
@@ -664,6 +683,12 @@ export class WheelVaultModule {
   ): Promise<VaultDepositResult> {
     this.ensureEnabled();
     this.validateConfiguredVault(vaultAddress);
+
+    // Reject zero-amount deposits early — would otherwise burn gas for a no-op
+    // and return a silent-success receipt with sharesToMint=0 (TNU-AUDIT-0021).
+    if (baseAmt === 0n && quoteAmt === 0n) {
+      throw createError('INVALID_PARAMS', 'deposit amounts must be non-zero (baseAmt or quoteAmt > 0)');
+    }
 
     // TNU-AUDIT-0003: vault.deposit() pulls base and quote tokens from msg.sender
     // via transferFrom — spender for both is the vault itself. Skip the read for
@@ -743,6 +768,11 @@ export class WheelVaultModule {
     this.ensureEnabled();
     this.validateConfiguredVault(vaultAddress);
 
+    // Reject zero-share withdrawals — wastes gas with no state change (TNU-AUDIT-0021).
+    if (sharesToBurn === 0n) {
+      throw createError('INVALID_PARAMS', 'sharesToBurn must be non-zero');
+    }
+
     const vault = this.getVaultWrite(vaultAddress);
 
     try {
@@ -806,6 +836,11 @@ export class WheelVaultModule {
   ): Promise<TransactionReceipt> {
     this.ensureEnabled();
     this.validateConfiguredVault(vaultAddress);
+
+    // Reject zero-share withdrawals — wastes gas with no state change (TNU-AUDIT-0021).
+    if (sharesToBurn === 0n) {
+      throw createError('INVALID_PARAMS', 'sharesToBurn must be non-zero');
+    }
 
     const vault = this.getVaultWrite(vaultAddress);
 
@@ -1344,6 +1379,11 @@ export class WheelVaultModule {
     this.ensureEnabled();
     this.validateConfiguredMarkets(marketsAddress);
 
+    // Reject zero-share bucket deposits — silent no-op, wastes gas (TNU-AUDIT-0021).
+    if (params.shares === 0n) {
+      throw createError('INVALID_PARAMS', 'shares must be non-zero');
+    }
+
     // TNU-AUDIT-0003: Markets.depositToBucket pulls vault share tokens (the
     // per-series ERC20) from msg.sender — spender is the Markets contract.
     // We resolve the seriesToken from the Markets' vault rather than trusting
@@ -1566,6 +1606,13 @@ export class WheelVaultModule {
     this.ensureEnabled();
     this.validateConfiguredMarkets(marketsAddress);
     this.validateConfiguredSwapRouter(swapTarget, 'swapTarget');
+    // Reject ZeroAddress explicitly — the generic swap-router allowlist
+    // permits it for marketFill's optional swap, but `swapAndExercise`
+    // actively dispatches against the target and would burn gas on
+    // address(0) (TNU-AUDIT-0030).
+    if (swapTarget === ZeroAddress) {
+      throw createError('INVALID_PARAMS', 'swapTarget cannot be the zero address');
+    }
 
     const markets = this.getMarkets(marketsAddress);
 

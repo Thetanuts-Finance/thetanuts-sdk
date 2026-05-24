@@ -339,7 +339,19 @@ function redactSecrets(s: string): string {
       const v = m.split('/')[1];
       return `/${v}/<redacted>`;
     })
-    .replace(/apiKey=[A-Za-z0-9_\-]{16,}/g, 'apiKey=<redacted>');
+    .replace(/apiKey=[A-Za-z0-9_\-]{16,}/g, 'apiKey=<redacted>')
+    // Basic-auth credentials in URLs: https://user:pass@host (TNU-AUDIT-0083).
+    .replace(
+      /(https?:\/\/)([^:/?#@\s]+):([^@\s]+)@/g,
+      '$1<redacted>:<redacted>@',
+    )
+    // QuickNode-style host: `<random>.<chain>.quiknode.pro/<token>/`.
+    .replace(
+      /([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\.quiknode\.pro\/[A-Za-z0-9_\-]+/g,
+      '$1.$2.quiknode.pro/<redacted>',
+    )
+    // Etherscan-style 32-char uppercase API key on `apikey` query param.
+    .replace(/apikey=[A-Za-z0-9]{32,}/gi, 'apikey=<redacted>');
 }
 
 /**

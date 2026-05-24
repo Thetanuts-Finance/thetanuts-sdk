@@ -83,17 +83,18 @@ For the full `requestForQuotation` walkthrough, see [Create an RFQ](./create-rfq
 
 ## Reading referral state
 
-Two on-chain views, both available without a signer:
+One on-chain view, available without a signer:
 
 ```typescript
-// Who registered this referralId?
-const owner = await client.optionFactory.getReferralOwner(42n);
-// returns address — the address that called registerReferral
-
 // What's accrued?
 const fees = await client.optionFactory.getReferralFees(42n);
 // returns bigint — accumulated fees for this referralId, in collateral token units
 ```
+
+> The previous `getReferralOwner` helper was removed in the v4 r12 audit pass — the
+> matching `referralOwner` view does not exist on the deployed OptionFactory. To
+> resolve a referralId back to its owner, listen for `ReferralRegistered` events
+> or use the indexer (`client.api.getFactoryReferrerStats()`).
 
 For richer aggregated stats (volume, fee breakdowns, daily metrics) the off-chain indexer exposes `client.api.getFactoryReferrerStats()` — see the [Examples](../resources/examples.md) page for the indexer flow.
 

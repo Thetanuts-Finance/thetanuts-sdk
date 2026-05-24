@@ -217,8 +217,30 @@ export class FileStorageProvider implements KeyStorageProvider {
 /**
  * Browser localStorage provider.
  * Keys persist across sessions.
+ *
+ * SECURITY (TNU-AUDIT-0063): keys are stored in PLAINTEXT and are accessible
+ * to any same-origin script. A single XSS sink or compromised transitive
+ * dependency exfiltrates every key the user has ever generated. Prefer one
+ * of the following for production browser deployments:
+ *
+ *   1. Encrypt at rest with WebCrypto + passphrase (PBKDF2/scrypt → AES-GCM).
+ *   2. Store non-extractable WebCrypto `CryptoKey` in IndexedDB (`extractable: false`).
+ *
+ * A one-time `console.warn` is emitted on construction so the risk is visible
+ * to integrators that opt-in to this provider explicitly.
  */
 export class LocalStorageProvider implements KeyStorageProvider {
+  constructor() {
+    if (typeof console !== 'undefined') {
+      // eslint-disable-next-line no-console -- intentional one-time security warning at construction
+      console.warn(
+        'LocalStorageProvider stores RFQ private keys in plaintext localStorage. ' +
+          'This is accessible to any same-origin script and is not recommended for ' +
+          'production browser deployments — see TNU-AUDIT-0063 for safer alternatives.',
+      );
+    }
+  }
+
   get(keyId: string): string | null {
     if (typeof window === 'undefined' || !window.localStorage) {
       return null;
