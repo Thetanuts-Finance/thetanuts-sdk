@@ -507,6 +507,161 @@ test('INV-13 (TNU-AUDIT-0010): axios pinned to a version above the SSRF CVE rang
 });
 
 // ---------------------------------------------------------------------------
+// INVARIANTS 14–19: Fix regressions for SECURITY_AUDIT_BETA.md findings
+// (TNU-AUDIT-0002, 0003, 0005, 0006, 0007, 0009)
+// ---------------------------------------------------------------------------
+
+test('INV-14 (TNU-AUDIT-0002): WheelVault module + ABI must not expose admin trigger()', () => {
+  const abi = loadSrc('src/abis/wheelVault.ts');
+  // The admin trigger() function MUST NOT appear in the SDK ABI.
+  assert(
+    !/'function trigger\(\)'/.test(abi),
+    'WHEEL_VAULT_ABI must not contain trigger() — it is admin/keeper-only and reverts for non-owner callers',
+  );
+
+  const mod = loadSrc('src/modules/wheelVault.ts');
+  // The WheelVaultModule must not expose a public trigger method.
+  assert(
+    !/^\s*async\s+trigger\s*\(/m.test(mod),
+    'WheelVaultModule.trigger() must be removed — it is admin/keeper-only',
+  );
+  // The typed contract interface field for trigger must be gone too.
+  assert(
+    !/^\s{2}trigger:\s*\{/m.test(mod),
+    'VaultWriteContract.trigger field must be removed (no callsites should remain)',
+  );
+});
+
+test('INV-15 (TNU-AUDIT-0003): WheelVault deposit paths must call ensureAllowance() before pulling tokens', () => {
+  const mod = loadSrc('src/modules/wheelVault.ts');
+
+  // Each of the four deposit paths must reference ensureAllowance. We check
+  // both that ensureAllowance is called and that it sits BEFORE the matching
+  // contract write within the same function body.
+  const sliceBetween = (startMarker: string, endMarker: RegExp): string => {
+    const startIdx = mod.indexOf(startMarker);
+    assert(startIdx !== -1, `Marker not found: ${startMarker}`);
+    const tail = mod.slice(startIdx);
+    const m = tail.match(endMarker);
+    assert(m !== null && m.index !== undefined, `End marker not matched after: ${startMarker}`);
+    return tail.slice(0, m!.index! + m![0].length);
+  };
+
+  const depositBlock = sliceBetween('async deposit(', /Failed to deposit into vault/);
+  assert(
+    /ensureAllowance\([^)]*\b(baseToken|quoteToken)\b/.test(depositBlock),
+    'WheelVaultModule.deposit() must ensureAllowance for base/quote against the vault before pulling',
+  );
+
+  const depositSingleBlock = sliceBetween('async depositSingle(', /Failed to depositSingle via router/);
+  assert(
+    /ensureAllowance\([\s\S]*WHEEL_VAULT_CONFIG\.contracts\.router/.test(depositSingleBlock),
+    'WheelVaultModule.depositSingle() must ensureAllowance for depositToken against the Router',
+  );
+
+  const depositDualBlock = sliceBetween('async depositDual(', /Failed to depositDual via router/);
+  assert(
+    /ensureAllowance\([\s\S]*WHEEL_VAULT_CONFIG\.contracts\.router/.test(depositDualBlock),
+    'WheelVaultModule.depositDual() must ensureAllowance for base/quote against the Router',
+  );
+
+  const bucketBlock = sliceBetween('async depositToBucket(', /Failed to depositToBucket/);
+  assert(
+    /seriesToken/.test(bucketBlock) && /ensureAllowance/.test(bucketBlock),
+    'WheelVaultModule.depositToBucket() must ensureAllowance for the seriesToken against the Markets contract',
+  );
+});
+
+test('INV-16 (TNU-AUDIT-0005): WheelVault marketFill must validate swap.router/approvalTarget unconditionally', () => {
+  const mod = loadSrc('src/modules/wheelVault.ts');
+  // Extract the marketFill function body.
+  const startIdx = mod.indexOf('async marketFill(');
+  assert(startIdx !== -1, 'marketFill must exist');
+  const body = mod.slice(startIdx, startIdx + 2000);
+
+  // The validation calls MUST be present, and MUST NOT be gated behind a
+  // truthy useSwap check (we explicitly reject the old `if (params.useSwap)`
+  // gating pattern).
+  assert(
+    /validateConfiguredSwapRouter\(params\.swap\.router/.test(body),
+    'marketFill must validate params.swap.router',
+  );
+  assert(
+    /validateConfiguredSwapRouter\(params\.swap\.approvalTarget/.test(body),
+    'marketFill must validate params.swap.approvalTarget',
+  );
+  assert(
+    !/if\s*\(\s*params\.useSwap\s*\)\s*\{\s*\n\s*this\.validateConfiguredSwapRouter\(params\.swap\.router/.test(body),
+    'marketFill MUST NOT gate swap.router validation behind useSwap',
+  );
+});
+
+test('INV-17 (TNU-AUDIT-0006): LoanModule.splitOption + LOAN_OPTION_ABI getSplitFee', () => {
+  const abi = loadSrc('src/abis/loan.ts');
+  assert(/function getSplitFee\(\) view returns \(uint256\)/.test(abi),
+    'LOAN_OPTION_ABI must declare getSplitFee()');
+  assert(/function split\(uint256 splitCollateralAmount\) payable/.test(abi),
+    'LOAN_OPTION_ABI split() must be payable');
+
+  const mod = loadSrc('src/modules/loan.ts');
+  assert(/async splitOption\b/.test(mod), 'LoanModule must expose splitOption()');
+  // splitOption must read getSplitFee BEFORE the split call and forward it as value
+  const startIdx = mod.indexOf('async splitOption(');
+  assert(startIdx !== -1, 'splitOption must be present');
+  const body = mod.slice(startIdx, startIdx + 1500);
+  assert(/getSplitFee\(\)/.test(body), 'splitOption must read getSplitFee()');
+  assert(/value:\s*splitFee/.test(body), 'splitOption must forward splitFee as msg.value');
+  // Ordering: read before send
+  const readIdx = body.indexOf('getSplitFee');
+  const sendIdx = body.indexOf('value: splitFee');
+  assert(readIdx !== -1 && sendIdx !== -1 && readIdx < sendIdx,
+    'splitOption must read getSplitFee() BEFORE forwarding as msg.value');
+});
+
+test('INV-18 (TNU-AUDIT-0007): LoanModule.reclaimCollateral + ABI', () => {
+  const abi = loadSrc('src/abis/loan.ts');
+  assert(/function reclaimCollateral\(address ownedOption\) payable/.test(abi),
+    'LOAN_OPTION_ABI must declare reclaimCollateral(address) payable');
+  assert(/function getReclaimFee\(address ownedOption\) view returns \(uint256\)/.test(abi),
+    'LOAN_OPTION_ABI must declare getReclaimFee(address)');
+
+  const mod = loadSrc('src/modules/loan.ts');
+  assert(/async reclaimCollateral\b/.test(mod), 'LoanModule must expose reclaimCollateral()');
+  const startIdx = mod.indexOf('async reclaimCollateral(');
+  assert(startIdx !== -1, 'reclaimCollateral must be present');
+  const body = mod.slice(startIdx, startIdx + 1500);
+  assert(/getReclaimFee\(ownedOption\)/.test(body),
+    'reclaimCollateral must read getReclaimFee(ownedOption)');
+  assert(/value:\s*reclaimFee/.test(body),
+    'reclaimCollateral must forward reclaimFee as msg.value');
+  const readIdx = body.indexOf('getReclaimFee');
+  const sendIdx = body.indexOf('value: reclaimFee');
+  assert(readIdx !== -1 && sendIdx !== -1 && readIdx < sendIdx,
+    'reclaimCollateral must read getReclaimFee(ownedOption) BEFORE forwarding as msg.value');
+});
+
+test('INV-19 (TNU-AUDIT-0009): WheelVault deposit/withdraw log parsers filter by vault address', () => {
+  const mod = loadSrc('src/modules/wheelVault.ts');
+
+  // The exact guard we want: skip logs whose emitter is NOT the vault.
+  const guardPattern = /if\s*\(\s*log\.address\.toLowerCase\(\)\s*!==\s*vaultAddrLower\s*\)\s*continue/;
+
+  // deposit() log-parsing block must include the guard.
+  const depositIdx = mod.indexOf("if (parsed?.name === 'Deposit')");
+  assert(depositIdx !== -1, 'deposit() must parse a Deposit event');
+  const depositBlock = mod.slice(Math.max(0, depositIdx - 400), depositIdx);
+  assert(guardPattern.test(depositBlock),
+    'deposit() event loop must skip non-vault logs via log.address === vault check');
+
+  // withdraw() log-parsing block must include the guard.
+  const withdrawIdx = mod.indexOf("if (parsed?.name === 'Withdraw')");
+  assert(withdrawIdx !== -1, 'withdraw() must parse a Withdraw event');
+  const withdrawBlock = mod.slice(Math.max(0, withdrawIdx - 400), withdrawIdx);
+  assert(guardPattern.test(withdrawBlock),
+    'withdraw() event loop must skip non-vault logs via log.address === vault check');
+});
+
+// ---------------------------------------------------------------------------
 // Run all tests and print report
 // ---------------------------------------------------------------------------
 

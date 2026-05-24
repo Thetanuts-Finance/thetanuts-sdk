@@ -124,6 +124,12 @@ interface OptionContract {
     (aggregator: string, swapData: string, overrides: { gasLimit: bigint }): Promise<ContractTransactionResponse>;
     estimateGas(aggregator: string, swapData: string): Promise<bigint>;
   };
+  split: {
+    (splitCollateralAmount: bigint, overrides: { value: bigint; gasLimit?: bigint }): Promise<ContractTransactionResponse>;
+  };
+  reclaimCollateral: {
+    (ownedOption: string, overrides: { value: bigint; gasLimit?: bigint }): Promise<ContractTransactionResponse>;
+  };
   buyer(): Promise<string>;
   seller(): Promise<string>;
   collateralToken(): Promise<string>;
@@ -135,6 +141,8 @@ interface OptionContract {
   isITM(price: bigint): Promise<boolean>;
   calculateDeliveryAmount(): Promise<bigint>;
   EXERCISE_WINDOW(): Promise<bigint>;
+  getSplitFee(): Promise<bigint>;
+  getReclaimFee(ownedOption: string): Promise<bigint>;
 }
 
 interface WETHContract {
@@ -483,6 +491,100 @@ export class LoanModule {
       return receipt;
     } catch (error) {
       this.client.logger.error('Failed to swap and exercise', { error, optionAddress });
+      throw mapContractError(error);
+    }
+  }
+
+  /**
+   * Split a loan option's collateral into a new child option.
+   *
+   * r12 split() is payable: this wrapper reads `getSplitFee()` immediately
+   * before the call and forwards the result as `msg.value`. Mirrors
+   * `OptionModule.split()` and `RangerModule.split()`.
+   *
+   * @param optionAddress - The loan option contract address
+   * @param splitCollateralAmount - Amount of collateral to split off
+   * @returns Transaction receipt
+   * @throws {SignerRequiredError} If no signer
+   * @throws {Error} If splitCollateralAmount is not positive
+   */
+  async splitOption(
+    optionAddress: string,
+    splitCollateralAmount: bigint,
+  ): Promise<TransactionReceipt> {
+    validateAddress(optionAddress, 'optionAddress');
+    if (splitCollateralAmount <= 0n) {
+      throw createError('INVALID_PARAMS', 'Split collateral amount must be positive');
+    }
+
+    try {
+      const readContract = this.getOptionReadContract(optionAddress);
+      const splitFee = await readContract.getSplitFee();
+
+      const contract = this.getOptionWriteContract(optionAddress);
+      const tx = await contract.split(splitCollateralAmount, { value: splitFee });
+      const receipt = await tx.wait();
+
+      if (!receipt) {
+        throw createError('CONTRACT_REVERT', 'No receipt returned from split');
+      }
+
+      this.client.logger.info('Loan option split', {
+        txHash: receipt.hash,
+        optionAddress,
+        splitFee: splitFee.toString(),
+        splitCollateralAmount: splitCollateralAmount.toString(),
+      });
+      return receipt;
+    } catch (error) {
+      this.client.logger.error('Failed to split loan option', { error, optionAddress });
+      throw mapContractError(error);
+    }
+  }
+
+  /**
+   * Reclaim collateral from a loan option after settlement.
+   *
+   * Note: `ownedOption` is the option being reclaimed FROM (the position the
+   * caller owns), not a transfer destination. Reclaimed collateral always goes
+   * to msg.sender. r12 reclaimCollateral() is payable — this wrapper reads
+   * `getReclaimFee(ownedOption)` and forwards it as `msg.value`. Mirrors
+   * `RangerModule.reclaimCollateral()`.
+   *
+   * @param optionAddress - The loan option contract to call (the routing contract).
+   * @param ownedOption - The option whose collateral the caller is reclaiming.
+   * @returns Transaction receipt
+   * @throws {SignerRequiredError} If no signer
+   */
+  async reclaimCollateral(
+    optionAddress: string,
+    ownedOption: string,
+  ): Promise<TransactionReceipt> {
+    validateAddress(optionAddress, 'optionAddress');
+    validateAddress(ownedOption, 'ownedOption');
+
+    try {
+      this.client.requireSigner();
+      const readContract = this.getOptionReadContract(optionAddress);
+      const reclaimFee = await readContract.getReclaimFee(ownedOption);
+
+      const contract = this.getOptionWriteContract(optionAddress);
+      const tx = await contract.reclaimCollateral(ownedOption, { value: reclaimFee });
+      const receipt = await tx.wait();
+
+      if (!receipt) {
+        throw createError('CONTRACT_REVERT', 'No receipt returned from reclaimCollateral');
+      }
+
+      this.client.logger.info('Loan option collateral reclaimed', {
+        txHash: receipt.hash,
+        optionAddress,
+        ownedOption,
+        reclaimFee: reclaimFee.toString(),
+      });
+      return receipt;
+    } catch (error) {
+      this.client.logger.error('Failed to reclaim collateral', { error, optionAddress, ownedOption });
       throw mapContractError(error);
     }
   }

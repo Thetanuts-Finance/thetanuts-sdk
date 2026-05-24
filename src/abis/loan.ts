@@ -38,6 +38,10 @@ export const LOAN_OPTION_ABI = [
   'function swapAndExercise(address aggregator, bytes swapData)',
   'function close()',
   'function split(uint256 splitCollateralAmount) payable returns (address)',
+  // r12 split() / reclaimCollateral() are payable — read these fees and forward as msg.value.
+  'function getSplitFee() view returns (uint256)',
+  'function reclaimCollateral(address ownedOption) payable',
+  'function getReclaimFee(address ownedOption) view returns (uint256)',
   'function transfer(bool isBuyer, address target)',
   'function approveTransfer(bool isBuyer, address target, bool isApproved)',
   'function buyer() view returns (address)',
