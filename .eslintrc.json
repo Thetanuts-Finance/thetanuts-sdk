@@ -32,5 +32,34 @@
     "prefer-const": "error",
     "no-var": "error"
   },
+  "overrides": [
+    {
+      "files": ["src/modules/loan.ts", "src/modules/collar.ts"],
+      "plugins": ["jsdoc"],
+      "rules": {
+        "jsdoc/require-jsdoc": [
+          "error",
+          {
+            "publicOnly": true,
+            "contexts": [
+              "MethodDefinition[kind!='constructor']:not([accessibility='private']):not([accessibility='protected'])"
+            ]
+          }
+        ],
+        "jsdoc/require-param": [
+          "error",
+          { "checkDestructured": false, "exemptedBy": ["internal", "private"] }
+        ],
+        "jsdoc/require-returns": [
+          "error",
+          { "exemptedBy": ["internal", "private"] }
+        ],
+        "jsdoc/require-example": [
+          "error",
+          { "exemptedBy": ["internal", "private", "deprecated"] }
+        ]
+      }
+    }
+  ],
   "ignorePatterns": ["dist", "node_modules", "*.js", "*.mjs", "*.cjs", "test"]
 }

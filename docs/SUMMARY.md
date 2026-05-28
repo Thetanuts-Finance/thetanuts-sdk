@@ -37,6 +37,13 @@
 * [Pricing & Calculation](loan/pricing.md)
 * [Collar Loans](loan/collar.md)
 
+## Zendfi
+
+* [Getting Started](zendfi/getting-started.md)
+* [API Reference](zendfi/api-reference.md)
+* [Errors](zendfi/errors.md)
+* [Pricing-Only Mode](zendfi/pricing-only-mode.md)
+
 ## Wheel Vault (Ethereum)
 
 * [Overview](wheel-vault/overview.md)
