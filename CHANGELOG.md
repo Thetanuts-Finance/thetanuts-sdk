@@ -2,6 +2,51 @@
 
 All notable changes to `@thetanuts-finance/thetanuts-client` are documented here.
 
+## 0.2.5 — 2026-06-02
+
+### Fixed
+
+- **Loan indexer URL repointed to the r12 worker.** `src/chains/loan.ts`
+  hard-coded the legacy v1 indexer URL, which only contains pre-r12 loans
+  created via the retired LoanCoordinator. Loan contract addresses were
+  already on r12, so consumers were reading r12 contract state but querying
+  the wrong indexer — they would see archived loans and miss every r12
+  RFQ / offer / loan. The v1 worker stays alive at its own URL/KV for
+  archaeology of historical loans.
+- **r12 indexer backfill in `LoanModule`.** The r12 indexer's `state.options`
+  entries omit `strike`, `expiryTimestamp`, `buyer`, and `seller`. Without a
+  backfill, `getLendingOpportunities()` rejected every r12 row (the
+  `expiryTimestamp <= now` filter tripped on zero) and `getUserLoans()`
+  returned rows with empty fields, leaving downstream UIs to render "—" for
+  strike, expiry, and lender. Both methods now run a private
+  `backfillFromOptionInfo()` pass that reads the missing fields from the
+  deployed option contract via `getOptionInfo()`, using `Promise.allSettled`
+  so a single RPC blip doesn't kill the batch. `LoanIndexerLoan` gains
+  optional `buyer` / `seller` fields documented as SDK-populated. Includes
+  the role-swap mapping (option.seller → loan.buyer = lender;
+  option.buyer → loan.seller = borrower).
+
+### Added
+
+- **Public type surface for `client.collar`.** Re-exported 9 collar types
+  from the barrel (`CollarUnderlying`, `CollarEstimate`, `CollarCapStrike`,
+  `CollarCapStrikeGroup`, `CollarStrikeFilter`, `CollarLoanRequest`,
+  `CollarLoanResult`, `CollarSettings`, `CollarAssetConfig`). The 0.2.4
+  release shipped `CollarModule` files but didn't export them or any of
+  their types — meaning consumers couldn't reach the module from the
+  package's public API at all. TypeScript consumers can now type variables
+  and parameters against the collar surface without importing from deep
+  `dist/` paths.
+
+### Docs
+
+- **Chain config + ABI READMEs refreshed to r12.** `src/chains/README.md`
+  and `src/abis/README.md` still documented the pre-r12 OptionBook
+  (`0xd58b81…69A1`) and OptionFactory (`0x1aDcD3…86e5`) in their example
+  blocks. The runtime config in `src/chains/index.ts` was already on r12;
+  these were docs-only inconsistencies that would have misled anyone
+  copy-pasting from the README.
+
 ## 0.2.4 — 2026-05-24
 
 ### Added

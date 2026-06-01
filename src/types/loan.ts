@@ -265,6 +265,20 @@ export interface LoanIndexerLoan {
   status: string;
   /** Deployed option contract address (if settled) */
   optionAddress?: string;
+  /**
+   * Borrower role on the underlying option (= option.seller after role-swap).
+   * Populated by the SDK from the on-chain option contract when the indexer
+   * omits it. The r12 indexer's `options` entries drop buyer/seller, so the
+   * loan module backfills them via `getOptionInfo()` for active loans with
+   * an `optionAddress`.
+   */
+  buyer?: string;
+  /**
+   * Lender role on the underlying option (= option.buyer after role-swap).
+   * Populated by the SDK from the on-chain option contract when the indexer
+   * omits it. See `buyer` above for the r12 backfill rationale.
+   */
+  seller?: string;
 }
 
 /** Enriched lending opportunity with computed values */

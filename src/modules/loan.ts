@@ -617,6 +617,71 @@ export class LoanModule {
   }
 
   /**
+   * Backfill strike/expiry/buyer/seller from the on-chain option contract for
+   * any active loan where the indexer omitted them. The r12 indexer's
+   * `options` entries drop those fields, so without this pass downstream
+   * filters in `getLendingOpportunities` (expiry check, strike math) reject
+   * every r12 row and consumers of `getUserLoans` see zero/empty values.
+   *
+   * Mutates the loan objects in place and returns the same array.
+   */
+  private async backfillFromOptionInfo(loans: LoanIndexerLoan[]): Promise<LoanIndexerLoan[]> {
+    const needsBackfill = loans.filter(
+      (loan) =>
+        loan.optionAddress &&
+        loan.status !== 'cancelled' &&
+        (
+          !loan.strike || loan.strike === '0' || loan.strike === '' ||
+          !loan.expiryTimestamp || loan.expiryTimestamp <= 0 ||
+          !loan.buyer
+        ),
+    );
+    if (needsBackfill.length === 0) return loans;
+
+    const pairs = needsBackfill.map((loan) => ({
+      loan,
+      promise: this.getOptionInfo(loan.optionAddress!),
+    }));
+    const results = await Promise.allSettled(pairs.map((p) => p.promise));
+
+    results.forEach((settled, i) => {
+      const pair = pairs[i];
+      if (!pair) return;
+      const { loan } = pair;
+      if (settled.status !== 'fulfilled') {
+        const reason = settled.reason instanceof Error
+          ? settled.reason.message
+          : String(settled.reason);
+        this.client.logger.warn('r12 backfill: getOptionInfo failed', {
+          quotationId: loan.quotationId,
+          optionAddress: loan.optionAddress,
+          reason,
+        });
+        return;
+      }
+      const info = settled.value;
+      // `info.strikes` come back as decimal numbers already divided by 1e8
+      // (see getOptionInfo); convert back to the indexer's 8-decimal string
+      // shape so downstream BigInt(loan.strike) math works unchanged.
+      const firstStrike = info.strikes && info.strikes.length > 0 ? info.strikes[0] : undefined;
+      const strikeNum = firstStrike != null ? Number(firstStrike) : 0;
+      if (strikeNum > 0 && (!loan.strike || loan.strike === '0' || loan.strike === '')) {
+        loan.strike = Math.round(strikeNum * 1e8).toString();
+      }
+      if (info.expiryTimestamp > 0 && (!loan.expiryTimestamp || loan.expiryTimestamp <= 0)) {
+        loan.expiryTimestamp = info.expiryTimestamp;
+      }
+      // Role-swap: the option contract's seller wrote the call (= lender who
+      // fronted USDC), and the buyer holds the long call (= borrower who put
+      // up collateral). Loan-side terminology inverts this.
+      if (info.seller && !loan.buyer) loan.buyer = info.seller;
+      if (info.buyer && !loan.seller) loan.seller = info.buyer;
+    });
+
+    return loans;
+  }
+
+  /**
    * Fetch available lending opportunities (unfilled limit orders) from the Loan indexer.
    *
    * @param options - Optional filters
@@ -641,9 +706,14 @@ export class LoanModule {
         throw createError('HTTP_ERROR', `Loan indexer error: ${response.status}`);
       }
       const data = await response.json() as { loans?: Record<string, LoanIndexerLoan> | LoanIndexerLoan[] };
-      const loans: LoanIndexerLoan[] = Array.isArray(data.loans)
+      const rawLoans: LoanIndexerLoan[] = Array.isArray(data.loans)
         ? data.loans
         : data.loans ? Object.values(data.loans) : [];
+
+      // r12 indexer drops strike/expiry from active loan rows. Backfill
+      // before the filter loop below, otherwise the `expiryTimestamp <= now`
+      // check rejects every r12 row.
+      const loans = await this.backfillFromOptionInfo(rawLoans);
 
       const now = Math.floor(Date.now() / 1000);
       const results: LoanLendingOpportunity[] = [];
@@ -776,13 +846,18 @@ export class LoanModule {
         throw createError('HTTP_ERROR', `Loan indexer error: ${response.status}`);
       }
       const data = await response.json() as { loans?: Record<string, LoanIndexerLoan> | LoanIndexerLoan[] };
-      const loans: LoanIndexerLoan[] = Array.isArray(data.loans)
+      const rawLoans: LoanIndexerLoan[] = Array.isArray(data.loans)
         ? data.loans
         : data.loans ? Object.values(data.loans) : [];
 
-      return loans.filter(
+      const userLoans = rawLoans.filter(
         (loan) => loan.requester.toLowerCase() === address.toLowerCase(),
       );
+
+      // r12 indexer omits strike/expiry/buyer/seller from active rows;
+      // backfill from the option contract before returning so consumers
+      // don't see "—" in UI fields.
+      return await this.backfillFromOptionInfo(userLoans);
     } catch (error) {
       this.client.logger.error('Failed to get user loans', { error, address });
       if (error instanceof Error && 'code' in error) throw error;

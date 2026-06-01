@@ -58,7 +58,7 @@ interface ChainConfig {
 }
 ```
 
-## Base Mainnet Configuration (8453_v6)
+## Base Mainnet Configuration (8453_r12)
 
 ```typescript
 const baseMainnet: ChainConfig = {
@@ -66,20 +66,27 @@ const baseMainnet: ChainConfig = {
   name: 'Base',
 
   contracts: {
-    optionBook: '0xd58b814C7Ce700f251722b5555e25aE0fa8169A1',
-    optionFactory: '0x1aDcD391CF15Fb699Ed29B1D394F4A64106886e5',
+    // Base_r12 deployment (deployed 2026-05-05, block 45601440)
+    optionBook: '0x1bDff855d6811728acaDC00989e79143a2bdfDed',
+    optionFactory: '0x8118daD971dEbffB49B9280047659174128A8B94',
   },
 
   implementations: {
-    PUT: '0xF480F636301d50Ed570D026254dC5728b746A90F',
-    INVERSE_CALL: '0x3CeB524cBA83D2D4579F5a9F8C0D1f5701dd16FE',
-    CALL_SPREAD: '0x4D75654bC616F64F6010d512C3B277891FB52540',
-    PUT_SPREAD: '0xC9767F9a2f1eADC7Fdcb7f0057E829D9d760E086',
-    CALL_FLY: '0xD8EA785ab2A63a8a94C38f42932a54A3E45501c3',
-    PUT_FLY: '0x1fE24872Ab7c83BbA26Dc761ce2EA735c9b96175',
-    CALL_CONDOR: '0xbb5d2EB2D354D930899DaBad01e032C76CC3c28f',
-    PUT_CONDOR: '0xbdAcC00Dc3F6e1928D9380c17684344e947aa3Ec',
-    IRON_CONDOR: '0x494Cd61b866D076c45564e236D6Cb9e011a72978',
+    PUT: '0x7355EB92dfb0503DB558a70c10843618932ab290',
+    INVERSE_CALL: '0xE6c5756b0289e3f0994CB12eb8aB71Cd903Ed0Ea',
+    LINEAR_CALL: '0x051791df68223AE173Fade5217C48875e36eef61',
+    CALL_SPREAD: '0xfaeD63f7040E65b79cF0Ae29706fDc423eE249A9',
+    PUT_SPREAD: '0x02Fe0d9635e0139DBB3768a5d5Db404Fd84d9134',
+    INVERSE_CALL_SPREAD: '0x7Be48100b1B0349528A96D64953295Cd0Bbe4B70',
+    CALL_FLY: '0xa1d5f6b16A2e7f298F8d2cDF78F7779B4A20C4C2',
+    PUT_FLY: '0x4fd2C6D271cC6FF3EbD2027da9815a0608d03AA3',
+    CALL_CONDOR: '0x14476CF2ea9F7C448100F061670E390f17c78817',
+    PUT_CONDOR: '0xC742E422c7BB43A7FDe1CEF47997bC9D5b543cDD',
+    IRON_CONDOR: '0x9ebd7E23AfD52a48F557523019285EfEF2170D59',
+    RANGER: '0x9980ec85bc6fE07340adb36c76FA093bb6D4FcBc',
+    CALL_LOAN: '0x7c444A2375275DaB925b32493B64a407eE955DEd',
+    PHYSICAL_CALL: '0x8c56100caE246f7daa4BC1EC4d1477d71178c563',
+    PHYSICAL_PUT: '0x6aD53DD058bea004829cCf58a282C21a7Df02DcA',
   },
 
   tokens: {
@@ -100,11 +107,13 @@ const baseMainnet: ChainConfig = {
     },
   },
 
+  twapConsumer: '0xE909fb38767e0ac5F7a347DF9Dd4222217E10816',
+  deploymentBlock: 45601440,
   apiBaseUrl: 'https://round-snowflake-9c31.devops-118.workers.dev',
-  indexerApiUrl: 'https://optionbook-indexer.thetanuts.finance/api/v1',
+  indexerApiUrl: 'https://indexer.thetanuts.finance/api/v1/book',
   pricingApiUrl: 'https://pricing.thetanuts.finance',
   wsBaseUrl: 'wss://ws.thetanuts.finance/v4',
-  stateApiUrl: 'https://dry-cake-8c44.devops-118.workers.dev',
+  stateApiUrl: 'https://indexer.thetanuts.finance',
   defaultRpcUrls: ['https://mainnet.base.org', 'https://base.llamarpc.com'],
 };
 ```
@@ -120,7 +129,7 @@ import { getChainConfigById } from '@thetanuts-finance/thetanuts-client';
 
 const config = getChainConfigById(8453);
 console.log(config.name); // 'Base'
-console.log(config.contracts.optionBook); // '0xd58b814...'
+console.log(config.contracts.optionBook); // '0x1bDff855...'
 ```
 
 ### getTokenConfigById

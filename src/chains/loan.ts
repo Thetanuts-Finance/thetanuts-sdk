@@ -14,8 +14,8 @@ export const LOAN_CONFIG = {
     loanHandler: '0x7c444A2375275DaB925b32493B64a407eE955DEd',
   },
 
-  /** Loan loan indexer API base URL */
-  indexerUrl: 'https://zendfi-loan-indexer-v1.devops-118.workers.dev',
+  /** Loan loan indexer API base URL (r12 worker; v1 worker is archive-only) */
+  indexerUrl: 'https://zendfi-loan-indexer-r12.devops-118.workers.dev',
 
   /** Deribit-style pricing API URL */
   pricingUrl: 'https://pricing.thetanuts.finance/all',
