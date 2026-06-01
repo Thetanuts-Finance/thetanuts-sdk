@@ -94,6 +94,20 @@ export { UtilsModule } from './modules/utils.js';
 export { RFQKeyManagerModule } from './modules/rfqKeyManager.js';
 export { MMPricingModule, parseTicker, buildTicker, applyFeeAdjustment, calculateCollateralCost } from './modules/mmPricing.js';
 export { LoanModule } from './modules/loan.js';
+export { CollarModule } from './modules/collar.js';
+export type {
+  CollarUnderlying,
+  CollarEstimate,
+  CollarCapStrike,
+  CollarCapStrikeGroup,
+  CollarStrikeFilter,
+  CollarLoanRequest,
+  CollarLoanResult,
+} from './modules/collar.js';
+export type {
+  CollarSettings,
+  CollarAssetConfig,
+} from './chains/collar.js';
 export { WheelVaultModule } from './modules/wheelVault.js';
 export { StrategyVaultModule } from './modules/strategyVault.js';
 
