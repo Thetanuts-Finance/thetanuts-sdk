@@ -204,12 +204,15 @@ const strikes = await optionContract.getStrikes();
 const expiry = await optionContract.expiryTimestamp();
 ```
 
-## Contract Addresses (Base Mainnet - 8453_v6)
+## Contract Addresses (Base Mainnet - 8453_r12)
 
 | Contract | Address |
 |----------|---------|
-| OptionBook | `0xd58b814C7Ce700f251722b5555e25aE0fa8169A1` |
-| OptionFactory | `0x1aDcD391CF15Fb699Ed29B1D394F4A64106886e5` |
+| OptionBook | `0x1bDff855d6811728acaDC00989e79143a2bdfDed` |
+| OptionFactory | `0x8118daD971dEbffB49B9280047659174128A8B94` |
+| TWAP Consumer | `0xE909fb38767e0ac5F7a347DF9Dd4222217E10816` |
+| LoanCoordinator | `0x9FB75b24d9d6f7c29D6BdE2870697A4FE0395994` |
+| LoanHandler (PSCO) | `0x7c444A2375275DaB925b32493B64a407eE955DEd` |
 | USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 | WETH | `0x4200000000000000000000000000000000000006` |
 | cbBTC | `0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf` |
