@@ -606,6 +606,57 @@ export class APIModule {
   }
 
   /**
+   * Get the requester's ECDH public key for a quotation, as stored on
+   * `StateRfq.requesterPublicKey`. This is what an offeror needs to encrypt
+   * a sealed-bid offer to the requester (via `client.rfqKeys.encryptOffer`).
+   *
+   * Source of truth: the `QuotationRequested` event's `requesterPublicKey`
+   * arg, hydrated by the State API indexer.
+   *
+   * @param quotationId - Quotation ID (decimal string)
+   * @returns Compressed public key as hex string (e.g. `0x02abc...`)
+   * @throws if the quotation is missing or has no recorded public key
+   */
+  async getRequesterPublicKey(quotationId: string): Promise<string> {
+    const rfq = await this.getRfq(quotationId);
+    if (!rfq.requesterPublicKey) {
+      throw mapHttpError(
+        Object.assign(new Error(`RFQ ${quotationId} has no requesterPublicKey`), {
+          response: { status: 404 },
+          config: { url: `/api/v1/factory/rfqs/${quotationId}` },
+        })
+      );
+    }
+    return rfq.requesterPublicKey;
+  }
+
+  /**
+   * Get a specific offeror's offer on a quotation, including the encrypted
+   * payload (`signedOfferForRequester`) and the offeror's ephemeral
+   * `signingKey`. The requester uses these to decrypt and reconstruct
+   * `(offerAmount, nonce)` for `settleQuotationEarly`.
+   *
+   * @param quotationId - Quotation ID (decimal string)
+   * @param offeror     - Offeror's wallet address
+   * @returns The matching `StateOffer`
+   * @throws if the quotation is missing or has no offer from this offeror
+   */
+  async getOffer(quotationId: string, offeror: string): Promise<StateOffer> {
+    validateAddress(offeror, 'offeror');
+    const rfq = await this.getRfq(quotationId);
+    const offer = rfq.offers?.[offeror.toLowerCase()];
+    if (!offer) {
+      throw mapHttpError(
+        Object.assign(new Error(`No offer from ${offeror} on RFQ ${quotationId}`), {
+          response: { status: 404 },
+          config: { url: `/api/v1/factory/rfqs/${quotationId}` },
+        })
+      );
+    }
+    return offer;
+  }
+
+  /**
    * Get all RFQs for a user address from the State API
    *
    * @param address - User address

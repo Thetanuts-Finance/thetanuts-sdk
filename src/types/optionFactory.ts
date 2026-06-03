@@ -143,6 +143,35 @@ export interface RevealOfferParams {
 }
 
 /**
+ * EIP-712 typed-data envelope an offeror signs when calling
+ * `makeOfferForQuotation`. Built by `optionFactory.buildOfferTypedData()`
+ * and consumed by any signer that supports `signTypedData_v4` (Base MCP's
+ * `sign` tool with `type: "typed_data"`, viem `signTypedData`, ethers
+ * `signTypedData`, etc.).
+ *
+ * The struct definition is verified at build time against the live
+ * `OFFER_TYPEHASH()` on the OptionFactory — see `buildOfferTypedData`.
+ */
+export interface OfferTypedData {
+  domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: string;
+  };
+  types: {
+    Offer: Array<{ name: string; type: string }>;
+  };
+  primaryType: 'Offer';
+  message: {
+    quotationId: string;
+    offerAmount: string;
+    offeror: string;
+    nonce: string;
+  };
+}
+
+/**
  * Referral parameters returned by returnReferralParameters()
  */
 export interface ReferralParameters {
