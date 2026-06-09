@@ -32,7 +32,7 @@ import type { CallStaticResult } from '../types/callStatic.js';
 import type { ImplementationAddresses } from '../chains/index.js';
 import { createError, mapContractError } from '../utils/errors.js';
 import { NotFoundError } from '../types/errors.js';
-import { validateAddress, validateHexBytes } from '../utils/validation.js';
+import { validateAddress, validateHexBytes, validateHexString } from '../utils/validation.js';
 
 /**
  * Contract-level interface matching the OptionFactory ABI exactly.
@@ -315,13 +315,7 @@ export class OptionFactoryModule {
    * @returns Transaction receipt
    */
   async requestForQuotation(request: RFQRequest): Promise<TransactionReceipt> {
-    validateAddress(request.params.requester, 'requester');
-    validateAddress(request.params.collateral, 'collateral');
-    this.assertImplementationDeployed(request.params.implementation, 'requestForQuotation');
-
-    if (request.params.strikes.length === 0) {
-      throw createError('INVALID_PARAMS', 'At least one strike price is required');
-    }
+    this.validateRFQRequest(request, 'requestForQuotation');
 
     this.client.logger.debug('Creating RFQ', {
       requester: request.params.requester,
@@ -330,6 +324,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.requestForQuotation(
         request.params,
@@ -361,18 +356,13 @@ export class OptionFactoryModule {
    * @returns Transaction receipt
    */
   async makeOfferForQuotation(params: MakeOfferParams): Promise<TransactionReceipt> {
-    // Validate signingKey at the SDK boundary so callers get a clean
-    // INVALID_PARAMS error instead of a generic on-chain revert
-    // (TNU-AUDIT-0061; sibling `revealOffer` already validates `offeror`).
-    validateAddress(params.signingKey, 'signingKey');
-    // 65-byte vrs signature shape check — catches malformed signatures
-    // before paying gas for a guaranteed revert (TNU-AUDIT-0082).
-    validateHexBytes(params.signature, 65, 'signature');
+    this.validateMakeOfferParams(params);
     this.client.logger.debug('Making offer for quotation', {
       quotationId: params.quotationId.toString(),
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.makeOfferForQuotation(
         params.quotationId,
@@ -413,6 +403,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.revealOffer(
         params.quotationId,
@@ -448,6 +439,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.settleQuotation(quotationId);
       const receipt = await tx.wait();
@@ -485,6 +477,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.settleQuotationEarly(quotationId, offerAmount, nonce, offeror);
       const receipt = await tx.wait();
@@ -514,6 +507,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.cancelQuotation(quotationId);
       const receipt = await tx.wait();
@@ -543,6 +537,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.cancelOfferForQuotation(quotationId);
       const receipt = await tx.wait();
@@ -966,6 +961,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.registerReferral(params);
       const receipt = await tx.wait();
@@ -1019,6 +1015,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const tx = await contract.swapAndCall(
         params.swapRouter,
@@ -1107,13 +1104,7 @@ export class OptionFactoryModule {
    * ```
    */
   encodeRequestForQuotation(request: RFQRequest): { to: string; data: string } {
-    validateAddress(request.params.requester, 'requester');
-    validateAddress(request.params.collateral, 'collateral');
-    this.assertImplementationDeployed(request.params.implementation, 'encodeRequestForQuotation');
-
-    if (request.params.strikes.length === 0) {
-      throw createError('INVALID_PARAMS', 'At least one strike price is required');
-    }
+    this.validateRFQRequest(request, 'encodeRequestForQuotation');
 
     const iface = new Interface(OPTION_FACTORY_ABI);
 
@@ -1157,6 +1148,7 @@ export class OptionFactoryModule {
    * @returns Object with `to` (contract address) and `data` (encoded calldata)
    */
   encodeMakeOfferForQuotation(params: MakeOfferParams): { to: string; data: string } {
+    this.validateMakeOfferParams(params);
     const iface = new Interface(OPTION_FACTORY_ABI);
     const data = iface.encodeFunctionData('makeOfferForQuotation', [
       params.quotationId,
@@ -1379,6 +1371,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const signer = this.client.requireSigner();
       const contract = new Contract(this.contractAddress, OPTION_FACTORY_ABI, signer);
 
@@ -1427,11 +1420,13 @@ export class OptionFactoryModule {
    * @returns CallStaticResult indicating if the transaction would succeed
    */
   async callStaticMakeOffer(params: MakeOfferParams): Promise<CallStaticResult<void>> {
+    this.validateMakeOfferParams(params);
     this.client.logger.debug('Simulating makeOffer (callStatic)', {
       quotationId: params.quotationId.toString(),
     });
 
     try {
+      await this.client.assertNetwork();
       const signer = this.client.requireSigner();
       const contract = new Contract(this.contractAddress, OPTION_FACTORY_ABI, signer);
 
@@ -1479,6 +1474,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const signer = this.client.requireSigner();
       const contract = new Contract(this.contractAddress, OPTION_FACTORY_ABI, signer);
 
@@ -1525,6 +1521,7 @@ export class OptionFactoryModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const signer = this.client.requireSigner();
       const contract = new Contract(this.contractAddress, OPTION_FACTORY_ABI, signer);
 
@@ -2812,5 +2809,47 @@ export class OptionFactoryModule {
       reservePrice,
       requesterPublicKey: params.requesterPublicKey,
     };
+  }
+
+  private validateMakeOfferParams(params: MakeOfferParams): void {
+    if (!this.client.rfqKeys.isValidPublicKey(params.signingKey)) {
+      throw createError('INVALID_PARAMS', 'signingKey must be a compressed ECDH public key');
+    }
+    validateHexBytes(params.signature, 65, 'signature');
+    validateHexString(params.encryptedOffer, 'encryptedOffer');
+  }
+
+  private validateRFQRequest(request: RFQRequest, context: string): void {
+    validateAddress(request.params.requester, 'requester');
+    validateAddress(request.params.existingOptionAddress, 'existingOptionAddress');
+    validateAddress(request.params.collateral, 'collateral');
+    validateAddress(request.params.collateralPriceFeed, 'collateralPriceFeed');
+    this.assertImplementationDeployed(request.params.implementation, context);
+    validateHexString(request.params.extraOptionData, 'extraOptionData');
+
+    if (!this.client.rfqKeys.isValidPublicKey(request.requesterPublicKey)) {
+      throw createError('INVALID_PARAMS', 'requesterPublicKey must be a compressed ECDH public key');
+    }
+    if (request.params.strikes.length === 0) {
+      throw createError('INVALID_PARAMS', 'At least one strike price is required');
+    }
+    if (request.params.strikes.some((strike) => strike <= 0n)) {
+      throw createError('INVALID_PARAMS', 'All strike prices must be positive');
+    }
+    if (request.params.numContracts <= 0n) {
+      throw createError('INVALID_PARAMS', 'numContracts must be positive');
+    }
+    if (request.params.collateralAmount !== 0n) {
+      throw createError('INVALID_PARAMS', 'collateralAmount must be 0; collateral is pulled by the contract');
+    }
+    if (request.params.requesterDeposit !== 0n) {
+      throw createError('INVALID_PARAMS', 'requesterDeposit must be 0');
+    }
+    if (request.params.offerEndTimestamp <= BigInt(Math.floor(Date.now() / 1000))) {
+      throw createError('INVALID_PARAMS', 'offerEndTimestamp must be in the future');
+    }
+    if (request.params.expiryTimestamp <= request.params.offerEndTimestamp) {
+      throw createError('INVALID_PARAMS', 'expiryTimestamp must be after offerEndTimestamp');
+    }
   }
 }

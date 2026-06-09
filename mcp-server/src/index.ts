@@ -2,8 +2,8 @@
 /**
  * Thetanuts MCP Server
  * 
- * Read-only MCP server for querying Thetanuts SDK data.
- * NO transaction execution, NO private key handling.
+ * MCP server for Thetanuts SDK reads and prepare-tool calldata builders.
+ * NO transaction broadcasting, NO wallet private key handling.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -13,6 +13,9 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from '@modelcontextprotocol/sdk/types.js';
+import { mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { ethers } from 'ethers';
 import {
   ThetanutsClient,
@@ -110,7 +113,7 @@ function sanitizeOnchainString(value: unknown, maxLen = 64): string {
   return cleaned.slice(0, maxLen);
 }
 
-// ============ Initialize Client (read-only, no signer) ============
+// ============ Initialize Client (Base, no wallet signer) ============
 let client: ThetanutsClient | null = null;
 let sharedProvider: ethers.JsonRpcProvider | null = null;
 
@@ -130,16 +133,16 @@ function getClient(): ThetanutsClient {
 }
 
 // ============ Prepare-layer singletons (lazy, only built on first write) ====
-// SQLite keystore stores per-wallet ECDH keys for RFQ flows. Lives next to
-// the MCP process; users on multiple machines get separate keystores by
-// design (the wallet must sign to access its own key anyway). Override
-// location via THETANUTS_KEYSTORE_PATH.
+// SQLite keystore stores per-wallet ECDH keys for RFQ flows. By default it
+// lives under the user's home directory, not the current repo/process cwd.
+// Override location via THETANUTS_KEYSTORE_PATH.
 let prepareKeystore: SqliteKeystore | null = null;
 let prepareAuthStore: AuthStore | null = null;
 
 function getPrepareLayer(): { keystore: SqliteKeystore; authStore: AuthStore } {
   if (!prepareKeystore) {
-    const dbPath = process.env.THETANUTS_KEYSTORE_PATH ?? './thetanuts-mcp-keystore.sqlite';
+    const dbPath = process.env.THETANUTS_KEYSTORE_PATH ?? join(homedir(), '.thetanuts', 'mcp-keystore.sqlite');
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     const masterKey = process.env.KEYSTORE_MASTER_KEY;
     if (!masterKey || !/^[0-9a-fA-F]{64}$/.test(masterKey)) {
       throw new Error(
@@ -1420,7 +1423,9 @@ const tools: Tool[] = [
   },
 
   // === WheelVault (Ethereum mainnet — chainId 1) ===
-  // NOTE: WheelVault is gated to chainId 1; tools will throw NETWORK_UNSUPPORTED unless THETANUTS_RPC_URL points at Ethereum mainnet.
+  // NOTE: this MCP process is pinned to Base chainId 8453, so WheelVault tools
+  // throw NETWORK_UNSUPPORTED here. Use the TypeScript SDK with chainId 1 for
+  // Ethereum WheelVault access.
   {
     name: 'get_wheel_vault_state',
     description: 'Get full state of a WheelVault series (balances, shares, last price, options outstanding). Ethereum-only.',
@@ -1814,10 +1819,10 @@ const tools: Tool[] = [
   },
 ];
 
-// All MCP tools are listed unchanged. The legacy `encode_*` gating from
-// TNU-AUDIT-0053 was retired in v1.0.0 — those tools were deleted entirely
-// (writes now go through `prepare_*` which return Base-MCP-ready envelopes
-// and require an auth-block for keystore-touching operations).
+// All MCP tools are listed. The legacy `encode_*` gating from TNU-AUDIT-0053
+// was retired in v1.0.0 — those tools were deleted entirely. Writes now go
+// through `prepare_*` which return Base-MCP-ready envelopes; funds-touching or
+// keystore-touching flows require an auth block.
 const publicTools: Tool[] = tools;
 
 // ============ Tool Handlers ============
@@ -3049,8 +3054,6 @@ const server = new Server(
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  // TNU-AUDIT-0053: encode_* tools are hidden from ListTools when the env
-  // flag THETANUTS_MCP_ENABLE_ENCODE=1 is not set.
   return { tools: publicTools };
 });
 

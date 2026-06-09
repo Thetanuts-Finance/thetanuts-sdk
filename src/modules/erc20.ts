@@ -98,6 +98,7 @@ export class ERC20Module {
     this.client.logger.debug('Approving token spend', { token, spender, amount: amount.toString() });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract(token);
 
       // Estimate gas and add 20% buffer for Account Abstraction wallets (e.g., Coinbase Smart Wallet)
@@ -353,6 +354,7 @@ export class ERC20Module {
     this.client.logger.debug('Transferring tokens', { token, to, amount: amount.toString() });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract(token);
 
       // Estimate gas and add 20% buffer for Account Abstraction wallets (e.g., Coinbase Smart Wallet)

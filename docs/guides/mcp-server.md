@@ -262,7 +262,7 @@ npm run dev
 |----------|---------|-------------|
 | `THETANUTS_RPC_URL` | `https://mainnet.base.org` | Base RPC endpoint; this MCP currently constructs the SDK with `chainId: 8453` |
 | `KEYSTORE_MASTER_KEY` | required for `prepare_*` RFQ write tools | 32-byte hex key used to encrypt the local RFQ ECDH keystore |
-| `THETANUTS_KEYSTORE_PATH` | `./thetanuts-mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
+| `THETANUTS_KEYSTORE_PATH` | `~/.thetanuts/mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
 
 ## Example Calls
 

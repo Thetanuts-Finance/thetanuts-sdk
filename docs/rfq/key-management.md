@@ -20,7 +20,7 @@ The SDK automatically selects a storage provider based on your runtime environme
 | Environment | Default Provider | Persistence | Location |
 |-------------|-----------------|-------------|----------|
 | **Node.js** | internal file storage | Persistent | `.thetanuts-keys/` directory (permissions 0o600) |
-| **Browser** | `LocalStorageProvider` | Persistent | Browser `localStorage` |
+| **Browser** | explicit provider required | App-defined | Use encrypted/passphrase-backed storage; plaintext `localStorage` is not the default |
 | **Testing** | `MemoryStorageProvider` | Lost on exit | In-memory only |
 
 ---
@@ -128,7 +128,7 @@ const client = new ThetanutsClient({
 > **CRITICAL**: Back up your RFQ private keys. If lost, you cannot decrypt offers made to your public key. There is no recovery mechanism.
 >
 > - **Node.js**: Keys are in `.thetanuts-keys/` with 0o600 permissions — back up this directory
-> - **Browser**: Keys are in `localStorage` — cleared if the user clears browser data
+> - **Browser**: pass an explicit `keyStorageProvider`; do not store production RFQ private keys in plaintext `localStorage`
 
 ### Export for Backup
 

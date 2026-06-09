@@ -305,7 +305,7 @@ Validation helpers (named exports, not on client.utils):
 
 ECDH keypair management for sealed-bid RFQs.
 
-Defaults to filesystem storage (`.thetanuts-keys/`) on Node.js, localStorage in browsers. Custom storage via `keyStorageProvider` option on the client.
+Defaults to filesystem storage (`.thetanuts-keys/`) on Node.js. Browser apps must pass `keyStorageProvider` explicitly; plaintext localStorage is not used by default. Custom storage via `keyStorageProvider` option on the client.
 
 - `generateKeyPair()` — sync
 - `getOrCreateKeyPair()` — load or generate-and-store

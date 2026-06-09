@@ -1,7 +1,7 @@
 {
   "name": "@thetanuts-finance/mcp",
   "version": "1.0.0",
-  "description": "MCP server for the Thetanuts SDK — reads, RFQ writes, auth-gated keystore. Single MCP for Base + Ethereum options trading via Claude / Cursor / ChatGPT.",
+  "description": "MCP server for the Thetanuts SDK — Base reads, RFQ transaction builders, and auth-gated encrypted keystore support.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -54,6 +54,13 @@
     "ethers": "^6.13.0",
     "viem": "^2.47.0",
     "zod": "^3.23.0"
+  },
+  "overrides": {
+    "@hono/node-server": "^1.19.13",
+    "ajv": "^8.18.0",
+    "fast-uri": "^3.1.2",
+    "hono": "^4.12.21",
+    "ws": "^8.20.1"
   },
   "optionalDependencies": {},
   "peerDependenciesMeta": {},

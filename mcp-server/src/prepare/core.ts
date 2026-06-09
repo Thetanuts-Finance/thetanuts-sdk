@@ -28,7 +28,7 @@ import { maybeApproveCall } from './allowance.js';
 import type { SqliteKeystore } from './keystore.js';
 import { AuthStore, authMessage } from './auth.js';
 import { verifyPersonalSign } from './viemClient.js';
-import { toClientError, safeError, type SafeError } from './errors.js';
+import { toClientError, safeError, sanitizeForLog, type SafeError } from './errors.js';
 
 // ============================================================================
 // Public result type
@@ -61,10 +61,19 @@ export interface AuthedDeps {
 // Auth verification (used by MCP transport; HTTP uses the existing middleware)
 // ============================================================================
 
+const ADDRESS = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
+const UINT_DECIMAL = z.string().regex(/^\d+$/).max(78);
+const MAX_UINT256 = (1n << 256n) - 1n;
+const HEX_STRING = z.string().regex(/^0x[0-9a-fA-F]+$/);
+const SIGNATURE_HEX = HEX_STRING.max(132);
+const ECDH_PUBLIC_KEY_HEX = z.string().regex(/^0x(?:02|03)[0-9a-fA-F]{64}$/);
+const ENCRYPTED_OFFER_HEX = HEX_STRING.max(4096);
+const MAX_UNIX_TIMESTAMP = 4_102_444_800; // 2100-01-01
+
 const AUTH_BLOCK_SHAPE = z.object({
-  wallet: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  wallet: ADDRESS,
   nonce: z.string().regex(/^0x[0-9a-fA-F]{32}$/),
-  sig: z.string().regex(/^0x[0-9a-fA-F]+$/),
+  sig: SIGNATURE_HEX,
 });
 
 /**
@@ -127,7 +136,7 @@ export async function verifyAuthBlock(
 // ============================================================================
 
 export const AuthChallengeArgs = z.object({
-  wallet: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  wallet: ADDRESS,
 });
 export type AuthChallengeArgs = z.infer<typeof AuthChallengeArgs>;
 
@@ -136,23 +145,32 @@ export function authChallengeCore(args: AuthChallengeArgs, authStore: AuthStore)
 }
 
 // ============================================================================
-// erc20: approve (open — stateless calldata)
+// erc20: approve (auth-gated, constrained calldata)
 // ============================================================================
 
 export const ApproveArgs = z.object({
   auth: z.object({
-    wallet: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+    wallet: ADDRESS,
     nonce: z.string().regex(/^0x[0-9a-fA-F]{32}$/),
-    sig: z.string().regex(/^0x[0-9a-fA-F]+$/),
-  }).optional(),
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  token: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  spender: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  amount: z.string().regex(/^\d+$/),
+    sig: SIGNATURE_HEX,
+  }),
+  from: ADDRESS,
+  token: ADDRESS,
+  spender: ADDRESS,
+  amount: UINT_DECIMAL,
 });
 export type ApproveArgs = z.infer<typeof ApproveArgs>;
 
 export function approveCore(args: ApproveArgs, deps: OpenDeps): PrepareCoreResult {
+  const amount = BigInt(args.amount);
+  if (amount <= 0n || amount >= MAX_UINT256) {
+    return {
+      ok: false,
+      status: 400,
+      error: safeError('INVALID_PARAMS', 'prepare_approve requires a positive finite allowance amount; max/infinite approvals are not supported'),
+    };
+  }
+
   const factory = deps.sharedClient.chainConfig.contracts.optionFactory?.toLowerCase();
   if (!factory || args.spender.toLowerCase() !== factory) {
     return {
@@ -176,7 +194,7 @@ export function approveCore(args: ApproveArgs, deps: OpenDeps): PrepareCoreResul
   const encoded = deps.sharedClient.erc20.encodeApprove(
     args.token,
     args.spender,
-    BigInt(args.amount),
+    amount,
   );
   return {
     ok: true,
@@ -208,6 +226,7 @@ const PRODUCT = z.enum([
 type Product = z.infer<typeof PRODUCT>;
 const POSITIVE_DECIMAL_STRING = z.string()
   .regex(/^\d+(\.\d+)?$/)
+  .max(32)
   .refine((value) => {
     const n = Number(value);
     return Number.isFinite(n) && n > 0;
@@ -226,13 +245,13 @@ const PRODUCT_STRIKE_COUNT: Record<Product, number> = {
 };
 
 export const RequestRfqArgs = z.object({
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  from: ADDRESS,
   product: PRODUCT,
   underlying: z.enum(['ETH', 'BTC']),
   collateral: z.enum(['USDC', 'WETH', 'cbBTC', 'aBasWETH', 'aBascbBTC', 'aBasUSDC', 'cbDOGE', 'cbXRP']),
   strikes: z.array(POSITIVE_DECIMAL_STRING).min(1).max(4),
   numContracts: POSITIVE_DECIMAL_STRING,
-  expiry: z.number().int().positive(),
+  expiry: z.number().int().positive().max(MAX_UNIX_TIMESTAMP),
   /**
    * Offer window end as Unix timestamp seconds. Default (when caller omits) is
    * 120 seconds in the future. The earlier 30s default (Phase A.7) lost too
@@ -241,7 +260,7 @@ export const RequestRfqArgs = z.object({
    * keep the "find out quickly" UX intact, long enough for any realistic MM
    * latency. Callers can still override.
    */
-  offerEndTimestamp: z.number().int().positive().optional(),
+  offerEndTimestamp: z.number().int().positive().max(MAX_UNIX_TIMESTAMP).optional(),
   isRequestingLongPosition: z.boolean(),
   reservePrice: POSITIVE_DECIMAL_STRING.optional(),
   isIronCondor: z.boolean().optional(),
@@ -395,9 +414,9 @@ function computeCollateralRequired(params: {
 // ============================================================================
 
 export const MakeOfferArgs = z.object({
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  quotationId: z.string().regex(/^\d+$/),
-  offerAmount: z.string().regex(/^\d+$/),
+  from: ADDRESS,
+  quotationId: UINT_DECIMAL,
+  offerAmount: UINT_DECIMAL,
 });
 export type MakeOfferArgs = z.infer<typeof MakeOfferArgs>;
 
@@ -436,7 +455,7 @@ export async function makeOfferCore(
     // caller should be told the id is from a stale deployment.
     const code = (err as { code?: string })?.code;
     if (code === 'RFQ_FACTORY_MISMATCH') {
-      console.error('RFQ_FACTORY_MISMATCH on getRequesterPublicKey', { err });
+      console.error('RFQ_FACTORY_MISMATCH on getRequesterPublicKey', sanitizeForLog(err));
       return {
         ok: false,
         status: 409,
@@ -446,7 +465,7 @@ export async function makeOfferCore(
         ),
       };
     }
-    console.error('RFQ_NOT_FOUND lookup failure', { err });
+    console.error('RFQ_NOT_FOUND lookup failure', sanitizeForLog(err));
     return {
       ok: false,
       status: 404,
@@ -473,7 +492,7 @@ export async function makeOfferCore(
     });
   } catch (err) {
     const { client, log } = toClientError(err);
-    console.error('TYPEHASH_MISMATCH or build failure', log);
+    console.error('TYPEHASH_MISMATCH or build failure', sanitizeForLog(log));
     if (client.code === 'CONTRACT_REVERT' || /OFFER_TYPEHASH/.test(client.error)) {
       return { ok: false, status: 500, error: safeError('TYPEHASH_MISMATCH', client.error) };
     }
@@ -503,11 +522,11 @@ export async function makeOfferCore(
 // ============================================================================
 
 export const MakeOfferWithSignatureArgs = z.object({
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  quotationId: z.string().regex(/^\d+$/),
-  signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
-  signingKey: z.string().regex(/^0x[0-9a-fA-F]+$/),
-  encryptedOffer: z.string().regex(/^0x[0-9a-fA-F]+$/),
+  from: ADDRESS,
+  quotationId: UINT_DECIMAL,
+  signature: SIGNATURE_HEX,
+  signingKey: ECDH_PUBLIC_KEY_HEX,
+  encryptedOffer: ENCRYPTED_OFFER_HEX,
 });
 export type MakeOfferWithSignatureArgs = z.infer<typeof MakeOfferWithSignatureArgs>;
 
@@ -542,8 +561,8 @@ export function makeOfferWithSignatureCore(
 // ============================================================================
 
 export const SettleRfqArgs = z.object({
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  quotationId: z.string().regex(/^\d+$/),
+  from: ADDRESS,
+  quotationId: UINT_DECIMAL,
 });
 export type SettleRfqArgs = z.infer<typeof SettleRfqArgs>;
 
@@ -570,9 +589,9 @@ export function settleRfqCore(args: SettleRfqArgs, deps: OpenDeps): PrepareCoreR
 // ============================================================================
 
 export const SettleRfqEarlyArgs = z.object({
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  quotationId: z.string().regex(/^\d+$/),
-  offerorAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  from: ADDRESS,
+  quotationId: UINT_DECIMAL,
+  offerorAddress: ADDRESS,
 });
 export type SettleRfqEarlyArgs = z.infer<typeof SettleRfqEarlyArgs>;
 
@@ -592,7 +611,7 @@ export async function settleRfqEarlyCore(
   } catch (err) {
     const code = (err as { code?: string })?.code;
     if (code === 'RFQ_FACTORY_MISMATCH') {
-      console.error('RFQ_FACTORY_MISMATCH on getOffer', { err });
+      console.error('RFQ_FACTORY_MISMATCH on getOffer', sanitizeForLog(err));
       return {
         ok: false,
         status: 409,
@@ -602,7 +621,7 @@ export async function settleRfqEarlyCore(
         ),
       };
     }
-    console.error('OFFER_NOT_FOUND lookup failure', { err });
+    console.error('OFFER_NOT_FOUND lookup failure', sanitizeForLog(err));
     return {
       ok: false,
       status: 404,
@@ -620,7 +639,7 @@ export async function settleRfqEarlyCore(
       offer.signingKey,
     );
   } catch (err) {
-    console.error('DECRYPT_FAILED', { err });
+    console.error('DECRYPT_FAILED', sanitizeForLog(err));
     return {
       ok: false,
       status: 500,
@@ -659,8 +678,8 @@ export async function settleRfqEarlyCore(
 // ============================================================================
 
 export const CancelRfqArgs = z.object({
-  from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  quotationId: z.string().regex(/^\d+$/),
+  from: ADDRESS,
+  quotationId: UINT_DECIMAL,
 });
 export type CancelRfqArgs = z.infer<typeof CancelRfqArgs>;
 
@@ -696,7 +715,7 @@ export const SuggestReservePriceArgs = z.object({
   ]),
   underlying: z.enum(['ETH', 'BTC']),
   strikes: z.array(POSITIVE_DECIMAL_STRING).min(1).max(4),
-  expiry: z.number().int().positive(),
+  expiry: z.number().int().positive().max(MAX_UNIX_TIMESTAMP),
   isRequestingLongPosition: z.boolean(),
 });
 export type SuggestReservePriceArgs = z.infer<typeof SuggestReservePriceArgs>;
@@ -746,7 +765,7 @@ export async function suggestReservePriceCore(
   try {
     pricing = await deps.sharedClient.mmPricing.getTickerPricing(ticker);
   } catch (err) {
-    console.error('NO_IV_POINT', { ticker, err });
+    console.error('NO_IV_POINT', { ticker, err: sanitizeForLog(err) });
     return {
       ok: true,
       data: {

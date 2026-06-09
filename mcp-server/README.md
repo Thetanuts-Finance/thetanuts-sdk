@@ -204,13 +204,13 @@ The current MCP process is pinned to Base (`chainId 8453`), so WheelVault tools 
 **Cursor** and **VS Code** support one-click installation; click either badge to register the server with the IDE. Other clients require a single command or JSON snippet, documented below.
 
 <details>
-<summary><b>Claude Code</b> — single command (or commit <code>.mcp.json</code> for your team)</summary>
+<summary><b>Claude Code</b> — single command</summary>
 
 ```bash
 claude mcp add --transport stdio thetanuts -- npx -y @thetanuts-finance/mcp
 ```
 
-For team installations, commit a `.mcp.json` file to your repository root and every developer receives the configuration automatically. See [Team setup](#team-setup) below.
+For team installations, keep `.mcp.json` local and distribute a redacted template instead. See [Team setup](#team-setup) below.
 </details>
 
 <details>
@@ -272,7 +272,7 @@ After installation, restart your client. A `thetanuts` indicator will appear onc
 
 ## Team setup
 
-Teams building on `@thetanuts-finance/thetanuts-client` are recommended to commit a `.mcp.json` file at the repository root. Every developer using **Claude Code** within the repository receives the MCP server configuration automatically, with no per-developer setup.
+Teams building on `@thetanuts-finance/thetanuts-client` should keep `.mcp.json` uncommitted because it often contains local paths, environment variables, or private MCP endpoints. Commit a redacted template such as `.mcp.example.json`, then have each developer copy it to their local `.mcp.json` and set their own `KEYSTORE_MASTER_KEY`.
 
 ```json
 {
@@ -280,7 +280,10 @@ Teams building on `@thetanuts-finance/thetanuts-client` are recommended to commi
     "thetanuts": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@thetanuts-finance/mcp"]
+      "args": ["-y", "@thetanuts-finance/mcp"],
+      "env": {
+        "KEYSTORE_MASTER_KEY": "<32-byte-hex-for-prepare-tools>"
+      }
     }
   }
 }
@@ -388,7 +391,7 @@ For the full SDK context (every module, every workflow, every gotcha), call `get
 |----------|---------|-------------|
 | `THETANUTS_RPC_URL` | `https://mainnet.base.org` | Base RPC endpoint; this MCP currently constructs the SDK with `chainId: 8453` |
 | `KEYSTORE_MASTER_KEY` | required for `prepare_*` RFQ write tools | 32-byte hex key used to encrypt the local RFQ ECDH keystore. Generate with `openssl rand -hex 32` |
-| `THETANUTS_KEYSTORE_PATH` | `./thetanuts-mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
+| `THETANUTS_KEYSTORE_PATH` | `~/.thetanuts/mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
 
 ## Examples
 

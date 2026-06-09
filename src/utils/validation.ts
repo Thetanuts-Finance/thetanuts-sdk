@@ -46,6 +46,15 @@ export function validateHexBytes(value: string, byteLength: number, fieldName: s
 }
 
 /**
+ * Validate a variable-length 0x-prefixed hex string.
+ */
+export function validateHexString(value: string, fieldName: string): void {
+  if (typeof value !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(value)) {
+    throw createError('INVALID_PARAMS', `${fieldName} must be a 0x-prefixed byte-aligned hex string`);
+  }
+}
+
+/**
  * Validate that an order has not expired and is not absurdly far in the future.
  * A 5-year upper bound catches the common off-by-1000 milliseconds-vs-seconds
  * bug that would otherwise sign a 50,000-year-future order (TNU-AUDIT-0073).

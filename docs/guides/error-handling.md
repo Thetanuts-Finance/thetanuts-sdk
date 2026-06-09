@@ -261,7 +261,8 @@ Generate or restore an ECDH keypair before creating RFQs:
 
 ```typescript
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
-// Keys are automatically persisted to disk (Node.js) or localStorage (browser)
+// Keys are automatically persisted to disk in Node.js.
+// Browser apps must configure keyStorageProvider explicitly.
 ```
 
 ### DECRYPTION_FAILED

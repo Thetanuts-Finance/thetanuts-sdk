@@ -826,7 +826,7 @@ const keyId = client.rfqKeys.getStorageKeyId();
 ### Storage Providers
 
 The module auto-detects the environment:
-- **Browser**: Uses `localStorage`
+- **Browser**: Requires an explicit `keyStorageProvider`; plaintext `localStorage` is opt-in only
 - **Node.js**: Uses in-memory storage (keys lost on exit)
 
 Custom storage can be configured:

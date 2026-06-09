@@ -1019,7 +1019,7 @@ interface KeyStorageProvider {
 
 ### Storage Providers
 
-The root package exports `LocalStorageProvider`, `MemoryStorageProvider`, and the `KeyStorageProvider` interface. Node.js uses an internal file-backed default provider that persists keys to `./.thetanuts-keys/` with owner-only permissions.
+The root package exports `LocalStorageProvider`, `MemoryStorageProvider`, and the `KeyStorageProvider` interface. Node.js uses an internal file-backed default provider that persists keys to `./.thetanuts-keys/` with owner-only permissions. Browser apps must pass `keyStorageProvider` explicitly; plaintext `localStorage` is not used by default.
 
 ```typescript
 import { MemoryStorageProvider, ThetanutsClient } from '@thetanuts-finance/thetanuts-client';

@@ -7,7 +7,7 @@ import type { ContractOrder, Eip712Domain } from '../types/optionBook.js';
 import type { OrderWithSignature, ClaimableFee, ClaimFeeResult } from '../types/api.js';
 import type { CallStaticResult } from '../types/callStatic.js';
 import { createError, mapContractError } from '../utils/errors.js';
-import { validateAddress } from '../utils/validation.js';
+import { validateAddress, validateHexString } from '../utils/validation.js';
 
 /**
  * Interface for OptionBook contract methods (v2)
@@ -478,6 +478,7 @@ export class OptionBookModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContractAt(targetContract);
       const contractOrder = this.buildContractOrder(orderWithSig, numContracts);
       const ref = referrer ?? this.client.referrer ?? ZeroAddress;
@@ -701,6 +702,7 @@ export class OptionBookModule {
     this.client.logger.debug('Claiming fees', { token });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
 
       // Estimate gas and add 20% buffer for Account Abstraction wallets (e.g., Coinbase Smart Wallet)
@@ -806,6 +808,7 @@ export class OptionBookModule {
 
     validateAddress(swapRouter, 'swapRouter');
     validateAddress(swapSrcToken, 'swapSrcToken');
+    this.validateSwapParams(swapRouter, swapSrcToken, swapSrcAmount, swapData);
     if (referrer) {
       validateAddress(referrer, 'referrer');
     }
@@ -822,6 +825,7 @@ export class OptionBookModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const gasEstimate = await contract.swapAndFillOrder.estimateGas(
         contractOrder, orderWithSig.signature, swapRouter, swapSrcToken, swapSrcAmount, swapData, ref
@@ -868,6 +872,12 @@ export class OptionBookModule {
     if (!orderWithSig.rawApiData) {
       throw createError('INVALID_ORDER', 'Order is missing rawApiData required for contract call');
     }
+    validateAddress(swapRouter, 'swapRouter');
+    validateAddress(swapSrcToken, 'swapSrcToken');
+    if (referrer) {
+      validateAddress(referrer, 'referrer');
+    }
+    this.validateSwapParams(swapRouter, swapSrcToken, swapSrcAmount, swapData);
 
     const numContracts = this.calculateMaxContracts(orderWithSig);
     const contractOrder = this.buildContractOrder(orderWithSig, numContracts);
@@ -879,6 +889,23 @@ export class OptionBookModule {
     ]);
 
     return { to: this.contractAddress, data };
+  }
+
+  private validateSwapParams(
+    swapRouter: string,
+    swapSrcToken: string,
+    swapSrcAmount: bigint,
+    swapData: string,
+  ): void {
+    validateAddress(swapRouter, 'swapRouter');
+    validateAddress(swapSrcToken, 'swapSrcToken');
+    if (swapSrcAmount <= 0n) {
+      throw createError('INVALID_PARAMS', 'swapSrcAmount must be positive');
+    }
+    validateHexString(swapData, 'swapData');
+    if (swapData === '0x') {
+      throw createError('INVALID_PARAMS', 'swapData cannot be empty for swapAndFillOrder');
+    }
   }
 
   /**
@@ -895,6 +922,7 @@ export class OptionBookModule {
     this.client.logger.debug('Cancelling order', { maker: orderWithSig.order.maker });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const numContracts = this.calculateMaxContracts(orderWithSig);
       const contractOrder = this.buildContractOrder(orderWithSig, numContracts);
@@ -966,6 +994,7 @@ export class OptionBookModule {
     this.client.logger.debug('Setting referrer fee split', { referrer, feeBps: feeBps.toString() });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const gasEstimate = await contract.setReferrerFeeSplit.estimateGas(referrer, feeBps);
       const gasLimit = (gasEstimate * 120n) / 100n;
@@ -999,6 +1028,7 @@ export class OptionBookModule {
     this.client.logger.debug('Sweeping protocol fees', { token });
 
     try {
+      await this.client.assertNetwork();
       const contract = this.getWriteContract();
       const gasEstimate = await contract.sweepProtocolFees.estimateGas(token);
       const gasLimit = (gasEstimate * 120n) / 100n;
@@ -1190,6 +1220,7 @@ export class OptionBookModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const signer = this.client.requireSigner();
       const contract = new Contract(targetContract, OPTION_BOOK_ABI, signer);
       const contractOrder = this.buildContractOrder(orderWithSig, numContracts);
@@ -1248,6 +1279,7 @@ export class OptionBookModule {
     });
 
     try {
+      await this.client.assertNetwork();
       const signer = this.client.requireSigner();
       const contract = new Contract(this.contractAddress, OPTION_BOOK_ABI, signer);
       const numContracts = this.calculateMaxContracts(orderWithSig);

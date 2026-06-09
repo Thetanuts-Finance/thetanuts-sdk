@@ -3,6 +3,9 @@ node_modules/
 
 # Build output
 dist/
+.next/
+**/.next/
+*.tsbuildinfo
 
 # IDE
 .idea/
@@ -21,6 +24,9 @@ coverage/
 
 # RFQ private keys (NEVER commit these!)
 .thetanuts-keys/
+thetanuts-mcp-keystore.sqlite*
+*.sqlite-shm
+*.sqlite-wal
 
 # Logs
 *.log

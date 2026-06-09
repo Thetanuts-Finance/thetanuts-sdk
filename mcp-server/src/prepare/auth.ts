@@ -26,6 +26,7 @@ import type Database from 'better-sqlite3';
  */
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
+const MAX_NONCES_PER_WALLET = 25;
 const MESSAGE_PREFIX = 'Thetanuts MCP auth\nWallet: ';
 const HEADER_RE = /^Thetanuts\s+wallet=(0x[0-9a-fA-F]{40}),\s*nonce=(0x[0-9a-fA-F]{32}),\s*sig=(0x[0-9a-fA-F]+)$/;
 
@@ -52,6 +53,7 @@ export class AuthStore {
   private readonly consume;
   private readonly cleanup;
   private readonly lookupExpiry;
+  private readonly countOpen;
 
   constructor(private readonly db: Database.Database) {
     db.exec(NONCE_SCHEMA);
@@ -74,15 +76,24 @@ export class AuthStore {
     this.cleanup = db.prepare<[number]>(
       'DELETE FROM auth_nonces WHERE expires_at < ? OR consumed_at IS NOT NULL',
     );
+    this.countOpen = db.prepare<[string, number], { c: number }>(
+      'SELECT COUNT(*) AS c FROM auth_nonces WHERE wallet = ? AND expires_at >= ? AND consumed_at IS NULL',
+    );
   }
 
   /** Issue a fresh nonce for a wallet. */
   issue(wallet: string): AuthChallenge {
+    this.gc();
+    const normalizedWallet = wallet.toLowerCase();
+    const open = this.countOpen.get(normalizedWallet, Date.now())?.c ?? 0;
+    if (open >= MAX_NONCES_PER_WALLET) {
+      throw new Error('Too many outstanding auth challenges for this wallet. Wait for old challenges to expire.');
+    }
     const nonceBytes = randomBytes(16);
     const nonce = '0x' + nonceBytes.toString('hex');
     const now = Date.now();
     const expiresAt = now + NONCE_TTL_MS;
-    this.insert.run(nonce, wallet.toLowerCase(), now, expiresAt);
+    this.insert.run(nonce, normalizedWallet, now, expiresAt);
     return {
       wallet,
       nonce,

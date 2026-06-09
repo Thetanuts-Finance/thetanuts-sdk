@@ -643,7 +643,7 @@ ECDH keypairs are persisted automatically. The default storage backend depends o
 | Environment | Default backend         | Persistence                      |
 | ----------- | ----------------------- | -------------------------------- |
 | Node.js     | internal file storage   | `.thetanuts-keys/` (perms `0600`) |
-| Browser     | `LocalStorageProvider`  | `localStorage`                    |
+| Browser     | explicit provider required | choose app-specific encrypted storage |
 
 ```typescript
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
@@ -651,6 +651,7 @@ console.log(keyPair.compressedPublicKey);
 
 // Node persists RFQ keys to ./.thetanuts-keys/ by default.
 // For custom persistence, pass any object implementing KeyStorageProvider.
+// Browser apps must pass keyStorageProvider explicitly; plaintext localStorage is not used by default.
 
 // Memory-only (tests only — logs a warning, keys lost on exit)
 import { MemoryStorageProvider } from '@thetanuts-finance/thetanuts-client';
@@ -732,7 +733,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the four required gates and PR conv
 | [Guides](https://docs.thetanuts.finance/sdk/guides/error-handling)                     | Errors, WebSocket, production checklist                      |
 | [Loan](https://docs.thetanuts.finance/sdk/loan/overview)                               | Non-liquidatable lending                                     |
 | [SDK Reference](https://docs.thetanuts.finance/sdk/reference/client)                   | Client, modules, types, utilities                            |
-| [MCP Server](mcp-server/README.md)                                                     | Read-only MCP server for AI agents                           |
+| [MCP Server](mcp-server/README.md)                                                     | MCP server for SDK reads and prepare-tool calldata builders   |
 
 ### Copy-paste examples
 

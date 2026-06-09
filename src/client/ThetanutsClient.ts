@@ -285,6 +285,33 @@ export class ThetanutsClient {
   }
 
   /**
+   * Verify the configured provider and signer provider are connected to this
+   * client's chainId. Call before write operations to avoid sending configured
+   * Base/Ethereum contract addresses on the wallet's currently selected chain.
+   */
+  async assertNetwork(): Promise<void> {
+    const expected = BigInt(this.chainId);
+    const providerNetwork = await this.provider.getNetwork();
+    if (providerNetwork.chainId !== expected) {
+      throw createError(
+        'NETWORK_UNSUPPORTED',
+        `Provider network mismatch: expected chain ${this.chainId}, got ${providerNetwork.chainId.toString()}`
+      );
+    }
+
+    const signerProvider = this.signer?.provider;
+    if (signerProvider) {
+      const signerNetwork = await signerProvider.getNetwork();
+      if (signerNetwork.chainId !== expected) {
+        throw createError(
+          'NETWORK_UNSUPPORTED',
+          `Signer network mismatch: expected chain ${this.chainId}, got ${signerNetwork.chainId.toString()}`
+        );
+      }
+    }
+  }
+
+  /**
    * Get the current block number
    */
   async getBlockNumber(): Promise<number> {
