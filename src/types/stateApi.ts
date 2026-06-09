@@ -76,6 +76,14 @@ export interface StateApiResponse {
 export interface StateRfq {
   /** Quotation ID */
   id: string;
+  /**
+   * OptionFactory address this RFQ lives on. The indexer surfaces this
+   * because it tracks multiple factory deployments simultaneously; SDK
+   * methods that target a specific RFQ (`getRfq`, `getRequesterPublicKey`,
+   * `getOffer`) cross-check this against the current chain config and
+   * refuse to return rows from a predecessor factory.
+   */
+  factoryAddress?: string;
   /** Requester address */
   requester: string;
   /** Requester's public key for encrypted offers */
@@ -136,6 +144,8 @@ export interface StateRfq {
 export interface StateOffer {
   /** Quotation ID this offer is for */
   quotationId: string;
+  /** OptionFactory this offer was made against. See StateRfq.factoryAddress. */
+  factoryAddress?: string;
   /** Offeror address */
   offeror: string;
   /** Offer signature */
@@ -172,6 +182,8 @@ export interface StateOffer {
 export interface StateOption {
   /** Option contract address */
   address: string;
+  /** OptionFactory that minted this option. See StateRfq.factoryAddress. */
+  factoryAddress?: string;
   /** Quotation ID that created this option */
   quotationId: string;
   /** Creator address */

@@ -317,8 +317,8 @@ export const BASE_OPTION_ABI = [
   // Removed in audit fix (TNU-AUDIT-0046): zero-arg `payout()` does NOT exist
   // on the r12 BaseOption contract. The canonical ABI only declares
   // `calculatePayout(uint256)` (view) and `simulatePayout(...)` (pure); on r12
-  // settlement is driven via the `notifyTradeSettled` callback wired by the
-  // factory, not by an end-user `payout()` call. Generating calldata for a
+  // settlement is driven via an internal factory callback, not by an end-user
+  // `payout()` call. Generating calldata for a
   // non-existent selector results in a silent on-chain revert.
   {
     type: 'function',

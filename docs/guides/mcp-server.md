@@ -78,10 +78,10 @@ These three handlers run before the chain client is initialized, so they don't c
 | `get_quotation_count` | Total quotations created |
 | `get_user_offers` | All RFQ offers made by a user |
 | `get_user_options` | All options held by a user |
-| `encode_settle_quotation` | Encode settlement transaction (returns tx data) |
-| `encode_settle_quotation_early` | Encode early settlement before offer period ends |
-| `encode_cancel_quotation` | Encode cancellation transaction |
-| `encode_cancel_offer` | Encode offer cancellation |
+| `prepare_settle_rfq` | Build settlement call after reveal phase |
+| `prepare_settle_rfq_early` | Build early-settlement call before offer period ends |
+| `prepare_cancel_rfq` | Build RFQ cancellation call |
+| `prepare_cancel_offer` | Build offer cancellation call |
 
 ### RFQ Builder Tools
 
@@ -93,7 +93,7 @@ These three handlers run before the chain client is initialized, so they don't c
 | `build_condor_rfq` | Build four-leg condor RFQ |
 | `build_iron_condor_rfq` | Build four-leg iron condor RFQ |
 | `build_physical_option_rfq` | Build physically settled vanilla RFQ |
-| `encode_request_for_quotation` | Encode RFQ creation transaction |
+| `prepare_request_rfq` | Build an RFQ creation call bundle |
 
 ### Calculation Tools
 
@@ -126,12 +126,14 @@ These three handlers run before the chain client is initialized, so they don't c
 | `get_token_config_by_id` | Token configuration by chain ID and symbol |
 | `get_option_implementation_info` | All implementation addresses and deployment status |
 
-### Encoding Tools (Transaction Builders)
+### Prepare Tools (Transaction Builders)
 
 | Tool | Description |
 |------|-------------|
-| `encode_fill_order` | Encode fill order transaction (returns calldata) |
-| `encode_approve` | Encode token approval transaction (returns calldata) |
+| `prepare_auth_challenge` | Mint a single-use auth challenge |
+| `prepare_approve` | Auth-gated OptionFactory collateral-token approval |
+| `prepare_make_offer` | Encrypt an offer and return typed data to sign |
+| `prepare_make_offer_with_signature` | Build the make-offer call after signing |
 
 ### Event Query Tools
 
@@ -284,11 +286,11 @@ Args: { ticker: "ETH-28FEB26-2800-C" }
 Result: { rawBidPrice: 0.0245, rawAskPrice: 0.0255, feeAdjustedBid: 0.0241, ... }
 ```
 
-### Encode a fill (returns calldata, does not send)
+### Prepare a settlement call (returns calldata, does not send)
 ```
-Tool: encode_fill_order
-Args: { orderId: "...", amount: "10000000" }
-Result: { to: "0x...", data: "0x..." }
+Tool: prepare_settle_rfq
+Args: { quotationId: "744" }
+Result: { chain: "base", calls: [{ to: "0x...", data: "0x...", value: "0x0" }] }
 ```
 
 ## See Also

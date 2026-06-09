@@ -83,10 +83,10 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 | `get_quotation_count` | Get total number of quotations created |
 | `get_user_offers` | Get all RFQ offers made by a user |
 | `get_user_options` | Get all options held by a user |
-| `encode_settle_quotation` | Encode settlement transaction for an RFQ after reveal phase (returns tx data) |
-| `encode_settle_quotation_early` | Encode early settlement to accept a specific offer before offer period ends |
-| `encode_cancel_quotation` | Encode cancellation transaction for an RFQ (requester only) |
-| `encode_cancel_offer` | Encode offer cancellation transaction (offeror only) |
+| `prepare_settle_rfq` | Build settlement call for an RFQ after reveal phase |
+| `prepare_settle_rfq_early` | Build early-settlement call to accept a specific offer before offer period ends |
+| `prepare_cancel_rfq` | Build cancellation call for an RFQ (requester only) |
+| `prepare_cancel_offer` | Build offer-cancellation call (offeror only) |
 
 #### RFQ Builder Tools
 | Tool | Description |
@@ -97,7 +97,7 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 | `build_condor_rfq` | Build RFQ request for a four-leg condor (all calls or all puts) |
 | `build_iron_condor_rfq` | Build RFQ request for a four-leg iron condor (put spread + call spread) |
 | `build_physical_option_rfq` | Build RFQ request for physical-settled vanilla PUT or CALL |
-| `encode_request_for_quotation` | Encode RFQ creation transaction from built request parameters |
+| `prepare_request_rfq` | Build an RFQ creation call bundle, including exact approval when needed |
 
 #### Calculation Tools
 | Tool | Description |
@@ -115,7 +115,7 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 | `validate_butterfly` | Validate butterfly option strike configuration (3 strikes with equal wing widths) |
 | `validate_condor` | Validate condor option strike configuration (4 strikes with equal spread widths) |
 | `validate_iron_condor` | Validate iron condor strike configuration (put spread below, call spread above) |
-| `validate_ranger` | Validate ranger (range) option strike configuration (2 strikes) |
+| `validate_ranger` | Validate ranger (zone-bound) option strike configuration (4 strikes: `[callLower, callUpper, putLower, putUpper]`, equal spread widths, callUpper < putLower) |
 
 #### Chain Configuration Tools
 | Tool | Description |
@@ -141,13 +141,15 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 | `get_quotation_settled_events` | Get historical RFQ quotation settled events |
 | `get_position_closed_events` | Get historical position closed events for a specific option contract |
 
-#### Encoding Tools (Transaction Builders)
+#### Prepare Tools (Transaction Builders)
 | Tool | Description |
 |------|-------------|
-| `encode_fill_order` | Encode a transaction to fill an order from the orderbook |
-| `encode_approve` | Encode a token approval transaction |
+| `prepare_auth_challenge` | Mint a single-use auth challenge for keystore-touching RFQ tools |
+| `prepare_approve` | Auth-gated explicit approval for configured collateral tokens to the current OptionFactory |
+| `prepare_make_offer` | Encrypt an offer and return EIP-712 typed data to sign |
+| `prepare_make_offer_with_signature` | Build the make-offer call after typed-data signing |
 
-**Note:** Encoding tools return transaction data for wallet signing - they do NOT execute transactions.
+**Note:** Prepare tools return Base-MCP-ready `{ chain, calls }` envelopes for wallet signing - they do NOT execute transactions.
 
 #### Ranger Tools (RangerOption — zone-bound 4-strike payoff)
 | Tool | Description |
@@ -309,17 +311,17 @@ If you want Claude Desktop to point at your local checkout instead of npm, swap 
 
 Every transaction has two parts: the **calldata** (what to do) and the **signature** (the user authorizing it).
 
-This MCP does the first part. The `encode_*` tools return ready-to-sign transactions:
+This MCP does the first part. The `prepare_*` tools return ready-to-sign call envelopes:
 
 | Tool | What it builds |
 |---|---|
-| `encode_fill_order` | Fill a maker order on the OptionBook |
-| `encode_request_for_quotation` | Submit an RFQ |
-| `encode_settle_quotation` / `_early` | Settle an RFQ after / before reveal |
-| `encode_cancel_quotation` / `_offer` | Cancel an RFQ or an MM offer |
-| `encode_approve` | ERC20 approval |
+| `prepare_request_rfq` | Submit an RFQ, with approval prepended when needed |
+| `prepare_make_offer` / `_with_signature` | Create and submit an encrypted RFQ offer |
+| `prepare_settle_rfq` / `_early` | Settle an RFQ after / before reveal |
+| `prepare_cancel_rfq` / `_offer` | Cancel an RFQ or an MM offer |
+| `prepare_approve` | Auth-gated ERC20 approval outside the RFQ flow, limited to configured collateral tokens and the current OptionFactory |
 
-Each returns an object like `{ to: "0x...", data: "0x...", value: "0" }` — the calldata your wallet broadcasts. **All you need to actually send it is a signature.**
+Each returns an object like `{ chain: "base", calls: [{ to: "0x...", data: "0x...", value: "0x0" }] }` — the calldata your wallet broadcasts. **All you need to actually send it is a signature.**
 
 For the signature, you compose this MCP with one of these:
 
@@ -353,7 +355,7 @@ Then ask Claude:
 
 > "Find the cheapest ETH put expiring next Friday for 1 contract, build the fill, sign it with my wallet, and send."
 
-Claude calls `thetanuts.fetch_orders`, picks the order, calls `thetanuts.encode_fill_order` to get calldata, hands the calldata to `wallet.sign_and_send`. Your MetaMask pops up: "Confirm: send 250 USDC to 0x1bDff855... (OptionBook)." You click confirm. The order fills on-chain.
+Claude calls `thetanuts.fetch_orders`, picks the order, calls the appropriate `thetanuts.prepare_*` tool to get calldata, hands the call envelope to your signer MCP. Your wallet pops up with the transaction details. You click confirm. The transaction executes on-chain.
 
 For autonomous flows where you don't want to click every time, swap MetaMask for Coinbase AgentKit:
 
@@ -389,6 +391,8 @@ For the full SDK context (every module, every workflow, every gotcha), call `get
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `THETANUTS_RPC_URL` | `https://mainnet.base.org` | RPC endpoint |
+| `KEYSTORE_MASTER_KEY` | required for `prepare_*` RFQ write tools | 32-byte hex key used to encrypt the local RFQ ECDH keystore. Generate with `openssl rand -hex 32` |
+| `THETANUTS_KEYSTORE_PATH` | `./thetanuts-mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
 
 ## Examples
 
@@ -435,18 +439,17 @@ Result: {
 }
 ```
 
-### Encode Settlement Transaction
+### Prepare Settlement Transaction
 ```
-Tool: encode_settle_quotation
+Tool: prepare_settle_rfq
 Args: { quotationId: "744" }
 Result: {
-  to: "0x...",           // OptionFactory address
-  data: "0x...",         // Encoded calldata
-  description: "Settle quotation 744"
+  chain: "base",
+  calls: [{ to: "0x...", data: "0x...", value: "0x0" }]
 }
 ```
 
-**Note:** Use the returned `to` and `data` with your wallet to sign and send the transaction.
+**Note:** Pass the returned `chain` and `calls` envelope to your wallet MCP to sign and send the transaction.
 
 ## License
 

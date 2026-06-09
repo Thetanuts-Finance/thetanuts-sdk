@@ -1923,7 +1923,11 @@ function registerLocal(grp: Command): void {
   grp
     .command('calc-payout')
     .description('Calculate payout locally (no RPC) for a given product')
-    .requiredOption('--type <type>', 'option type: call | put | call_spread | put_spread')
+    .requiredOption(
+      '--type <type>',
+      'option type: call | put | call_spread | put_spread | call_fly | put_fly | ' +
+        'call_condor | put_condor | iron_condor | ranger'
+    )
     .requiredOption('--strikes <list>', 'comma-separated strikes (human-readable, e.g. 2000 or 1800,2000)')
     .requiredOption('--price <n>', 'human-readable settlement price')
     .requiredOption('--contracts <n>', 'human-readable number of contracts')
@@ -1943,7 +1947,18 @@ function registerLocal(grp: Command): void {
       }>();
       try {
         const { client } = getClient(opts);
-        const allowed: PayoutType[] = ['call', 'put', 'call_spread', 'put_spread'];
+        const allowed: PayoutType[] = [
+          'call',
+          'put',
+          'call_spread',
+          'put_spread',
+          'call_fly',
+          'put_fly',
+          'call_condor',
+          'put_condor',
+          'iron_condor',
+          'ranger',
+        ];
         const t = local.type.toLowerCase() as PayoutType;
         if (!allowed.includes(t)) {
           throw new Error(
@@ -1954,15 +1969,18 @@ function registerLocal(grp: Command): void {
         if (!Number.isFinite(sizeDecimals) || sizeDecimals < 0) {
           throw new Error(`--size-decimals must be a non-negative integer (got "${local.sizeDecimals}")`);
         }
-        // SDK's calculatePayout treats strikes[0] as lower and strikes[1] as
-        // upper for *_spread. Sort ascending so user input order doesn't
-        // silently zero out the payout for descending PUT-style ordering.
+        // put_fly takes strikes DESCENDING; all other multi-leg structures
+        // (call_fly, call_condor, put_condor, iron_condor, ranger) and the
+        // spread types take strikes ASCENDING. See PayoutType JSDoc in
+        // src/modules/utils.ts for the per-type strike-order contract.
+        const ascending = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
+        const descending = (a: bigint, b: bigint): number => (a < b ? 1 : a > b ? -1 : 0);
         const strikes = local.strikes
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean)
           .map((s) => client.utils.toPriceDecimals(s))
-          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+          .sort(t === 'put_fly' ? descending : ascending);
         const settlementPrice = client.utils.toPriceDecimals(local.price);
         const numContracts = client.utils.toBigInt(local.contracts, sizeDecimals);
         const payoutBn = client.utils.calculatePayout({

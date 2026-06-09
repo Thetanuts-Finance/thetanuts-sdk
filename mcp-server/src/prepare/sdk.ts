@@ -1,17 +1,18 @@
+/**
+ * SDK client factory for prepare tools — folded in from the standalone
+ * prepare-service when it was merged into @thetanuts-finance/mcp v1.0.0.
+ *
+ * Per-wallet scoped client: each request that touches the RFQ keystore
+ * builds its own ThetanutsClient with a wallet-scoped KeyStorageProvider.
+ * No signer is attached — the prepare tools NEVER sign. They only produce
+ * unsigned calldata for Base MCP's send_calls.
+ */
+
 import { JsonRpcProvider } from 'ethers';
 import { ThetanutsClient, type KeyStorageProvider } from '@thetanuts-finance/thetanuts-client';
 
-const BASE_CHAIN_ID = 8453;
+export const BASE_CHAIN_ID = 8453;
 
-/**
- * Build a ThetanutsClient scoped to a specific wallet's RFQ keystore.
- *
- * No signer is attached — the prepare service NEVER signs. Every method we
- * call is `encode*` (pure calldata construction) or a read; the SDK never
- * touches a private key on our behalf. The KeyStorageProvider only stores
- * the ECDH key used for RFQ offer encryption, which is application-layer
- * crypto and unrelated to wallet signing.
- */
 export function buildClient(opts: {
   provider: JsonRpcProvider;
   keyStorageProvider: KeyStorageProvider;
@@ -24,5 +25,3 @@ export function buildClient(opts: {
     rfqKeyPrefix: `thetanuts_rfq_${opts.wallet.toLowerCase()}`,
   });
 }
-
-export { BASE_CHAIN_ID };

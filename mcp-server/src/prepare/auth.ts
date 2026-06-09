@@ -1,7 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { verifyMessage } from 'ethers';
 import type Database from 'better-sqlite3';
-import type { Request, Response, NextFunction } from 'express';
 
 /**
  * Signed-nonce challenge auth.
@@ -128,65 +126,7 @@ export function authMessage(wallet: string, nonce: string, expiresAt: number): s
   return `${MESSAGE_PREFIX}${wallet}\nNonce: ${nonce}\nExpires: ${new Date(expiresAt).toISOString()}`;
 }
 
-/**
- * Express middleware enforcing Authorization on routes that touch the
- * keystore. Mount BEFORE the route handler. On failure responds 401 and
- * does NOT call next().
- *
- * On success, attaches `req.authenticatedWallet` so downstream handlers
- * can trust it instead of the body's `from` field.
- */
-export function requireWalletAuth(authStore: AuthStore) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const header = req.header('authorization');
-    if (!header) {
-      return res.status(401).json({ ok: false, code: 'AUTH_REQUIRED', error: 'Authorization header missing. Call GET /v1/auth/challenge first.' });
-    }
-    const match = HEADER_RE.exec(header);
-    if (!match) {
-      return res.status(401).json({ ok: false, code: 'AUTH_MALFORMED', error: 'Authorization header malformed. Expected: Thetanuts wallet=0x..,nonce=0x..,sig=0x..' });
-    }
-    const [, wallet, nonce, sig] = match;
-
-    // Body's `from` must match the authenticated wallet — otherwise an
-    // attacker who somehow obtained Alice's signature could use it on a
-    // request whose `from` says Bob, bypassing the per-wallet scoping in
-    // routes that still consult `req.body.from`.
-    const bodyFrom = (req.body as { from?: string } | undefined)?.from;
-    if (bodyFrom && bodyFrom.toLowerCase() !== wallet!.toLowerCase()) {
-      return res.status(401).json({ ok: false, code: 'AUTH_WALLET_MISMATCH', error: 'Authorization wallet does not match body.from' });
-    }
-
-    // We don't know the expiresAt the message used here — recover the
-    // signer and require they signed *some* valid message under this
-    // wallet+nonce. To do that without storing the message verbatim, we
-    // accept either {expiresAt = issued+TTL} (canonical) by reconstructing
-    // it from the stored row. Look up the row first.
-    const expiresAt = authStore.lookupExpiresAt(wallet!, nonce!);
-    if (expiresAt === null) {
-      return res.status(401).json({ ok: false, code: 'AUTH_INVALID', error: 'Nonce not recognized' });
-    }
-    const signedMessage = authMessage(wallet!, nonce!, expiresAt);
-
-    let recovered: string;
-    try {
-      recovered = verifyMessage(signedMessage, sig!);
-    } catch {
-      return res.status(401).json({ ok: false, code: 'AUTH_BAD_SIGNATURE', error: 'Signature could not be recovered' });
-    }
-    if (recovered.toLowerCase() !== wallet!.toLowerCase()) {
-      return res.status(401).json({ ok: false, code: 'AUTH_BAD_SIGNATURE', error: 'Signature does not match wallet' });
-    }
-
-    // All checks passed — atomically burn the nonce. If burn fails (someone
-    // raced us), the request loses.
-    if (!authStore.consumeOnce(wallet!, nonce!)) {
-      return res.status(401).json({ ok: false, code: 'AUTH_REPLAY', error: 'Nonce already consumed or expired' });
-    }
-
-    (req as Request & { authenticatedWallet: string }).authenticatedWallet = wallet!.toLowerCase();
-    next();
-  };
-}
-
 export const AUTH_NONCE_TTL_MS = NONCE_TTL_MS;
+// HEADER_RE retained for any consumer that still parses the old
+// Authorization header format; not used by the MCP transport itself.
+export { HEADER_RE };
