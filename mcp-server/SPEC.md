@@ -174,10 +174,17 @@ Get implied volatility surface.
 ### Utility Tools
 
 #### `calculate_payout`
-Pure calculation of option payoff.
+Pure calculation of option payoff for any supported structure.
 
 **Input:**
-- `type: "call" | "put" | "call_spread" | "put_spread"`
+- `type:` one of:
+  - `"call"`, `"put"` — vanilla; strikes `[strike]`
+  - `"call_spread"`, `"put_spread"` — strikes `[lower, upper]` ASCENDING
+  - `"call_fly"` — strikes `[K1, K2, K3]` ASCENDING, equidistant
+  - `"put_fly"` — strikes `[K3, K2, K1]` DESCENDING, equidistant
+  - `"call_condor"`, `"put_condor"` — strikes `[K1, K2, K3, K4]` ASCENDING (condors are always ascending), with `K2-K1 === K4-K3`
+  - `"iron_condor"` — strikes `[putLower, putUpper, callLower, callUpper]` with `putUpper <= callLower`
+  - `"ranger"` — strikes `[callLower, callUpper, putLower, putUpper]` with equal spread widths and `callUpper < putLower`
 - `strikes: string[]` - Strike prices (8 decimals)
 - `settlementPrice: string` - Settlement price (8 decimals)
 - `numContracts: string` - Size (18 decimals)

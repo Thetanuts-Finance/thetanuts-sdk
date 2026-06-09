@@ -36,6 +36,7 @@ import {
   buildTicker,
   // Types
   type ProductName,
+  type PayoutType,
 } from '@thetanuts-finance/thetanuts-client';
 
 // Auto-generated at build time from <repo-root>/llms.txt and llms-full.txt.
@@ -340,13 +341,33 @@ const tools: Tool[] = [
   // === Utils ===
   {
     name: 'calculate_payout',
-    description: 'Calculate option payoff at a given settlement price for various structures',
+    description:
+      'Calculate option payoff at a given settlement price for any supported structure. ' +
+      'Strike orderings (see SDK PayoutType docs): ' +
+      'call/put = [strike]; ' +
+      'call_spread/put_spread = [lower, upper] ASCENDING; ' +
+      'call_fly = [K1, K2, K3] ASCENDING equidistant; ' +
+      'put_fly = [K3, K2, K1] DESCENDING equidistant; ' +
+      'call_condor/put_condor = [K1, K2, K3, K4] ASCENDING with K2-K1 === K4-K3; ' +
+      'iron_condor = [putLower, putUpper, callLower, callUpper] with putUpper <= callLower; ' +
+      'ranger = [callLower, callUpper, putLower, putUpper] with equal spread widths and callUpper < putLower.',
     inputSchema: {
       type: 'object',
       properties: {
         type: {
           type: 'string',
-          enum: ['call', 'put', 'call_spread', 'put_spread'],
+          enum: [
+            'call',
+            'put',
+            'call_spread',
+            'put_spread',
+            'call_fly',
+            'put_fly',
+            'call_condor',
+            'put_condor',
+            'iron_condor',
+            'ranger',
+          ],
           description: 'Option type',
         },
         strikes: {
@@ -872,14 +893,17 @@ const tools: Tool[] = [
   },
   {
     name: 'validate_ranger',
-    description: 'Validate ranger (range) option strike configuration. Requires 2 strikes.',
+    description:
+      'Validate ranger (zone-bound) option strike configuration. Requires 4 strikes ordered as ' +
+      '[callLower, callUpper, putLower, putUpper] with equal spread widths ' +
+      '(callUpper - callLower === putUpper - putLower) and a zone gap (callUpper < putLower).',
     inputSchema: {
       type: 'object',
       properties: {
         strikes: {
           type: 'array',
           items: { type: 'number' },
-          description: 'Two strikes [lower, upper] (e.g., [1800, 2000])',
+          description: 'Four strikes [callLower, callUpper, putLower, putUpper] (e.g., [1900, 2000, 2100, 2200])',
         },
       },
       required: ['strikes'],
@@ -2103,7 +2127,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       // === Utils ===
       case 'calculate_payout': {
         const payout = c.utils.calculatePayout({
-          type: args.type as 'call' | 'put' | 'call_spread' | 'put_spread',
+          type: args.type as PayoutType,
           strikes: (args.strikes as string[]).map(s => BigInt(s)),
           settlementPrice: BigInt(args.settlementPrice as string),
           numContracts: BigInt(args.numContracts as string),
@@ -2533,8 +2557,8 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       }
       case 'validate_ranger': {
         const strikes = args.strikes as number[];
-        if (strikes.length !== 2) {
-          return JSON.stringify({ valid: false, error: `Ranger requires exactly 2 strikes, got ${strikes.length}` }, null, 2);
+        if (strikes.length !== 4) {
+          return JSON.stringify({ valid: false, error: `Ranger requires exactly 4 strikes, got ${strikes.length}` }, null, 2);
         }
         const result = validateRanger(strikes);
         return JSON.stringify(result, null, 2);

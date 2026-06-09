@@ -3,9 +3,39 @@ import { createError } from '../utils/errors.js';
 import { toBigInt as toBigIntSafe } from '../utils/decimals.js';
 
 /**
- * Option payout type
+ * Option payout type.
+ *
+ * Strike conventions per type (must match the on-chain factory's expected order;
+ * see `src/modules/optionFactory.ts` strike-sort logic and `validate*` helpers
+ * in `src/utils/rfqCalculations.ts`):
+ *
+ * | type          | count | order                                                           | invariant                              |
+ * |---------------|-------|-----------------------------------------------------------------|----------------------------------------|
+ * | call          | 1     | [strike]                                                        | —                                      |
+ * | put           | 1     | [strike]                                                        | —                                      |
+ * | call_spread   | 2     | [lower, upper] ASCENDING                                        | —                                      |
+ * | put_spread    | 2     | [lower, upper] ASCENDING                                        | —                                      |
+ * | call_fly      | 3     | [K1, K2, K3] ASCENDING                                          | K2 - K1 === K3 - K2 (equidistant)      |
+ * | put_fly       | 3     | [K3, K2, K1] DESCENDING                                         | K3 - K2 === K2 - K1 (equidistant)      |
+ * | call_condor   | 4     | [K1, K2, K3, K4] ASCENDING                                      | K2 - K1 === K4 - K3 (equal widths)     |
+ * | put_condor    | 4     | [K1, K2, K3, K4] ASCENDING (condors are always ascending)       | K2 - K1 === K4 - K3 (equal widths)     |
+ * | iron_condor   | 4     | [putLower, putUpper, callLower, callUpper] ASCENDING            | putUpper <= callLower (non-overlapping)|
+ * | ranger        | 4     | [callLower, callUpper, putLower, putUpper] ASCENDING            | callUpper - callLower === putUpper - putLower AND callUpper < putLower |
  */
-export type PayoutType = 'call' | 'put' | 'call_spread' | 'put_spread';
+export type PayoutType =
+  | 'call'
+  | 'put'
+  | 'call_spread'
+  | 'put_spread'
+  | 'call_fly'
+  | 'put_fly'
+  | 'call_condor'
+  | 'put_condor'
+  | 'iron_condor'
+  | 'ranger';
+
+const ZERO = 0n;
+const bMax = (a: bigint, b: bigint): bigint => (a > b ? a : b);
 
 /**
  * Payout calculation parameters
@@ -297,8 +327,131 @@ export class UtilsModule {
         break;
       }
 
+      case 'call_fly': {
+        // [K1, K2, K3] ASCENDING, equidistant
+        if (strikes.length !== 3 || strikes[0] === undefined || strikes[1] === undefined || strikes[2] === undefined) {
+          throw createError('INVALID_PARAMS', 'Call butterfly requires exactly three strikes');
+        }
+        const [K1, K2, K3] = strikes as [bigint, bigint, bigint];
+        if (!(K1 < K2 && K2 < K3)) {
+          throw createError('INVALID_PARAMS', 'Call butterfly strikes must be ascending [K1 < K2 < K3]');
+        }
+        if (K2 - K1 !== K3 - K2) {
+          throw createError('INVALID_PARAMS', 'Call butterfly strikes must be equidistant');
+        }
+        const S = settlementPrice;
+        intrinsicValue = bMax(ZERO, S - K1) - 2n * bMax(ZERO, S - K2) + bMax(ZERO, S - K3);
+        break;
+      }
+
+      case 'put_fly': {
+        // [K3, K2, K1] DESCENDING, equidistant
+        if (strikes.length !== 3 || strikes[0] === undefined || strikes[1] === undefined || strikes[2] === undefined) {
+          throw createError('INVALID_PARAMS', 'Put butterfly requires exactly three strikes');
+        }
+        const [K3, K2, K1] = strikes as [bigint, bigint, bigint];
+        if (!(K3 > K2 && K2 > K1)) {
+          throw createError('INVALID_PARAMS', 'Put butterfly strikes must be descending [K3 > K2 > K1]');
+        }
+        if (K3 - K2 !== K2 - K1) {
+          throw createError('INVALID_PARAMS', 'Put butterfly strikes must be equidistant');
+        }
+        const S = settlementPrice;
+        intrinsicValue = bMax(ZERO, K3 - S) - 2n * bMax(ZERO, K2 - S) + bMax(ZERO, K1 - S);
+        break;
+      }
+
+      case 'call_condor': {
+        // [K1, K2, K3, K4] ASCENDING, equal-width wings
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Call condor requires exactly four strikes');
+        }
+        const [K1, K2, K3, K4] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(K1 < K2 && K2 < K3 && K3 < K4)) {
+          throw createError('INVALID_PARAMS', 'Call condor strikes must be strictly ascending');
+        }
+        if (K2 - K1 !== K4 - K3) {
+          throw createError('INVALID_PARAMS', 'Call condor spread widths must be equal (K2-K1 === K4-K3)');
+        }
+        const S = settlementPrice;
+        intrinsicValue =
+          bMax(ZERO, S - K1) - bMax(ZERO, S - K2) - bMax(ZERO, S - K3) + bMax(ZERO, S - K4);
+        break;
+      }
+
+      case 'put_condor': {
+        // [K1, K2, K3, K4] ASCENDING (condors are always ascending), equal-width wings
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Put condor requires exactly four strikes');
+        }
+        const [K1, K2, K3, K4] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(K1 < K2 && K2 < K3 && K3 < K4)) {
+          throw createError('INVALID_PARAMS', 'Put condor strikes must be strictly ascending');
+        }
+        if (K2 - K1 !== K4 - K3) {
+          throw createError('INVALID_PARAMS', 'Put condor spread widths must be equal (K2-K1 === K4-K3)');
+        }
+        const S = settlementPrice;
+        intrinsicValue =
+          bMax(ZERO, K4 - S) - bMax(ZERO, K3 - S) - bMax(ZERO, K2 - S) + bMax(ZERO, K1 - S);
+        break;
+      }
+
+      case 'iron_condor': {
+        // [putLower, putUpper, callLower, callUpper] = [K1, K2, K3, K4]
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Iron condor requires exactly four strikes');
+        }
+        const [K1, K2, K3, K4] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(K1 < K2)) {
+          throw createError('INVALID_PARAMS', 'Iron condor put spread requires putLower < putUpper');
+        }
+        if (!(K3 < K4)) {
+          throw createError('INVALID_PARAMS', 'Iron condor call spread requires callLower < callUpper');
+        }
+        if (K2 > K3) {
+          throw createError('INVALID_PARAMS', 'Iron condor spreads must not overlap (putUpper <= callLower)');
+        }
+        const S = settlementPrice;
+        const putSpreadValue = bMax(ZERO, K2 - S) - bMax(ZERO, K1 - S);
+        const callSpreadValue = bMax(ZERO, S - K3) - bMax(ZERO, S - K4);
+        intrinsicValue = putSpreadValue + callSpreadValue;
+        break;
+      }
+
+      case 'ranger': {
+        // [callLower, callUpper, putLower, putUpper] ASCENDING, equal widths, zone gap
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Ranger requires exactly four strikes');
+        }
+        const [cL, cU, pL, pU] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(cL < cU)) {
+          throw createError('INVALID_PARAMS', 'Ranger requires callLower < callUpper');
+        }
+        if (!(pL < pU)) {
+          throw createError('INVALID_PARAMS', 'Ranger requires putLower < putUpper');
+        }
+        if (cU - cL !== pU - pL) {
+          throw createError('INVALID_PARAMS', 'Ranger spread widths must be equal (callUpper-callLower === putUpper-putLower)');
+        }
+        if (cU >= pL) {
+          throw createError('INVALID_PARAMS', 'Ranger requires callUpper < putLower (zone gap)');
+        }
+        const S = settlementPrice;
+        if (S <= cL || S >= pU) {
+          intrinsicValue = ZERO;
+        } else if (S < cU) {
+          intrinsicValue = S - cL;
+        } else if (S <= pL) {
+          intrinsicValue = cU - cL;
+        } else {
+          intrinsicValue = pU - S;
+        }
+        break;
+      }
+
       default:
-        throw createError('INVALID_PARAMS', `Unknown option type: ${String(type)}`);
+        throw createError('INVALID_PARAMS', `Unknown option type: ${String(type as string)}`);
     }
 
     // Calculate total payout: (intrinsic value * num contracts) / scale factor
@@ -376,8 +529,99 @@ export class UtilsModule {
         break;
       }
 
+      case 'call_fly': {
+        // [K1, K2, K3] ASCENDING, equidistant — max payout = wing width
+        if (strikes.length !== 3 || strikes[0] === undefined || strikes[1] === undefined || strikes[2] === undefined) {
+          throw createError('INVALID_PARAMS', 'Call butterfly requires exactly three strikes');
+        }
+        const [K1, K2, K3] = strikes as [bigint, bigint, bigint];
+        if (!(K1 < K2 && K2 < K3)) {
+          throw createError('INVALID_PARAMS', 'Call butterfly strikes must be ascending [K1 < K2 < K3]');
+        }
+        if (K2 - K1 !== K3 - K2) {
+          throw createError('INVALID_PARAMS', 'Call butterfly strikes must be equidistant');
+        }
+        maxPayout = K2 - K1;
+        break;
+      }
+
+      case 'put_fly': {
+        // [K3, K2, K1] DESCENDING, equidistant — max payout = wing width
+        if (strikes.length !== 3 || strikes[0] === undefined || strikes[1] === undefined || strikes[2] === undefined) {
+          throw createError('INVALID_PARAMS', 'Put butterfly requires exactly three strikes');
+        }
+        const [K3, K2, K1] = strikes as [bigint, bigint, bigint];
+        if (!(K3 > K2 && K2 > K1)) {
+          throw createError('INVALID_PARAMS', 'Put butterfly strikes must be descending [K3 > K2 > K1]');
+        }
+        if (K3 - K2 !== K2 - K1) {
+          throw createError('INVALID_PARAMS', 'Put butterfly strikes must be equidistant');
+        }
+        maxPayout = K3 - K2;
+        break;
+      }
+
+      case 'call_condor':
+      case 'put_condor': {
+        // [K1, K2, K3, K4] ASCENDING, equal-width wings — max payout = smaller-spread width
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Condor requires exactly four strikes');
+        }
+        const [K1, K2, K3, K4] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(K1 < K2 && K2 < K3 && K3 < K4)) {
+          throw createError('INVALID_PARAMS', 'Condor strikes must be strictly ascending');
+        }
+        if (K2 - K1 !== K4 - K3) {
+          throw createError('INVALID_PARAMS', 'Condor spread widths must be equal (K2-K1 === K4-K3)');
+        }
+        maxPayout = K2 - K1;
+        break;
+      }
+
+      case 'iron_condor': {
+        // [putLower, putUpper, callLower, callUpper] — max payout = max of the two spread widths
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Iron condor requires exactly four strikes');
+        }
+        const [K1, K2, K3, K4] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(K1 < K2)) {
+          throw createError('INVALID_PARAMS', 'Iron condor put spread requires putLower < putUpper');
+        }
+        if (!(K3 < K4)) {
+          throw createError('INVALID_PARAMS', 'Iron condor call spread requires callLower < callUpper');
+        }
+        if (K2 > K3) {
+          throw createError('INVALID_PARAMS', 'Iron condor spreads must not overlap (putUpper <= callLower)');
+        }
+        maxPayout = bMax(K2 - K1, K4 - K3);
+        break;
+      }
+
+      case 'ranger': {
+        // [callLower, callUpper, putLower, putUpper] — seller posts 2k collateral
+        // (either ramp can fully max out at k, buyer's max payout is k).
+        if (strikes.length !== 4 || strikes.some((s) => s === undefined)) {
+          throw createError('INVALID_PARAMS', 'Ranger requires exactly four strikes');
+        }
+        const [cL, cU, pL, pU] = strikes as [bigint, bigint, bigint, bigint];
+        if (!(cL < cU)) {
+          throw createError('INVALID_PARAMS', 'Ranger requires callLower < callUpper');
+        }
+        if (!(pL < pU)) {
+          throw createError('INVALID_PARAMS', 'Ranger requires putLower < putUpper');
+        }
+        if (cU - cL !== pU - pL) {
+          throw createError('INVALID_PARAMS', 'Ranger spread widths must be equal');
+        }
+        if (cU >= pL) {
+          throw createError('INVALID_PARAMS', 'Ranger requires callUpper < putLower (zone gap)');
+        }
+        maxPayout = 2n * (cU - cL);
+        break;
+      }
+
       default:
-        throw createError('INVALID_PARAMS', `Unknown option type: ${String(type)}`);
+        throw createError('INVALID_PARAMS', `Unknown option type: ${String(type as string)}`);
     }
 
     // Calculate collateral: (max payout * num contracts) / scale factor
@@ -665,11 +909,14 @@ export class UtilsModule {
    * ```
    */
   calculateMaxPayout(
-    order: { optionType: number; strikes?: bigint[] },
+    order: { optionType: number; strikes?: bigint[]; isIronCondor?: boolean; isRanger?: boolean },
     numContracts: bigint
   ): bigint {
     const strikes = order.strikes ?? [];
-    const type = this.getPayoutTypeFromOptionType(order.optionType, strikes.length);
+    const type = this.getPayoutTypeFromOptionType(order.optionType, strikes.length, {
+      isIronCondor: order.isIronCondor,
+      isRanger: order.isRanger,
+    });
 
     return this.calculateCollateral({
       type,
@@ -696,12 +943,15 @@ export class UtilsModule {
    * ```
    */
   calculatePayoutAtPrice(
-    order: { optionType: number; strikes?: bigint[] },
+    order: { optionType: number; strikes?: bigint[]; isIronCondor?: boolean; isRanger?: boolean },
     numContracts: bigint,
     settlementPrice: bigint
   ): bigint {
     const strikes = order.strikes ?? [];
-    const type = this.getPayoutTypeFromOptionType(order.optionType, strikes.length);
+    const type = this.getPayoutTypeFromOptionType(order.optionType, strikes.length, {
+      isIronCondor: order.isIronCondor,
+      isRanger: order.isRanger,
+    });
 
     return this.calculatePayout({
       type,
@@ -850,17 +1100,40 @@ export class UtilsModule {
   }
 
   /**
-   * Convert optionType number to PayoutType string
+   * Convert optionType number + strike count to a PayoutType string.
+   *
+   * 4-strike orders default to call_condor / put_condor. Callers that know the
+   * order is an iron condor or ranger must pass the appropriate flag in `opts`
+   * (the `Order` shape used by `calculateMaxPayout` / `calculatePayoutAtPrice`
+   * does not carry that discriminator).
+   *
    * @internal
    */
-  private getPayoutTypeFromOptionType(optionType: number, numStrikes: number): PayoutType {
+  private getPayoutTypeFromOptionType(
+    optionType: number,
+    numStrikes: number,
+    opts?: { isIronCondor?: boolean | undefined; isRanger?: boolean | undefined }
+  ): PayoutType {
     const isCall = optionType === 0;
 
     if (numStrikes <= 1) {
       return isCall ? 'call' : 'put';
     }
 
-    // For spreads (2 strikes)
-    return isCall ? 'call_spread' : 'put_spread';
+    if (numStrikes === 2) {
+      return isCall ? 'call_spread' : 'put_spread';
+    }
+
+    if (numStrikes === 3) {
+      return isCall ? 'call_fly' : 'put_fly';
+    }
+
+    if (numStrikes === 4) {
+      if (opts?.isRanger) return 'ranger';
+      if (opts?.isIronCondor) return 'iron_condor';
+      return isCall ? 'call_condor' : 'put_condor';
+    }
+
+    throw createError('INVALID_PARAMS', `Unsupported strike count: ${numStrikes}`);
   }
 }
