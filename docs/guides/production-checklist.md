@@ -167,7 +167,7 @@ const privateKey = await client.rfqKeys.exportPrivateKey();
 await client.rfqKeys.importFromPrivateKey(backupPrivateKey, true);
 ```
 
-Keys are stored in `.thetanuts-keys/` (Node.js) or `localStorage` (browser) with secure permissions. Add `.thetanuts-keys/` to your backup strategy.
+Node.js keys are stored in `.thetanuts-keys/` with secure permissions. Browser apps must configure an explicit encrypted/passphrase-backed `keyStorageProvider`; do not rely on plaintext `localStorage` for production RFQ private keys.
 
 ---
 

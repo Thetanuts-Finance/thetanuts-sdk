@@ -8,7 +8,6 @@ import type {
 } from '../types/rfqKeyManager.js';
 import {
   MemoryStorageProvider,
-  LocalStorageProvider,
   FileStorageProvider,
 } from '../types/rfqKeyManager.js';
 import {
@@ -23,13 +22,18 @@ const DEFAULT_KEY_PREFIX = 'thetanuts_rfq_key';
 
 /**
  * Get the default storage provider based on environment.
- * - Browser: localStorage (persists across sessions)
+ * - Browser: no implicit storage. Apps must pass an explicit provider.
  * - Node.js: File storage (persists to .thetanuts-keys/ directory)
  */
 function getDefaultStorageProvider(): KeyStorageProvider {
-  // Browser environment: use localStorage
+  // Browser environment: fail closed instead of silently storing private keys
+  // in XSS-readable localStorage. Browser apps should pass an explicit
+  // KeyStorageProvider backed by their chosen security model.
   if (typeof window !== 'undefined' && window.localStorage) {
-    return new LocalStorageProvider();
+    throw new InvalidKeyError(
+      'Browser RFQ key storage must be configured explicitly. ' +
+      'Pass keyStorageProvider to ThetanutsClient; do not rely on plaintext localStorage defaults.'
+    );
   }
 
   // Node.js environment: use file storage for persistence

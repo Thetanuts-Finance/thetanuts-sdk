@@ -26,6 +26,9 @@ const SAFE_ROUTE_CODES = new Set<string>([
   'AUTH_INVALID',
   'AUTH_BAD_SIGNATURE',
   'AUTH_REPLAY',
+  'INVALID_PARAMS',
+  'INVALID_SPENDER',
+  'INVALID_TOKEN',
   'RFQ_NOT_FOUND',
   'OFFER_NOT_FOUND',
   'ORDER_NOT_FOUND',
@@ -64,6 +67,30 @@ export function toClientError(err: unknown): { client: SafeError; log: { request
     client: { ok: false, code: 'INTERNAL', error: 'Internal error', requestId },
     log: { requestId, raw: err },
   };
+}
+
+export function sanitizeForLog(value: unknown): unknown {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: redactSecrets(value.message),
+      stack: value.stack ? redactSecrets(value.stack) : undefined,
+    };
+  }
+  if (typeof value === 'string') return redactSecrets(value);
+  try {
+    return JSON.parse(redactSecrets(JSON.stringify(value)));
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function redactSecrets(input: string): string {
+  return input
+    .replace(/https?:\/\/[^\s"']+/g, '[REDACTED_URL]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[REDACTED]')
+    .replace(/(api[_-]?key=)[^&\s"']+/gi, '$1[REDACTED]')
+    .replace(/(token=)[^&\s"']+/gi, '$1[REDACTED]');
 }
 
 /** Build a route-defined error envelope with one of the allowlisted codes. */

@@ -150,7 +150,7 @@ import {
 
 | Export | Kind | Description |
 |--------|------|-------------|
-| `LocalStorageProvider` | `class` | Browser localStorage storage (default in browser) |
+| `LocalStorageProvider` | `class` | Browser localStorage storage for explicit opt-in/testing use |
 | `MemoryStorageProvider` | `class` | In-memory storage for testing only (keys lost on exit) |
 
 ## Usage in TypeScript Projects
