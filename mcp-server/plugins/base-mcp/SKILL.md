@@ -63,7 +63,7 @@ All actions go through **MCP tool calls** — no `web_request` to HTTP endpoints
 | MCP | Tools to call |
 |---|---|
 | **Base MCP** | `get_wallets`, `sign` (for the auth challenge AND for EIP-712 offers), `send_calls` (to broadcast prepared batches), `get_request_status` |
-| **Thetanuts MCP** — reads | `fetch_orders`, `get_user_positions`, `get_rfq`, `get_market_prices`, `get_iv_surface`, `get_greeks`, `get_sdk_context`, ... (100+ tools) |
+| **Thetanuts MCP** — reads | `fetch_orders`, `get_user_positions`, `get_rfq`, `get_market_prices`, `get_mm_all_pricing`, `get_mm_ticker_pricing`, `get_sdk_context`, ... (100+ tools) |
 | **Thetanuts MCP** — writes (`prepare_*`) | `prepare_auth_challenge`, `prepare_suggest_reserve_price`, `prepare_approve`, `prepare_request_rfq`, `prepare_make_offer`, `prepare_make_offer_with_signature`, `prepare_settle_rfq`, `prepare_settle_rfq_early`, `prepare_cancel_rfq`, `prepare_cancel_offer` |
 
 > **Read-vs-on-chain caveat**: the indexer-backed reads `get_rfq` and `get_user_rfqs` can surface stale RFQs from a predecessor factory deployment when IDs overlap. Treat them as hints. For authoritative state on any RFQ you just opened or care about settling, use `get_quotation({ quotationId })` — it reads the live r12 factory directly.

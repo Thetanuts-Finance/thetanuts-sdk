@@ -28,10 +28,10 @@ Per invocation the agent runs **one cycle**:
 
 1. `get_market_prices` — read the current ETH oracle price.
 2. `get_user_positions` — confirm no open RFQ.
-3. `request_rfq` — open a SELL call RFQ with a chosen strike + expiry + reserve premium.
+3. `prepare_request_rfq` — build a SELL call RFQ call bundle with a chosen strike + expiry + reserve premium.
 4. Sleep ~60 s.
 5. `get_rfq` — check for offers (the encrypted blobs are stripped server-side, so the LLM only sees offeror + status + revealedAmount).
-6. `settle_rfq_early` if there's an acceptable offer, else `cancel_rfq`.
+6. `prepare_settle_rfq_early` if there's an acceptable offer, else `prepare_cancel_rfq`.
 
 No infinite loop — run it on cron, or wrap it in a `while true` if you trust it.
 
@@ -115,9 +115,9 @@ After 60 s waiting, 0x9fa... bid 13.2 USDC (revealed). Settled early; tx 0x7c...
 === tool calls ===
 - get_market_prices({})
 - get_user_positions({})
-- request_rfq({ product: "CALL", underlying: "ETH", ... })
+- prepare_request_rfq({ product: "CALL", underlying: "ETH", ... })
 - get_rfq({ quotationId: "4218" })
-- settle_rfq_early({ quotationId: "4218", offerorAddress: "0x9fa..." })
+- prepare_settle_rfq_early({ quotationId: "4218", offerorAddress: "0x9fa..." })
 ```
 
 ## Troubleshooting

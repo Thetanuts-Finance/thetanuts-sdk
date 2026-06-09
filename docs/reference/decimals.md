@@ -140,4 +140,4 @@ const amount = client.utils.toUsdcDecimals('1.5');  // 1500000n
 
 - [Utilities](./utilities.md) — Full UtilsModule method reference
 - [Chain Config](./chain-config.md) — Token addresses and decimals per chain
-- [Modules Overview](./modules-overview.md) — All 10 modules at a glance
+- [Modules Overview](./modules-overview.md) — All 15 modules at a glance

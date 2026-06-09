@@ -97,19 +97,7 @@ console.log(`Trade executed: ${receipt.hash}`);
 
 All OptionBook options are cash-settled. The implementation address on each order determines the product type:
 
-| Type | Implementation | Address |
-|------|---------------|---------|
-| Vanilla PUT | `PUT` | `0xF480F636301d50Ed570D026254dC5728b746A90F` |
-| Vanilla CALL | `INVERSE_CALL` | `0x3CeB524cBA83D2D4579F5a9F8C0D1f5701dd16FE` |
-| Call Spread | `CALL_SPREAD` | `0x4D75654bC616F64F6010d512C3B277891FB52540` |
-| Put Spread | `PUT_SPREAD` | `0xC9767F9a2f1eADC7Fdcb7f0057E829D9d760E086` |
-| Call Butterfly | `CALL_FLY` | `0xD8EA785ab2A63a8a94C38f42932a54A3E45501c3` |
-| Put Butterfly | `PUT_FLY` | `0x1fE24872Ab7c83BbA26Dc761ce2EA735c9b96175` |
-| Call Condor | `CALL_CONDOR` | `0xbb5d2EB2D354D930899DaBad01e032C76CC3c28f` |
-| Put Condor | `PUT_CONDOR` | `0xbdAcC00Dc3F6e1928D9380c17684344e947aa3Ec` |
-| Iron Condor | `IRON_CONDOR` | `0x494Cd61b866D076c45564e236D6Cb9e011a72978` |
-
-These are the addresses returned by `config.implementations`. Orders from `fetchOrders()` may reference these or earlier implementation versions. The SDK handles both transparently.
+Use `client.chainConfig.implementations` for the current Base r12 implementation addresses. Orders from `fetchOrders()` may reference current or earlier implementation versions; the SDK reverse lookup handles both transparently.
 
 ## Data Source
 

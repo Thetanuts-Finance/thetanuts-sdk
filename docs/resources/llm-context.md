@@ -18,7 +18,7 @@ Self-contained reference, designed to replace multiple page-fetches:
 
 - **Architecture**: every public module on `ThetanutsClient`, what it does, when to use it
 - **Key concepts**: OptionBook vs RFQ, decimal handling, collateral by option type
-- **Per-module reference**: `client.optionBook`, `client.optionFactory`, `client.option`, `client.ranger`, `client.events`, `client.ws`, `client.utils`, `client.rfqKeys`, `client.mmPricing`, `client.loan`, `client.wheelVault`, `client.strategyVault`, `client.api`, `client.erc20`
+- **Per-module reference**: `client.optionBook`, `client.optionFactory`, `client.option`, `client.ranger`, `client.events`, `client.ws`, `client.utils`, `client.rfqKeys`, `client.mmPricing`, `client.loan`, `client.collar`, `client.wheelVault`, `client.strategyVault`, `client.api`, `client.erc20`
 - **Common workflows**: read market data, fill an order, create a custom RFQ, manage positions, borrow USDC, deposit into a vault, real-time subscriptions
 - **Error handling**: every typed `ThetanutsError` code and what triggers it
 - **Gotchas**: the recurring footguns — `availableAmount` is collateral budget not contract count, `collateralAmount` in RFQ params is always 0, `split`/`reclaimCollateral` are payable in r12, butterfly names changed in v0.2.1, etc.
@@ -39,7 +39,7 @@ Both follow the [llmstxt.org](https://llmstxt.org) spec, so any tool that auto-d
 
 ### Connect via the MCP server
 
-If you're using Claude Desktop or any MCP-aware client, the SDK ships an MCP server that surfaces the same context as a tool call. Three context tools, plus 60+ read-only tools that wrap the SDK directly:
+If you're using Claude Desktop or any MCP-aware client, the SDK ships an MCP server that surfaces the same context as a tool call. Three context tools, plus SDK read tools and `prepare_*` calldata builders:
 
 - `get_sdk_context` — full long-form context (same content as `llms-full.txt`)
 - `get_sdk_context_index` — curated index (same content as `llms.txt`)

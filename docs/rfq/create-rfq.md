@@ -193,6 +193,8 @@ In `buildRFQRequest`, pass `reservePrice` as a human-readable number (e.g. `0.01
 | `reservePrice` | `number` | Optional max (BUY) or min (SELL) price per contract |
 | `requesterPublicKey` | `hex string` | Your ECDH compressed public key |
 
+For MCP callers, `prepare_request_rfq` validates the explicit `product` against the strike count before calldata is built: `PUT`/`CALL` require 1 strike, `*_SPREAD` require 2, `*_FLY` require 3, and `*_CONDOR`/`IRON_CONDOR` require 4. BUY RFQs require a positive per-contract `reservePrice`; use `prepare_suggest_reserve_price` instead of guessing.
+
 ---
 
 ## Convenience Helpers: Multi-Leg Builders

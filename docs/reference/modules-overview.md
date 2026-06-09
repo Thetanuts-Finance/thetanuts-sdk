@@ -1,6 +1,6 @@
 # Modules Overview
 
-All 14 SDK modules are accessed as properties on the `ThetanutsClient` instance — no separate instantiation needed.
+All 15 SDK modules are accessed as properties on the `ThetanutsClient` instance — no separate instantiation needed.
 
 ## Module Table
 
@@ -18,6 +18,7 @@ All 14 SDK modules are accessed as properties on the `ThetanutsClient` instance 
 | RFQ Keys | `client.rfqKeys` | ECDH key management and offer encryption | No |
 | Utils | `client.utils` | Decimal conversions, payoff calculations | No |
 | Loan | `client.loan` | Non-liquidatable lending | Write ops only |
+| Collar | `client.collar` | Zero-interest collar loans and collar pricing helpers | Write ops only |
 | WheelVault | `client.wheelVault` | WheelVault (Ethereum mainnet) interactions | Write ops only |
 | StrategyVault | `client.strategyVault` | StrategyVault (Base) interactions | Write ops only |
 
@@ -86,6 +87,12 @@ Relevant section: [Utilities](./utilities.md)
 Non-liquidatable lending. Borrowers deposit ETH/BTC collateral and receive USDC. At expiry, repay to reclaim collateral or walk away. Includes pricing, cost calculation, lending opportunities, and option exercise.
 
 Relevant section: [Loan overview](../loan/overview.md)
+
+### `client.collar` — CollarModule
+
+Zero-interest collar loan helpers. Pricing and strike filtering work today; on-chain write methods are gated until collar-v12 contract addresses are populated.
+
+Relevant section: [Collar loans](../loan/collar.md)
 
 ### `client.wheelVault` — WheelVaultModule
 

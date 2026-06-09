@@ -6,7 +6,7 @@ The chains where the Thetanuts SDK is currently available, and how to access per
 
 | Chain | Chain ID | Status | Notes |
 |-------|----------|--------|-------|
-| Base Mainnet | 8453 | Supported | Full SDK surface (OptionBook, RFQ, Loan, StrategyVault, Ranger) |
+| Base Mainnet | 8453 | Supported | Full options surface (OptionBook, RFQ, Loan, StrategyVault, Ranger). Collar pricing/preview helpers are available; on-chain collar writes are gated until collar-v12 addresses are populated. |
 | Ethereum Mainnet | 1 | Supported (vault-only) | WheelVault module only — OptionBook/RFQ are not deployed here |
 
 ## Chain Configuration

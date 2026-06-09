@@ -2,7 +2,7 @@
 
 The chain configuration bundles all on-chain addresses, token metadata, price feeds, and API endpoints for a supported network. Access it via `client.chainConfig`.
 
-Currently supported: **Base Mainnet** (chain ID `8453`) for the full options surface, and **Ethereum Mainnet** (chain ID `1`) for vault-only modules (`client.wheelVault`). See [Supported Chains](../getting-started/supported-chains.md) for the full breakdown.
+Currently supported: **Base Mainnet** (chain ID `8453`) for the full options surface, and **Ethereum Mainnet** (chain ID `1`) for vault-only modules (`client.wheelVault`). Collar pricing/preview helpers are available on Base, but on-chain collar write methods are gated until collar-v12 contract addresses are populated. See [Supported Chains](../getting-started/supported-chains.md) for the full breakdown.
 
 ## Accessing Chain Config
 
