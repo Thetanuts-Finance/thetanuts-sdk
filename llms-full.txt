@@ -24,13 +24,13 @@ The SDK lets a developer:
 
 The package ships ESM + CJS + types from a single `npm install @thetanuts-finance/thetanuts-client`.
 
-The current published version is `0.2.3`. Source of truth for the latest: `package.json` at the repo root.
+The current package version is `0.2.5`. Source of truth for the latest: `package.json` at the repo root.
 
 ---
 
 ## Architecture
 
-### One client, fourteen modules
+### One client, fifteen modules
 
 You construct one `ThetanutsClient` and access every feature through namespaced modules:
 
@@ -49,7 +49,7 @@ const client = new ThetanutsClient({
 });
 ```
 
-The 14 modules:
+The 15 modules:
 
 | Module | Purpose |
 |---|---|
@@ -65,6 +65,7 @@ The 14 modules:
 | `client.rfqKeys` | ECDH keypair generation + encryption for sealed-bid RFQs |
 | `client.mmPricing` | Market-Maker pricing with fee adjustment + collateral carrying cost |
 | `client.loan` | Non-liquidatable lending via physically-settled calls |
+| `client.collar` | Zero-interest collar loans; pricing helpers available, on-chain writes gated until collar-v12 deployment |
 | `client.wheelVault` | Gyro-style wheel-strategy vaults (Ethereum mainnet only) |
 | `client.strategyVault` | Fixed-strike + CLVEX directional/condor vaults (Base only) |
 
@@ -77,10 +78,10 @@ The 14 modules:
 
 | Chain | chainId | What works |
 |---|---|---|
-| Base mainnet | 8453 | Full options surface (OptionBook, OptionFactory, Ranger, Loan, StrategyVault) |
+| Base mainnet | 8453 | Full options surface (OptionBook, OptionFactory, Ranger, Loan, StrategyVault). Collar pricing/preview helpers are available; on-chain collar writes are gated until collar-v12 addresses are populated. |
 | Ethereum mainnet | 1 | Wheel Vault only — `client.wheelVault` |
 
-`client.ranger`, `client.optionBook`, `client.optionFactory`, `client.loan`, `client.strategyVault` throw `NETWORK_UNSUPPORTED` when called from chainId 1. `client.wheelVault` throws `NETWORK_UNSUPPORTED` when called from chainId 8453. The chain-gating is enforced at module-construction time.
+`client.ranger`, `client.optionBook`, `client.optionFactory`, `client.loan`, and `client.strategyVault` throw `NETWORK_UNSUPPORTED` when their guarded methods are called from chainId 1. `client.wheelVault` throws `NETWORK_UNSUPPORTED` when its guarded methods are called from chainId 8453.
 
 ---
 
@@ -686,8 +687,8 @@ If you're on `@^0.1.x` and want to keep talking to the prior Base deployment, st
 The SDK follows semver: MAJOR.MINOR.PATCH.
 
 - **0.x patches and minors may include breaking changes** (the project flagged v0.2.3 as BREAKING despite the patch-level number).
-- For locked behavior, install an exact version: `npm install @thetanuts-finance/thetanuts-client@0.2.3`.
-- A caret range `@^0.2.3` permits any future `0.2.x` update — useful for security patches.
+- For locked behavior, install an exact version: `npm install @thetanuts-finance/thetanuts-client@0.2.5`.
+- A caret range `@^0.2.5` permits any future `0.2.x` update — useful for security patches.
 
 Per-version detail lives at:
 - `CHANGELOG.md` (repo root, ships in tarball) — terse log

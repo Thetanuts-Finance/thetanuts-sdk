@@ -1,8 +1,8 @@
 # MCP Server
 
-A read-only MCP (Model Context Protocol) server that exposes Thetanuts SDK functionality to AI agents and LLM-powered tools.
+An MCP (Model Context Protocol) server that exposes Thetanuts SDK functionality to AI agents and LLM-powered tools.
 
-**This server is READ-ONLY.** It does not execute transactions, handle private keys, or perform any state-changing operations. Encoding tools return calldata for wallet signing only.
+The server reads protocol state and builds transaction calldata. It does not hold wallet private keys, sign wallet transactions, or broadcast transactions itself; `prepare_*` tools return wallet-signable call bundles.
 
 For full details, see [mcp-server/README.md](../../mcp-server/README.md) and [mcp-server/SPEC.md](../../mcp-server/SPEC.md).
 
@@ -87,13 +87,8 @@ These three handlers run before the chain client is initialized, so they don't c
 
 | Tool | Description |
 |------|-------------|
-| `build_rfq_request` | Build RFQ for vanilla PUT or CALL |
-| `build_spread_rfq` | Build two-leg spread RFQ |
-| `build_butterfly_rfq` | Build three-leg butterfly RFQ |
-| `build_condor_rfq` | Build four-leg condor RFQ |
-| `build_iron_condor_rfq` | Build four-leg iron condor RFQ |
-| `build_physical_option_rfq` | Build physically settled vanilla RFQ |
-| `prepare_request_rfq` | Build an RFQ creation call bundle |
+| `prepare_suggest_reserve_price` | Suggest a per-contract reserve price from the live IV surface |
+| `prepare_request_rfq` | Auth-gated RFQ creation call bundle with product-specific strike validation |
 
 ### Calculation Tools
 
@@ -132,6 +127,8 @@ These three handlers run before the chain client is initialized, so they don't c
 |------|-------------|
 | `prepare_auth_challenge` | Mint a single-use auth challenge |
 | `prepare_approve` | Auth-gated OptionFactory collateral-token approval |
+| `prepare_request_rfq` | Build an RFQ creation call bundle |
+| `prepare_suggest_reserve_price` | Suggest a reserve price for `prepare_request_rfq` |
 | `prepare_make_offer` | Encrypt an offer and return typed data to sign |
 | `prepare_make_offer_with_signature` | Build the make-offer call after signing |
 
@@ -180,7 +177,7 @@ These three handlers run before the chain client is initialized, so they don't c
 
 ### WheelVault Tools (Ethereum mainnet — chainId 1)
 
-WheelVault is gated to chainId 1; tools throw `NETWORK_UNSUPPORTED` unless `THETANUTS_RPC_URL` points at Ethereum mainnet.
+The current MCP process is pinned to Base (`chainId 8453`), so WheelVault tools throw `NETWORK_UNSUPPORTED` here. Use the TypeScript SDK with `chainId: 1` for Ethereum WheelVault access.
 
 | Tool | Description |
 |------|-------------|
@@ -229,7 +226,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "command": "node",
       "args": ["/path/to/thetanuts-sdk/mcp-server/dist/index.js"],
       "env": {
-        "THETANUTS_RPC_URL": "https://mainnet.base.org"
+        "THETANUTS_RPC_URL": "https://mainnet.base.org",
+        "KEYSTORE_MASTER_KEY": "<32-byte-hex-for-prepare-tools>"
       }
     }
   }
@@ -262,7 +260,9 @@ npm run dev
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `THETANUTS_RPC_URL` | `https://mainnet.base.org` | RPC endpoint for on-chain reads |
+| `THETANUTS_RPC_URL` | `https://mainnet.base.org` | Base RPC endpoint; this MCP currently constructs the SDK with `chainId: 8453` |
+| `KEYSTORE_MASTER_KEY` | required for `prepare_*` RFQ write tools | 32-byte hex key used to encrypt the local RFQ ECDH keystore |
+| `THETANUTS_KEYSTORE_PATH` | `./thetanuts-mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
 
 ## Example Calls
 

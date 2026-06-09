@@ -137,7 +137,7 @@ All modules are accessed as properties on the client:
 | Option | `client.option` | Position management |
 | Events | `client.events` | Blockchain events |
 | WebSocket | `client.ws` | Real-time subscriptions |
-| Pricing | `client.pricing` | Option pricing |
+| MM Pricing | `client.mmPricing` | Option pricing |
 | Utils | `client.utils` | Decimal conversions |
 | RFQKeyManager | `client.rfqKeys` | ECDH keys & encryption for RFQ |
 

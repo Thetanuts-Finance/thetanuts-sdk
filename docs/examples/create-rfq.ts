@@ -10,7 +10,7 @@
  */
 
 import { ethers } from 'ethers';
-import { ThetanutsClient, FileStorageProvider } from '@thetanuts-finance/thetanuts-client';
+import { ThetanutsClient, MemoryStorageProvider } from '@thetanuts-finance/thetanuts-client';
 
 // =============================================================================
 // Configuration
@@ -286,7 +286,7 @@ async function createCallRFQ(client: ThetanutsClient): Promise<void> {
  * Store the private key securely - you need it to decrypt MM offers.
  */
 async function generateKeyPair(client: ThetanutsClient): Promise<void> {
-  // Get or create a keypair (stored automatically in FileStorageProvider for Node.js)
+  // Get or create a keypair (stored automatically in the default Node.js file storage)
   const keyPair = await client.rfqKeys.getOrCreateKeyPair();
 
   console.log('ECDH Public Key (use in RFQ):', keyPair.compressedPublicKey);
@@ -302,15 +302,16 @@ async function generateKeyPair(client: ThetanutsClient): Promise<void> {
 // =============================================================================
 
 /**
- * Configure custom key storage location.
- * By default, Node.js uses FileStorageProvider with ./.thetanuts-keys/
+ * Configure custom key storage.
+ * By default, Node.js uses an internal file provider with ./.thetanuts-keys/.
  */
 async function initClientWithCustomStorage(): Promise<ThetanutsClient> {
   const provider = new ethers.JsonRpcProvider(RPC_URL);
   const signer = new ethers.Wallet(PRIVATE_KEY, provider);
 
-  // Custom storage location (e.g., for separate environments)
-  const keyStorage = new FileStorageProvider('./my-secure-keys');
+  // Example override for tests or ephemeral agents. Production apps can pass
+  // any object implementing KeyStorageProvider.
+  const keyStorage = new MemoryStorageProvider();
 
   const client = new ThetanutsClient({
     chainId: 8453,

@@ -9,13 +9,14 @@ import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
 
 const client = new ThetanutsClient({
   chainId: 8453,              // Required: Chain ID (Base = 8453)
-  provider?: Provider,        // Optional: ethers.js provider
+  provider: Provider,         // Required: ethers.js provider
   signer?: Signer,            // Optional: For write operations
   referrer?: string,          // Optional: Referrer address for fees
   apiBaseUrl?: string,        // Optional: Override API URL
   indexerApiUrl?: string,     // Optional: Override indexer URL
   pricingApiUrl?: string,     // Optional: Override pricing URL
   wsUrl?: string,             // Optional: Override WebSocket URL
+  stateApiUrl?: string,       // Optional: Override RFQ state indexer URL
   env?: 'dev' | 'prod',       // Optional: Environment (default: prod)
   logger?: ThetanutsLogger,   // Optional: Custom logger
   keyStorageProvider?: KeyStorageProvider,  // Optional: Custom RFQ key storage
@@ -47,11 +48,16 @@ client.optionBook     // Order book operations (fill, cancel, fees)
 client.api            // API interactions (orders, positions, stats)
 client.optionFactory  // RFQ lifecycle management
 client.option         // Position management
+client.ranger         // RangerOption zone-bound positions
 client.events         // Blockchain events
 client.ws             // WebSocket subscriptions
 client.mmPricing      // Market maker pricing
 client.rfqKeys        // ECDH key management and offer encryption
 client.utils          // Utility functions (decimals, payoffs)
+client.loan           // Non-liquidatable lending
+client.collar         // Collar loan pricing and write helpers
+client.wheelVault     // Ethereum wheel vaults
+client.strategyVault  // Base strategy vaults
 ```
 
 ## Chain Config Access
@@ -240,17 +246,22 @@ ThetanutsClient
 ├── api             ← APIModule
 ├── optionFactory   ← OptionFactoryModule
 ├── option          ← OptionModule
+├── ranger          ← RangerModule
 ├── events          ← EventsModule
 ├── ws              ← WebSocketModule
 ├── mmPricing       ← MMPricingModule
 ├── rfqKeys         ← RFQKeyManagerModule
-└── utils           ← UtilsModule
+├── utils           ← UtilsModule
+├── loan            ← LoanModule
+├── collar          ← CollarModule
+├── wheelVault      ← WheelVaultModule
+└── strategyVault   ← StrategyVaultModule
 ```
 
 ---
 
 ## See Also
 
-- [Modules Overview](./modules-overview.md) — All 10 modules at a glance
+- [Modules Overview](./modules-overview.md) — All 15 modules at a glance
 - [Chain Config](./chain-config.md) — Full chain configuration reference
 - [../getting-started/configuration.md](../getting-started/configuration.md) — Getting started with configuration

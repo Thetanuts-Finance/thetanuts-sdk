@@ -219,5 +219,5 @@ console.log('USDC:', client.utils.fromUsdcDecimals(usdcOnChain));              /
 ## See Also
 
 - [Decimal Reference](./decimals.md) — Token decimal table and conversion rules
-- [Modules Overview](./modules-overview.md) — All 10 modules at a glance
+- [Modules Overview](./modules-overview.md) — All 15 modules at a glance
 - [Chain Config](./chain-config.md) — Token addresses and decimals per chain

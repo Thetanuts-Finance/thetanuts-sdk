@@ -139,7 +139,7 @@ Rule of thumb: if the order you want already exists on the book, fill it. If not
 
 ## Modules
 
-The client exposes 14 modules. Pull what you need; the rest stay idle.
+The client exposes 15 modules. Pull what you need; the rest stay idle.
 
 | Module                  | Purpose                                              | Needs signer    |
 | ----------------------- | ---------------------------------------------------- | --------------- |
@@ -305,6 +305,8 @@ See the [RFQ workflow guide](docs/RFQ_WORKFLOW.md) for the full lifecycle: MM of
 #### Multi-leg RFQs (spread, butterfly, condor)
 
 Pass an array of strikes instead of a single strike. The generic SDK builder selects the implementation from option type plus strike count; MCP callers must pass the explicit `product` that matches the strike count (`*_SPREAD` = 2, `*_FLY` = 3, `*_CONDOR` / `IRON_CONDOR` = 4).
+
+MCP `prepare_request_rfq` validates the product/strike shape before calldata is built: `PUT`/`CALL` require 1 strike, `*_SPREAD` require 2, `*_FLY` require 3, and `*_CONDOR`/`IRON_CONDOR` require 4. BUY RFQs also require a positive per-contract `reservePrice`; use `prepare_suggest_reserve_price` instead of guessing.
 
 ```typescript
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
@@ -640,19 +642,15 @@ ECDH keypairs are persisted automatically. The default storage backend depends o
 
 | Environment | Default backend         | Persistence                      |
 | ----------- | ----------------------- | -------------------------------- |
-| Node.js     | `FileStorageProvider`   | `.thetanuts-keys/` (perms `0600`) |
+| Node.js     | internal file storage   | `.thetanuts-keys/` (perms `0600`) |
 | Browser     | `LocalStorageProvider`  | `localStorage`                    |
 
 ```typescript
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
 console.log(keyPair.compressedPublicKey);
 
-// Custom dir (Node)
-import { FileStorageProvider } from '@thetanuts-finance/thetanuts-client';
-const client = new ThetanutsClient({
-  chainId: 8453, provider,
-  keyStorageProvider: new FileStorageProvider('./my-keys'),
-});
+// Node persists RFQ keys to ./.thetanuts-keys/ by default.
+// For custom persistence, pass any object implementing KeyStorageProvider.
 
 // Memory-only (tests only — logs a warning, keys lost on exit)
 import { MemoryStorageProvider } from '@thetanuts-finance/thetanuts-client';

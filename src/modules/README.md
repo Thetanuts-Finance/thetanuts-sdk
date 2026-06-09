@@ -11,11 +11,16 @@ This directory contains the feature modules that provide all SDK functionality.
 | API | `api.ts` | Data fetching | No |
 | OptionFactory | `optionFactory.ts` | RFQ lifecycle | Write ops only |
 | Option | `option.ts` | Position management | Write ops only |
+| Ranger | `ranger.ts` | RangerOption zone-bound positions | Write ops only |
 | Events | `events.ts` | Blockchain events | No |
 | WebSocket | `websocket.ts` | Real-time data | No |
 | Utils | `utils.ts` | Calculations | No |
 | MMPricing | `mmPricing.ts` | Market Maker pricing | No |
 | RFQKeyManager | `rfqKeyManager.ts` | ECDH keys & encryption for RFQ | No |
+| Loan | `loan.ts` | Non-liquidatable lending | Write ops only |
+| Collar | `collar.ts` | Zero-interest collar loans | Write ops only |
+| WheelVault | `wheelVault.ts` | Ethereum wheel vaults | Write ops only |
+| StrategyVault | `strategyVault.ts` | Base fixed-strike and CLVEX vaults | Write ops only |
 
 ## Table of Contents
 
@@ -24,11 +29,16 @@ This directory contains the feature modules that provide all SDK functionality.
 - [APIModule](#apimodule)
 - [OptionFactoryModule](#optionfactorymodule)
 - [OptionModule](#optionmodule)
+- [RangerModule](#rangermodule)
 - [EventsModule](#eventsmodule)
 - [WebSocketModule](#websocketmodule)
 - [UtilsModule](#utilsmodule)
 - [MMPricingModule](#mmpricingmodule)
 - [RFQKeyManagerModule](#rfqkeymanagermodule)
+- [LoanModule](#loanmodule)
+- [CollarModule](#collarmodule)
+- [WheelVaultModule](#wheelvaultmodule)
+- [StrategyVaultModule](#strategyvaultmodule)
 - [Excluded Admin Functions](#excluded-admin-functions)
 
 ---
@@ -964,6 +974,136 @@ MM pricing includes:
 
 ---
 
+## RangerModule
+
+RangerOption support for zone-bound, 4-strike payoff structures on Base.
+
+### Common methods
+
+```typescript
+const info = await client.ranger.getInfo(rangerAddress);
+const strikes = await client.ranger.getStrikes(rangerAddress);
+const zone = await client.ranger.getZone(rangerAddress);
+const payout = await client.ranger.calculatePayout(rangerAddress, settlementPrice);
+const simulated = await client.ranger.simulatePayout(rangerAddress, price, strikes, numContracts);
+const collateral = await client.ranger.calculateRequiredCollateral(rangerAddress, strikes, numContracts);
+
+await client.ranger.payout(rangerAddress);
+await client.ranger.close(rangerAddress);
+await client.ranger.split(rangerAddress, splitCollateralAmount);
+await client.ranger.transfer(rangerAddress, isBuyer, target);
+await client.ranger.reclaimCollateral(rangerAddress, ownedOption);
+await client.ranger.returnExcessCollateral(rangerAddress);
+```
+
+The module is chain-gated: methods throw `NETWORK_UNSUPPORTED` on chains where the `RANGER` implementation is not deployed.
+
+---
+
+## LoanModule
+
+Non-liquidatable lending backed by physically settled call options on Base.
+
+### Common methods
+
+```typescript
+const result = await client.loan.requestLoan(request);
+await client.loan.acceptOffer(quotationId, offerAmount, nonce, offeror);
+await client.loan.cancelLoan(quotationId);
+await client.loan.exerciseOption(optionAddress);
+await client.loan.doNotExercise(optionAddress);
+await client.loan.swapAndExercise(optionAddress, swapParams);
+await client.loan.splitOption(optionAddress, splitCollateralAmount);
+await client.loan.reclaimCollateral(optionAddress, ownedOption);
+
+const opportunities = await client.loan.getLendingOpportunities();
+const requestState = await client.loan.getLoanRequest(quotationId);
+const userLoans = await client.loan.getUserLoans(userAddress);
+const optionInfo = await client.loan.getOptionInfo(optionAddress);
+const strikes = await client.loan.getStrikeOptions('ETH');
+const calc = client.loan.calculateLoan(params);
+```
+
+The module uses the Base loan coordinator configuration and is not available from an Ethereum-mainnet client.
+
+---
+
+## CollarModule
+
+Zero-interest collar loan helpers. Pricing and strike filtering are available now; on-chain write methods require the collar-v12 coordinator addresses to be populated.
+
+### Common methods
+
+```typescript
+const deployed = client.collar.isDeployed();
+const estimate = client.collar.estimateCollar(params);
+const filtered = client.collar.filterCapStrikes(capStrikes, settings);
+const groups = await client.collar.getCapStrikeOptions('ETH', settings);
+const maxCap = await client.collar.getMaxCapStrike('ETH');
+const loanRequest = await client.collar.getLoanRequest(quotationId);
+
+await client.collar.requestLoan(request);
+await client.collar.cancelLoan(quotationId);
+await client.collar.acceptOffer(quotationId, offerAmount, nonce, offeror);
+await client.collar.exerciseCollar(optionAddress);
+await client.collar.walkAwayCollar(optionAddress);
+```
+
+When `isDeployed()` is false, on-chain methods throw `NETWORK_UNSUPPORTED` instead of routing to zero-address placeholders.
+
+---
+
+## WheelVaultModule
+
+Gyro-style wheel-strategy vault interactions on Ethereum mainnet.
+
+### Common methods
+
+```typescript
+const state = await client.wheelVault.getVaultState(vaultAddress, seriesId);
+const series = await client.wheelVault.getSeries(vaultAddress, seriesId);
+const count = await client.wheelVault.getSeriesCount(vaultAddress);
+const split = await client.wheelVault.estimateDepositSplit(vaultAddress, seriesId, token, amount);
+const shares = await client.wheelVault.previewDeposit(vaultAddress, seriesId, baseAmount, quoteAmount);
+
+await client.wheelVault.deposit(vaultAddress, seriesId, baseAmount, quoteAmount, expectedPrice);
+await client.wheelVault.withdraw(vaultAddress, seriesId, shares, expectedPrice);
+await client.wheelVault.depositSingle(params);
+await client.wheelVault.withdrawSingle(params);
+await client.wheelVault.marketFill(marketsAddress, fillParams);
+```
+
+The module is chain-gated to `chainId: 1`; Base-configured clients throw `NETWORK_UNSUPPORTED`.
+
+---
+
+## StrategyVaultModule
+
+Fixed-strike and CLVEX strategy vault interactions on Base.
+
+### Common methods
+
+```typescript
+const state = await client.strategyVault.getVaultState(vaultAddress);
+const assets = await client.strategyVault.getTotalAssets(vaultAddress);
+const shares = await client.strategyVault.getShareBalance(vaultAddress, userAddress);
+const nextExpiry = await client.strategyVault.getNextExpiry(vaultAddress);
+const canCreate = await client.strategyVault.canCreateOption(vaultAddress);
+const recovery = await client.strategyVault.isRecoveryMode(vaultAddress);
+
+await client.strategyVault.deposit(vaultAddress, amount, assetIndex);
+await client.strategyVault.withdraw(vaultAddress, shares);
+await client.strategyVault.createOption(vaultAddress);
+
+const fixedStrike = await client.strategyVault.getFixedStrikeVaults();
+const clvex = await client.strategyVault.getClvexVaults();
+const all = await client.strategyVault.getAllVaults();
+```
+
+The module is chain-gated to Base (`chainId: 8453`).
+
+---
+
 ## Excluded Admin Functions
 
 The following on-chain admin functions are **intentionally excluded** from the SDK. They require contract owner authorization and are not relevant to application developers or market makers.
@@ -986,4 +1126,3 @@ These methods are included because they serve referral partners or have broader 
 | `optionFactory` | `withdrawFees()` | Requires owner auth — see `@remarks` in JSDoc |
 | `optionBook` | `setReferrerFeeSplit()` | Requires owner auth — see `@remarks` in JSDoc |
 | `optionBook` | `sweepProtocolFees()` | Sends fees to owner — see `@remarks` in JSDoc |
-

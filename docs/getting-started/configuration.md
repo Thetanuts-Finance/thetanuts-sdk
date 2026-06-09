@@ -14,8 +14,11 @@ interface ThetanutsClientConfig {
   indexerApiUrl?: string;           // Optional: Override indexer URL
   pricingApiUrl?: string;           // Optional: Override pricing URL
   wsUrl?: string;                   // Optional: Override WebSocket URL
+  stateApiUrl?: string;             // Optional: Override RFQ state indexer URL
   env?: 'dev' | 'prod';             // Optional: Environment (default: prod)
   logger?: ThetanutsLogger;         // Optional: Custom logger
+  keyStorageProvider?: KeyStorageProvider; // Optional: RFQ key storage override
+  rfqKeyPrefix?: string;            // Optional: RFQ key namespace
 }
 ```
 

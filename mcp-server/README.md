@@ -91,13 +91,8 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 #### RFQ Builder Tools
 | Tool | Description |
 |------|-------------|
-| `build_rfq_request` | Build RFQ request parameters for vanilla PUT or CALL option |
-| `build_spread_rfq` | Build RFQ request for a two-leg spread (put spread or call spread) |
-| `build_butterfly_rfq` | Build RFQ request for a three-leg butterfly |
-| `build_condor_rfq` | Build RFQ request for a four-leg condor (all calls or all puts) |
-| `build_iron_condor_rfq` | Build RFQ request for a four-leg iron condor (put spread + call spread) |
-| `build_physical_option_rfq` | Build RFQ request for physical-settled vanilla PUT or CALL |
-| `prepare_request_rfq` | Build an RFQ creation call bundle, including exact approval when needed |
+| `prepare_suggest_reserve_price` | Suggest a per-contract reserve price from the live IV surface |
+| `prepare_request_rfq` | Auth-gated RFQ creation call bundle with product-specific strike validation and approval when needed |
 
 #### Calculation Tools
 | Tool | Description |
@@ -174,7 +169,7 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 | `get_loan_strike_options` | Filtered strike options grouped by expiry |
 
 #### WheelVault Tools (Ethereum mainnet — chainId 1)
-WheelVault is gated to Ethereum mainnet. These tools require `THETANUTS_RPC_URL` to point at an Ethereum RPC; they throw `NETWORK_UNSUPPORTED` on Base.
+The current MCP process is pinned to Base (`chainId 8453`), so WheelVault tools throw `NETWORK_UNSUPPORTED` here. Use the TypeScript SDK with `chainId: 1` for Ethereum WheelVault access.
 
 | Tool | Description |
 |------|-------------|
@@ -230,7 +225,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "command": "npx",
       "args": ["-y", "@thetanuts-finance/mcp"],
       "env": {
-        "THETANUTS_RPC_URL": "https://mainnet.base.org"
+        "THETANUTS_RPC_URL": "https://mainnet.base.org",
+        "KEYSTORE_MASTER_KEY": "<32-byte-hex-for-prepare-tools>"
       }
     }
   }
@@ -390,7 +386,7 @@ For the full SDK context (every module, every workflow, every gotcha), call `get
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `THETANUTS_RPC_URL` | `https://mainnet.base.org` | RPC endpoint |
+| `THETANUTS_RPC_URL` | `https://mainnet.base.org` | Base RPC endpoint; this MCP currently constructs the SDK with `chainId: 8453` |
 | `KEYSTORE_MASTER_KEY` | required for `prepare_*` RFQ write tools | 32-byte hex key used to encrypt the local RFQ ECDH keystore. Generate with `openssl rand -hex 32` |
 | `THETANUTS_KEYSTORE_PATH` | `./thetanuts-mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
 

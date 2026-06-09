@@ -1017,43 +1017,20 @@ interface KeyStorageProvider {
 }
 ```
 
-### Built-in Storage Providers
+### Storage Providers
+
+The root package exports `LocalStorageProvider`, `MemoryStorageProvider`, and the `KeyStorageProvider` interface. Node.js uses an internal file-backed default provider that persists keys to `./.thetanuts-keys/` with owner-only permissions.
 
 ```typescript
-// File-based storage (Node.js default, keys persist to disk)
-class FileStorageProvider implements KeyStorageProvider {
-  constructor(basePath?: string);  // Default: './.thetanuts-keys'
-  getBasePath(): string;           // Get storage directory
-}
+import { MemoryStorageProvider, ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
+import type { KeyStorageProvider } from '@thetanuts-finance/thetanuts-client';
 
-// Browser localStorage (browser default, persists across sessions)
-class LocalStorageProvider implements KeyStorageProvider { ... }
-
-// In-memory storage (testing, keys lost on exit)
-class MemoryStorageProvider implements KeyStorageProvider {
-  clear(): void;  // Clear all stored keys
-}
-```
-
-**FileStorageProvider Features:**
-- Default for Node.js environments
-- Keys persist to `.thetanuts-keys/` directory
-- Directory created with `0o700` permissions (owner only)
-- Key files have `0o600` permissions (owner read/write)
-- Atomic writes to prevent corruption
-- Path traversal protection
-
-**Usage Example:**
-
-```typescript
-import { FileStorageProvider, ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
-
-// Default (uses ./.thetanuts-keys/)
+// Default Node.js persistence uses ./.thetanuts-keys/
 const client = new ThetanutsClient({ chainId: 8453, provider });
 
-// Custom location
-const storage = new FileStorageProvider('./my-keys');
-const client = new ThetanutsClient({
+// Custom storage: pass any KeyStorageProvider implementation.
+const storage: KeyStorageProvider = new MemoryStorageProvider();
+const testClient = new ThetanutsClient({
   chainId: 8453,
   provider,
   keyStorageProvider: storage,

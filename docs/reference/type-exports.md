@@ -38,7 +38,6 @@ import type {
   // MM Pricing
   MMVanillaPricing,
   MMPositionPricing,
-  MMCollateralPricing,
   MMSpreadPricing,
   MMCondorPricing,
   MMButterflyPricing,
@@ -52,7 +51,7 @@ import type {
   Position,
   PositionSettlement,
   TradeHistory,
-  ProtocolStats,
+  APIProtocolStats,
 
   // RFQ Key Manager
   RFQKeyPair,
@@ -63,7 +62,6 @@ import type {
 
 // Storage Providers (concrete classes, not just types)
 import {
-  FileStorageProvider,
   LocalStorageProvider,
   MemoryStorageProvider,
 } from '@thetanuts-finance/thetanuts-client';
@@ -86,9 +84,9 @@ import {
 | `RFQRequest` | `type` | Complete RFQ request ready for submission |
 | `QuotationParameters` | `type` | On-chain quotation parameters |
 | `QuotationTracking` | `type` | Tracking fields (referralId, eventCode) |
-| `RFQUnderlying` | `type` | `'ETH' \| 'BTC'` |
+| `RFQUnderlying` | `type` | `'ETH' \| 'BTC' \| 'SOL' \| 'DOGE' \| 'XRP' \| 'BNB' \| 'PAXG' \| 'AVAX'` |
 | `RFQOptionType` | `type` | `'CALL' \| 'PUT'` |
-| `RFQCollateralToken` | `type` | `'USDC' \| 'WETH' \| 'cbBTC'` |
+| `RFQCollateralToken` | `type` | `'USDC' \| 'WETH' \| 'cbBTC' \| 'aBasWETH' \| 'aBascbBTC' \| 'aBasUSDC' \| 'cbDOGE' \| 'cbXRP'` |
 
 ### Multi-leg RFQ Helpers
 
@@ -118,7 +116,6 @@ import {
 |--------|------|-------------|
 | `MMVanillaPricing` | `type` | Pricing for a single vanilla option (bid/ask, IV, collateral breakdown) |
 | `MMPositionPricing` | `type` | Position pricing including collateral cost and total price |
-| `MMCollateralPricing` | `type` | Per-collateral-token pricing details |
 | `MMSpreadPricing` | `type` | Spread pricing with width, collateral cost, MM bid/ask |
 | `MMCondorPricing` | `type` | Condor pricing with four legs and spread collateral cost |
 | `MMButterflyPricing` | `type` | Butterfly pricing with three legs and wing width |
@@ -127,7 +124,7 @@ import {
 
 | Export | Kind | Description |
 |--------|------|-------------|
-| `PayoutType` | `type` | `'call' \| 'put' \| 'call_spread' \| 'put_spread'` |
+| `PayoutType` | `type` | `'call' \| 'put' \| 'call_spread' \| 'put_spread' \| 'call_fly' \| 'put_fly' \| 'call_condor' \| 'put_condor' \| 'iron_condor' \| 'ranger'` |
 | `PayoutParams` | `type` | Parameters for `calculatePayout()` |
 
 ### API
@@ -138,7 +135,7 @@ import {
 | `Position` | `type` | User position with full details from the indexer |
 | `PositionSettlement` | `type` | Settlement details (price, payouts, exercised flag, oracle status) |
 | `TradeHistory` | `type` | Trade history entry |
-| `ProtocolStats` | `type` | Protocol-wide statistics |
+| `APIProtocolStats` | `type` | Protocol-wide statistics from the API module |
 
 ### RFQ Key Manager
 
@@ -153,7 +150,6 @@ import {
 
 | Export | Kind | Description |
 |--------|------|-------------|
-| `FileStorageProvider` | `class` | File-based storage for Node.js (default in Node.js) |
 | `LocalStorageProvider` | `class` | Browser localStorage storage (default in browser) |
 | `MemoryStorageProvider` | `class` | In-memory storage for testing only (keys lost on exit) |
 
@@ -186,6 +182,6 @@ function buildMyRFQ(
 
 ## See Also
 
-- [Modules Overview](./modules-overview.md) — All 10 modules at a glance
+- [Modules Overview](./modules-overview.md) — All 15 modules at a glance
 - [Client](./client.md) — ThetanutsClient constructor and properties
 - [../rfq/overview.md](../rfq/overview.md) — RFQ module and workflow

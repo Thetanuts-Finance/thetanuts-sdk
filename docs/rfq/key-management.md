@@ -19,7 +19,7 @@ The SDK automatically selects a storage provider based on your runtime environme
 
 | Environment | Default Provider | Persistence | Location |
 |-------------|-----------------|-------------|----------|
-| **Node.js** | `FileStorageProvider` | Persistent | `.thetanuts-keys/` directory (permissions 0o600) |
+| **Node.js** | internal file storage | Persistent | `.thetanuts-keys/` directory (permissions 0o600) |
 | **Browser** | `LocalStorageProvider` | Persistent | Browser `localStorage` |
 | **Testing** | `MemoryStorageProvider` | Lost on exit | In-memory only |
 
@@ -44,14 +44,21 @@ console.log('Public Key:', keyPair.compressedPublicKey);
 
 ---
 
-## Custom Storage Location (Node.js)
+## Custom Storage Provider
 
-To save keys to a non-default directory, pass a `FileStorageProvider` at initialization:
+Node.js persists keys to `./.thetanuts-keys/` automatically. To use a different backend, pass any object that implements `KeyStorageProvider`:
 
 ```typescript
-import { ThetanutsClient, FileStorageProvider } from '@thetanuts-finance/thetanuts-client';
+import { ThetanutsClient } from '@thetanuts-finance/thetanuts-client';
+import type { KeyStorageProvider } from '@thetanuts-finance/thetanuts-client';
 
-const customStorage = new FileStorageProvider('./my-secure-keys');
+const customStorage: KeyStorageProvider = {
+  async get(keyId) { return myStore.get(keyId); },
+  async set(keyId, privateKey) { await myStore.set(keyId, privateKey); },
+  async remove(keyId) { await myStore.delete(keyId); },
+  async has(keyId) { return myStore.has(keyId); },
+};
+
 const client = new ThetanutsClient({
   chainId: 8453,
   provider,
@@ -59,7 +66,6 @@ const client = new ThetanutsClient({
 });
 
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
-// Keys saved to ./my-secure-keys/ with 0o600 permissions
 ```
 
 ---

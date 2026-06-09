@@ -10,7 +10,7 @@ src/
 ├── abis/              # Smart contract ABIs
 ├── chains/            # Chain configuration and network support
 ├── client/            # ThetanutsClient main class
-├── modules/           # Feature modules (11 total)
+├── modules/           # Feature modules (15 total)
 ├── types/             # TypeScript type definitions
 └── utils/             # Utility functions
 ```
@@ -30,12 +30,16 @@ src/
 │  │  Module  │ │  Module  │ │  Module  │ │     Module       │  │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │
-│  │  Option  │ │  Events  │ │WebSocket │ │    PricingV4     │  │
+│  │  Option  │ │  Ranger  │ │  Events  │ │    WebSocket     │  │
 │  │  Module  │ │  Module  │ │  Module  │ │     Module       │  │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘  │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐ ┌──────────┐  │
+│  │MMPricing │ │  Utils   │ │   RFQKeyManager  │ │   Loan   │  │
+│  │  Module  │ │  Module  │ │      Module      │ │  Module  │  │
+│  └──────────┘ └──────────┘ └──────────────────┘ └──────────┘  │
 │  ┌──────────┐ ┌──────────────────┐ ┌──────────────────┐        │
-│  │  Utils   │ │   RFQKeyManager  │ │      Loan        │        │
-│  │  Module  │ │      Module      │ │     Module       │        │
+│  │  Collar  │ │    WheelVault    │ │  StrategyVault   │        │
+│  │  Module  │ │      Module      │ │      Module      │        │
 │  └──────────┘ └──────────────────┘ └──────────────────┘        │
 ├─────────────────────────────────────────────────────────────────┤
 │                      DEPENDENCIES                               │
@@ -106,7 +110,11 @@ ThetanutsClient
     │
     ├── Events Module ───────► Blockchain Events
     │
-    └── PricingV4 Module ────► Pricing API
+    ├── MMPricing Module ────► Pricing API
+    │
+    ├── Loan / Collar Modules ───► Pricing and loan APIs
+    │
+    └── Vault Modules ───────► Vault contracts and lens APIs
 ```
 
 ### Write Operations
@@ -144,7 +152,7 @@ dist/
 | `abis/` | 6 | Smart contract ABI definitions |
 | `chains/` | 2 | Chain configuration (Base mainnet, Loan config) |
 | `client/` | 2 | ThetanutsClient entry point |
-| `modules/` | 11 | Feature modules (ERC20, OptionBook, API, OptionFactory, Option, Events, WebSocket, PricingV4, Utils, RFQKeyManager, Loan) |
+| `modules/` | 15 | Feature modules (ERC20, OptionBook, API, OptionFactory, Option, Ranger, Events, WebSocket, MMPricing, Utils, RFQKeyManager, Loan, Collar, WheelVault, StrategyVault) |
 | `types/` | 14 | TypeScript type definitions |
 | `utils/` | 5 | Utility functions (decimals, errors, logger, validation) |
 | `index.ts` | 1 | Main entry point — exports all public APIs |

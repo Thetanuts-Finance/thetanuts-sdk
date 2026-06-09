@@ -2,7 +2,7 @@
 
 ## Overview
 
-This MCP (Model Context Protocol) server provides **read-only** access to the Thetanuts SDK for querying options data on Base mainnet.
+This MCP (Model Context Protocol) server exposes Thetanuts SDK reads and Base transaction builders for options workflows. It never signs wallet transactions or broadcasts them on its own.
 
 ## MCP Protocol Compliance
 
@@ -37,7 +37,7 @@ All tool responses follow MCP standard:
 
 ## Security Constraints
 
-### ✅ ALLOWED (Read-Only)
+### Allowed
 - Fetch market data and prices
 - Query orderbook
 - Get user positions and history
@@ -46,14 +46,15 @@ All tool responses follow MCP standard:
 - Preview order fills (dry-run)
 - Query blockchain events
 - Get protocol statistics
+- Build wallet-signable transaction call bundles via `prepare_*` tools
 
-### ❌ FORBIDDEN (Not Implemented)
-- Execute transactions
-- Fill/cancel orders
+### Forbidden
+- Execute or broadcast transactions directly
+- Fill or cancel orders without a separate wallet/signer
 - Handle private keys
-- Sign messages
-- Approve token spending
-- Any state-changing operations
+- Sign wallet transactions
+- Broadcast transactions directly
+- Execute state changes without a separate wallet/signer
 
 ## Tools Specification
 
@@ -151,23 +152,7 @@ Calculate payout for an existing option at a settlement price.
 
 ### Pricing Tools
 
-#### `get_greeks`
-Calculate option Greeks.
-
-**Input:**
-- `underlying: string` - "ETH" or "BTC"
-- `optionType: "call" | "put"`
-- `strike: string` - Strike in 8 decimals
-- `expiry: number` - Unix timestamp
-- `size?: string` - Position size (18 decimals)
-
-**Output:** `{ delta, gamma, theta, vega, rho, impliedVolatility, ... }`
-
-#### `get_iv_surface`
-Get implied volatility surface.
-
-**Input:** `{ underlying: string }`
-**Output:** `{ underlying, points: [...], timestamp }`
+Current MM pricing tools are `get_mm_all_pricing`, `get_mm_ticker_pricing`, `get_mm_position_pricing`, `get_mm_spread_pricing`, `get_mm_condor_pricing`, and `get_mm_butterfly_pricing`. They wrap the SDK `client.mmPricing` module and return fee-adjusted bid/ask pricing from the pricing API.
 
 ---
 
@@ -271,7 +256,7 @@ Get chain configuration.
 
 ### WheelVault Tools (Ethereum mainnet — chainId 1)
 
-WheelVault is gated to chainId 1. Set `THETANUTS_RPC_URL` to an Ethereum RPC before invoking these. Otherwise the tool throws `NETWORK_UNSUPPORTED`.
+The current MCP process is pinned to Base (`chainId 8453`), so WheelVault tools throw `NETWORK_UNSUPPORTED` here. Use the TypeScript SDK with `chainId: 1` for Ethereum WheelVault access.
 
 | Tool | Input | Output |
 |------|-------|--------|
@@ -326,7 +311,9 @@ npx @modelcontextprotocol/inspector node dist/index.js
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `THETANUTS_RPC_URL` | `https://mainnet.base.org` | Base RPC endpoint |
+| `THETANUTS_RPC_URL` | `https://mainnet.base.org` | Base RPC endpoint; this MCP currently constructs the SDK with `chainId: 8453` |
+| `KEYSTORE_MASTER_KEY` | required for `prepare_*` RFQ write tools | 32-byte hex key used to encrypt the local RFQ ECDH keystore |
+| `THETANUTS_KEYSTORE_PATH` | `./thetanuts-mcp-keystore.sqlite` | Optional path for the encrypted RFQ keystore |
 
 ## Decimal Reference
 

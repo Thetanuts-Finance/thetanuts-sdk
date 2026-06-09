@@ -207,17 +207,7 @@ if (ironCondorOrder) {
 
 These are the cash-settled implementation contracts used by OptionBook orders:
 
-| Type | Key | Address |
-|------|-----|---------|
-| Vanilla PUT | `PUT` | `0xF480F636301d50Ed570D026254dC5728b746A90F` |
-| Vanilla CALL | `INVERSE_CALL` | `0x3CeB524cBA83D2D4579F5a9F8C0D1f5701dd16FE` |
-| Call Spread | `CALL_SPREAD` | `0x4D75654bC616F64F6010d512C3B277891FB52540` |
-| Put Spread | `PUT_SPREAD` | `0xC9767F9a2f1eADC7Fdcb7f0057E829D9d760E086` |
-| Call Butterfly | `CALL_FLY` | `0xD8EA785ab2A63a8a94C38f42932a54A3E45501c3` |
-| Put Butterfly | `PUT_FLY` | `0x1fE24872Ab7c83BbA26Dc761ce2EA735c9b96175` |
-| Call Condor | `CALL_CONDOR` | `0xbb5d2EB2D354D930899DaBad01e032C76CC3c28f` |
-| Put Condor | `PUT_CONDOR` | `0xbdAcC00Dc3F6e1928D9380c17684344e947aa3Ec` |
-| Iron Condor | `IRON_CONDOR` | `0x494Cd61b866D076c45564e236D6Cb9e011a72978` |
+Use `client.chainConfig.implementations` for the current Base r12 implementation addresses. The SDK also keeps reverse-lookup metadata for older implementation versions that may appear in indexed orders.
 
 Orders from `fetchOrders()` may also reference earlier implementation versions. The SDK handles both transparently.
 
