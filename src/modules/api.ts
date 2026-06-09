@@ -409,6 +409,83 @@ export class APIModule {
     }
   }
 
+  /**
+   * Lower-cased current factory address (or `''` if not configured on this
+   * chain — e.g. Ethereum mainnet, which is vault-only). Used by every
+   * by-id and by-user indexer reader to filter out rows from predecessor
+   * factory deployments. See class-level note about "multi-factory bug".
+   *
+   * Rationale (the bug this guards against): the indexer's
+   * `/api/v1/factory/rfqs/{id}` endpoint is factory-agnostic and returns
+   * the oldest-indexed row when the id collides across deployments. The
+   * by-user endpoints accept an address with no factory scope, so they
+   * happen to return current-factory rows only because no address has
+   * activity on multiple factories yet — but that's coincidence, not
+   * correctness. We filter client-side until the indexer fixes it.
+   */
+  private currentFactoryLc(): string {
+    return (this.client.chainConfig.contracts.optionFactory ?? '').toLowerCase();
+  }
+
+  /**
+   * Throw `RFQ_FACTORY_MISMATCH` when a single-row indexer payload belongs
+   * to a different factory than the SDK is configured for.
+   *
+   * Used by every "by-id" indexer reader so the LLM (or any consumer)
+   * cannot silently act on a stale row from a predecessor deployment.
+   */
+  private assertCurrentFactory(
+    row: { factoryAddress?: string },
+    context: { kind: string; id: string },
+  ): void {
+    const current = this.currentFactoryLc();
+    if (!current) return; // chain has no factory (Ethereum) — nothing to enforce
+    const got = row.factoryAddress?.toLowerCase();
+    if (!got) return; // pre-bugfix indexer or unrelated payload — be permissive
+    if (got !== current) {
+      throw mapHttpError(
+        Object.assign(
+          new Error(
+            `${context.kind} ${context.id} belongs to factory ${got} but the SDK is configured for ${current}. ` +
+            `This is the known indexer-by-id bug — the same id exists on a predecessor factory deployment and the ` +
+            `indexer returned the wrong row. Use the on-chain reader (e.g. optionFactory.getQuotation(id)) for ` +
+            `authoritative state. If you really want the predecessor-factory row, fetch via a chain config pointed ` +
+            `at that factory.`,
+          ),
+          {
+            response: { status: 409 },
+            config: { url: `${context.kind}/${context.id}` },
+            // Surface structured fields so the MCP catch block (and any
+            // other consumer) can render a useful error instead of a
+            // generic 500.
+            code: 'RFQ_FACTORY_MISMATCH',
+            expectedFactory: current,
+            actualFactory: got,
+          },
+        ),
+      );
+    }
+  }
+
+  /**
+   * Drop rows whose `factoryAddress` doesn't match the current chain
+   * config. Used by list/user endpoints where mixed-factory output is
+   * possible and silent-truncation is the right semantics ("rows on the
+   * current chain config" — the alternative is to return mixed rows and
+   * leave the consumer to do this filter, which is what was happening
+   * before this guard).
+   */
+  private filterToCurrentFactory<T extends { factoryAddress?: string }>(rows: T[]): T[] {
+    const current = this.currentFactoryLc();
+    if (!current) return rows;
+    return rows.filter(r => {
+      const got = r.factoryAddress?.toLowerCase();
+      // Permissive on missing factoryAddress — older indexer versions or
+      // unrelated payloads don't carry it. Strict mode would drop them.
+      return !got || got === current;
+    });
+  }
+
 
   // ============================================================
   // State/RFQ API Methods
@@ -482,12 +559,13 @@ export class APIModule {
 
     const statusParam = status ? `?status=${status}` : '';
     const response = await this.stateRequest<{ data: StateRfq[] }>(`/api/v1/factory/rfqs${statusParam}`);
-    const data = response.data;
+    // Strip predecessor-factory rows before applying any status re-filter.
+    let data = this.filterToCurrentFactory(response.data);
 
     // Client-side re-filter: indexer may return RFQs whose is_active flag
     // disagrees with their derived status (e.g. cancelled RFQ with is_active=true)
     if (status) {
-      return data.filter((rfq) => rfq.status === status);
+      data = data.filter((rfq) => rfq.status === status);
     }
     return data;
   }
@@ -510,7 +588,7 @@ export class APIModule {
   async getFactoryOffers(): Promise<StateOffer[]> {
     this.client.logger.debug('Fetching factory offers');
     const response = await this.stateRequest<{ data: StateOffer[] }>('/api/v1/factory/offers');
-    return response.data;
+    return this.filterToCurrentFactory(response.data);
   }
 
   /** @deprecated Use `getFactoryOffers()` instead */
@@ -531,7 +609,7 @@ export class APIModule {
   async getFactoryOptions(): Promise<StateOption[]> {
     this.client.logger.debug('Fetching factory options');
     const response = await this.stateRequest<{ data: StateOption[] }>('/api/v1/factory/options');
-    return response.data;
+    return this.filterToCurrentFactory(response.data);
   }
 
   /** @deprecated Use `getFactoryOptions()` instead */
@@ -602,7 +680,68 @@ export class APIModule {
       );
     }
 
+    // Guard against the multi-factory indexer bug. The endpoint returns
+    // the oldest-indexed RFQ for any given id, so on collision we'd
+    // hand back a predecessor-factory row pretending to be the current
+    // one. Refuse the result rather than silently lie.
+    this.assertCurrentFactory(result, { kind: 'RFQ', id });
+
     return result;
+  }
+
+  /**
+   * Get the requester's ECDH public key for a quotation, as stored on
+   * `StateRfq.requesterPublicKey`. This is what an offeror needs to encrypt
+   * a sealed-bid offer to the requester (via `client.rfqKeys.encryptOffer`).
+   *
+   * Source of truth: the `QuotationRequested` event's `requesterPublicKey`
+   * arg, hydrated by the State API indexer.
+   *
+   * @param quotationId - Quotation ID (decimal string)
+   * @returns Compressed public key as hex string (e.g. `0x02abc...`)
+   * @throws if the quotation is missing or has no recorded public key
+   */
+  async getRequesterPublicKey(quotationId: string): Promise<string> {
+    const rfq = await this.getRfq(quotationId);
+    if (!rfq.requesterPublicKey) {
+      throw mapHttpError(
+        Object.assign(new Error(`RFQ ${quotationId} has no requesterPublicKey`), {
+          response: { status: 404 },
+          config: { url: `/api/v1/factory/rfqs/${quotationId}` },
+        })
+      );
+    }
+    return rfq.requesterPublicKey;
+  }
+
+  /**
+   * Get a specific offeror's offer on a quotation, including the encrypted
+   * payload (`signedOfferForRequester`) and the offeror's ephemeral
+   * `signingKey`. The requester uses these to decrypt and reconstruct
+   * `(offerAmount, nonce)` for `settleQuotationEarly`.
+   *
+   * @param quotationId - Quotation ID (decimal string)
+   * @param offeror     - Offeror's wallet address
+   * @returns The matching `StateOffer`
+   * @throws if the quotation is missing or has no offer from this offeror
+   */
+  async getOffer(quotationId: string, offeror: string): Promise<StateOffer> {
+    validateAddress(offeror, 'offeror');
+    const rfq = await this.getRfq(quotationId);
+    const offers = rfq.offers ?? {};
+    const target = offeror.toLowerCase();
+    const offer = offers[offeror] ?? offers[target] ?? Object.values(offers).find(
+      (entry) => entry.offeror?.toLowerCase() === target,
+    );
+    if (!offer) {
+      throw mapHttpError(
+        Object.assign(new Error(`No offer from ${offeror} on RFQ ${quotationId}`), {
+          response: { status: 404 },
+          config: { url: `/api/v1/factory/rfqs/${quotationId}` },
+        })
+      );
+    }
+    return offer;
   }
 
   /**
@@ -622,7 +761,12 @@ export class APIModule {
     this.client.logger.debug('Fetching user RFQs from state API', { address });
 
     const response = await this.stateRequest<{ data: StateRfq[] }>(`/api/v1/factory/user/${address}/rfqs`);
-    return response.data;
+    // Filter to current-factory rows only. The indexer doesn't scope by
+    // factory on the by-user endpoint; today this is a no-op because no
+    // single address has RFQs on both factories, but that's coincidence
+    // — the filter prevents silently-mixed output the moment any user
+    // does. See `filterToCurrentFactory` for the rationale.
+    return this.filterToCurrentFactory(response.data);
   }
 
   /**
@@ -644,7 +788,7 @@ export class APIModule {
     this.client.logger.debug('Fetching user offers from state API', { address });
 
     const response = await this.stateRequest<{ data: StateOffer[] }>(`/api/v1/factory/user/${address}/offers`);
-    return response.data;
+    return this.filterToCurrentFactory(response.data);
   }
 
   /**
@@ -666,7 +810,7 @@ export class APIModule {
     this.client.logger.debug('Fetching user options from state API', { address });
 
     const response = await this.stateRequest<{ data: StateOption[] }>(`/api/v1/factory/user/${address}/positions`);
-    return response.data;
+    return this.filterToCurrentFactory(response.data);
   }
 
   /**

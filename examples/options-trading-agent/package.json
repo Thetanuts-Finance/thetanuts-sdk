@@ -1,0 +1,29 @@
+{
+  "name": "thetanuts-options-trading-agent-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end LLM-driven covered-call writer using @thetanuts-finance/agentkit + Vercel AI SDK + Anthropic. Reads the IV surface, identifies attractive premium, posts an RFQ, watches for offers, and settles. Reference implementation.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/agent.ts",
+    "dry-run": "DRY_RUN=true tsx src/agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@coinbase/agentkit": "^0.10.0",
+    "@coinbase/agentkit-vercel-ai-sdk": "^0.1.0",
+    "@thetanuts-finance/agentkit": "^0.1.2",
+    "@thetanuts-finance/thetanuts-client": "^0.2.5",
+    "ai": "^4.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

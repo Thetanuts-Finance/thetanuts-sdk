@@ -1,4 +1,4 @@
-import { Contract, Interface, AbiCoder } from 'ethers';
+import { Contract, Interface, AbiCoder, keccak256, toUtf8Bytes } from 'ethers';
 import type { TransactionReceipt, ContractTransactionResponse } from 'ethers';
 
 import type { ThetanutsClient } from '../client/ThetanutsClient.js';
@@ -26,6 +26,7 @@ import type {
   PhysicalButterflyRFQParams,
   PhysicalCondorRFQParams,
   PhysicalIronCondorRFQParams,
+  OfferTypedData,
 } from '../types/optionFactory.js';
 import type { CallStaticResult } from '../types/callStatic.js';
 import type { ImplementationAddresses } from '../chains/index.js';
@@ -736,6 +737,84 @@ export class OptionFactoryModule {
       this.client.logger.error('Failed to get EIP-712 domain', { error });
       throw mapContractError(error);
     }
+  }
+
+  /**
+   * Build the EIP-712 typed-data envelope an offeror signs for
+   * `makeOfferForQuotation`. The return value plugs directly into any
+   * `signTypedData_v4`-compatible signer — including Base MCP's `sign`
+   * tool with `type: "typed_data"`, viem's `signTypedData`, or ethers'
+   * `Signer.signTypedData`.
+   *
+   * Safety: the local `Offer(...)` struct definition is verified against
+   * the live on-chain `OFFER_TYPEHASH()` and the call throws if they
+   * disagree. This prevents the SDK from silently producing signatures
+   * the contract will reject if the struct ever changes in a future
+   * deployment.
+   *
+   * @example
+   * ```ts
+   * const typedData = await client.optionFactory.buildOfferTypedData({
+   *   quotationId: 42n,
+   *   offerAmount: 1_500_000n, // 1.5 USDC (6-dec)
+   *   offeror: '0xMakerAddress',
+   *   nonce: client.rfqKeys.generateNonce(),
+   * });
+   * // Hand to Base MCP / viem / ethers to get a signature.
+   * ```
+   */
+  async buildOfferTypedData(params: {
+    quotationId: bigint;
+    offerAmount: bigint;
+    offeror: string;
+    nonce: bigint;
+  }): Promise<OfferTypedData> {
+    validateAddress(params.offeror, 'offeror');
+
+    // Struct definition pinned to the r12 OptionFactory. Verified below
+    // against the contract's OFFER_TYPEHASH so any drift fails closed.
+    const offerTypeString =
+      'Offer(uint256 quotationId,uint256 offerAmount,address offeror,uint64 nonce)';
+    const expectedTypehash = keccak256(toUtf8Bytes(offerTypeString));
+
+    const [onchainTypehash, domain] = await Promise.all([
+      this.getOfferTypehash(),
+      this.getEip712Domain(),
+    ]);
+
+    if (onchainTypehash.toLowerCase() !== expectedTypehash.toLowerCase()) {
+      throw createError(
+        'CONTRACT_REVERT',
+        `OFFER_TYPEHASH mismatch: contract returns ${onchainTypehash}, ` +
+          `SDK derived ${expectedTypehash} from "${offerTypeString}". ` +
+          'The Offer struct may have changed on a newer OptionFactory ' +
+          'deployment — refusing to build a signature the contract will reject.',
+      );
+    }
+
+    return {
+      domain: {
+        name: domain.name,
+        version: domain.version,
+        chainId: Number(domain.chainId),
+        verifyingContract: domain.verifyingContract,
+      },
+      types: {
+        Offer: [
+          { name: 'quotationId', type: 'uint256' },
+          { name: 'offerAmount', type: 'uint256' },
+          { name: 'offeror', type: 'address' },
+          { name: 'nonce', type: 'uint64' },
+        ],
+      },
+      primaryType: 'Offer',
+      message: {
+        quotationId: params.quotationId.toString(),
+        offerAmount: params.offerAmount.toString(),
+        offeror: params.offeror,
+        nonce: params.nonce.toString(),
+      },
+    };
   }
 
   /**

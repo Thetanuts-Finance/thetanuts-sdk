@@ -43,6 +43,34 @@ import {
 // Lets the MCP server return SDK context without filesystem access at runtime.
 import { LLMS_TXT, LLMS_FULL_TXT, LLMS_FULL_TXT_BYTES } from './sdk-context.generated.js';
 
+// prepare_* write-path layer (v1.0.0). The cores are transport-agnostic;
+// each MCP handler below pulls the structured args, calls the core, and
+// returns the JSON-stringified result.
+import { AuthStore } from './prepare/auth.js';
+import { SqliteKeystore } from './prepare/keystore.js';
+import {
+  ApproveArgs,
+  AuthChallengeArgs,
+  CancelRfqArgs,
+  MakeOfferArgs,
+  MakeOfferWithSignatureArgs,
+  RequestRfqArgs,
+  SettleRfqArgs,
+  SettleRfqEarlyArgs,
+  SuggestReservePriceArgs,
+  approveCore,
+  authChallengeCore,
+  cancelOfferCore,
+  cancelRfqCore,
+  makeOfferCore,
+  makeOfferWithSignatureCore,
+  requestRfqCore,
+  settleRfqCore,
+  settleRfqEarlyCore,
+  suggestReservePriceCore,
+  verifyAuthBlock,
+} from './prepare/core.js';
+
 // ============ Configuration ============
 const RPC_URL = process.env.THETANUTS_RPC_URL || 'https://mainnet.base.org';
 const CHAIN_ID = 8453; // Base mainnet
@@ -84,16 +112,45 @@ function sanitizeOnchainString(value: unknown, maxLen = 64): string {
 
 // ============ Initialize Client (read-only, no signer) ============
 let client: ThetanutsClient | null = null;
+let sharedProvider: ethers.JsonRpcProvider | null = null;
+
+function getProvider(): ethers.JsonRpcProvider {
+  if (!sharedProvider) sharedProvider = new ethers.JsonRpcProvider(RPC_URL);
+  return sharedProvider;
+}
 
 function getClient(): ThetanutsClient {
   if (!client) {
-    const provider = new ethers.JsonRpcProvider(RPC_URL);
     client = new ThetanutsClient({
       chainId: CHAIN_ID,
-      provider,
+      provider: getProvider(),
     });
   }
   return client;
+}
+
+// ============ Prepare-layer singletons (lazy, only built on first write) ====
+// SQLite keystore stores per-wallet ECDH keys for RFQ flows. Lives next to
+// the MCP process; users on multiple machines get separate keystores by
+// design (the wallet must sign to access its own key anyway). Override
+// location via THETANUTS_KEYSTORE_PATH.
+let prepareKeystore: SqliteKeystore | null = null;
+let prepareAuthStore: AuthStore | null = null;
+
+function getPrepareLayer(): { keystore: SqliteKeystore; authStore: AuthStore } {
+  if (!prepareKeystore) {
+    const dbPath = process.env.THETANUTS_KEYSTORE_PATH ?? './thetanuts-mcp-keystore.sqlite';
+    const masterKey = process.env.KEYSTORE_MASTER_KEY;
+    if (!masterKey || !/^[0-9a-fA-F]{64}$/.test(masterKey)) {
+      throw new Error(
+        'KEYSTORE_MASTER_KEY env var must be a 32-byte hex string (64 hex chars). ' +
+        'Generate with `openssl rand -hex 32`.',
+      );
+    }
+    prepareKeystore = new SqliteKeystore({ dbPath, masterKeyHex: masterKey });
+    prepareAuthStore = new AuthStore(prepareKeystore.rawDb());
+  }
+  return { keystore: prepareKeystore!, authStore: prepareAuthStore! };
 }
 
 // ============ Tool Definitions ============
@@ -438,7 +495,7 @@ const tools: Tool[] = [
   // === RFQ State (State/RFQ API) ===
   {
     name: 'get_rfq',
-    description: 'Get a specific RFQ by ID (from State/RFQ API)',
+    description: 'Get a specific RFQ by ID (from State/RFQ API indexer). The SDK now cross-checks the indexer\'s `factoryAddress` against the current chain config and throws `RFQ_FACTORY_MISMATCH` if the id resolves to a predecessor-factory deployment (a known indexer bug — `/factory/rfqs/{id}` is factory-agnostic and returns the oldest match on collision). For authoritative on-chain state, call `get_quotation(id)` — reads the live current factory directly with no indexer in the loop.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -452,7 +509,7 @@ const tools: Tool[] = [
   },
   {
     name: 'get_user_rfqs',
-    description: 'Get all RFQs for a user (from State/RFQ API)',
+    description: 'Get all RFQs for a user (from State/RFQ API indexer). The SDK filters the returned list to rows whose `factoryAddress` matches the current chain config — rows from predecessor factory deployments are dropped silently. If you suspect a user has RFQs on an older factory and want to see them, query the SDK with a chain config pointed at that factory.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -910,204 +967,7 @@ const tools: Tool[] = [
     },
   },
 
-  // === RFQ Builder Tools ===
-  {
-    name: 'build_rfq_request',
-    description: 'Build RFQ request parameters for vanilla PUT or CALL option. Returns parameters ready for encodeRequestForQuotation.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        requester: {
-          type: 'string',
-          description: 'Requester wallet address (0x...)',
-        },
-        underlying: {
-          type: 'string',
-          enum: ['ETH', 'BTC'],
-          description: 'Underlying asset',
-        },
-        optionType: {
-          type: 'string',
-          enum: ['PUT', 'CALL'],
-          description: 'Option type',
-        },
-        strike: {
-          type: 'number',
-          description: 'Strike price (human-readable, e.g., 1850)',
-        },
-        expiry: {
-          type: 'number',
-          description: 'Expiry timestamp (unix seconds)',
-        },
-        numContracts: {
-          type: 'number',
-          description: 'Number of contracts',
-        },
-        isLong: {
-          type: 'boolean',
-          description: 'True for buy, false for sell',
-        },
-        collateralToken: {
-          type: 'string',
-          enum: ['USDC', 'WETH', 'cbBTC'],
-          description: 'Collateral token',
-        },
-        requesterPublicKey: {
-          type: 'string',
-          description: 'ECDH compressed public key (hex string starting with 02 or 03)',
-        },
-        offerDeadlineMinutes: {
-          type: 'number',
-          description: 'Offer deadline in minutes (default: 60)',
-        },
-        reservePrice: {
-          type: 'number',
-          description: 'Optional: minimum premium per contract in ETH terms',
-        },
-        referrer: {
-          type: 'string',
-          description: 'Optional: referrer address',
-        },
-      },
-      required: ['requester', 'underlying', 'optionType', 'strike', 'expiry', 'numContracts', 'isLong', 'collateralToken', 'requesterPublicKey'],
-    },
-  },
-  {
-    name: 'build_spread_rfq',
-    description: 'Build RFQ request for a two-leg spread (put spread or call spread)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        requester: { type: 'string', description: 'Requester wallet address' },
-        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
-        optionType: { type: 'string', enum: ['PUT', 'CALL'] },
-        strikes: {
-          type: 'array',
-          items: { type: 'number' },
-          description: 'Two strikes [lower, upper] (e.g., [1700, 1800])',
-        },
-        expiry: { type: 'number', description: 'Expiry timestamp (unix seconds)' },
-        numContracts: { type: 'number' },
-        isLong: { type: 'boolean' },
-        collateralToken: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC'] },
-        requesterPublicKey: { type: 'string' },
-        offerDeadlineMinutes: { type: 'number' },
-        reservePrice: { type: 'number' },
-      },
-      required: ['requester', 'underlying', 'optionType', 'strikes', 'expiry', 'numContracts', 'isLong', 'collateralToken', 'requesterPublicKey'],
-    },
-  },
-  {
-    name: 'build_butterfly_rfq',
-    description: 'Build RFQ request for a three-leg butterfly',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        requester: { type: 'string', description: 'Requester wallet address' },
-        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
-        optionType: { type: 'string', enum: ['PUT', 'CALL'] },
-        strikes: {
-          type: 'array',
-          items: { type: 'number' },
-          description: 'Three strikes [lower, middle, upper] with equal wing widths',
-        },
-        expiry: { type: 'number' },
-        numContracts: { type: 'number' },
-        isLong: { type: 'boolean' },
-        collateralToken: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC'] },
-        requesterPublicKey: { type: 'string' },
-        offerDeadlineMinutes: { type: 'number' },
-        reservePrice: { type: 'number' },
-      },
-      required: ['requester', 'underlying', 'optionType', 'strikes', 'expiry', 'numContracts', 'isLong', 'collateralToken', 'requesterPublicKey'],
-    },
-  },
-  {
-    name: 'build_condor_rfq',
-    description: 'Build RFQ request for a four-leg condor (all calls or all puts)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        requester: { type: 'string' },
-        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
-        optionType: { type: 'string', enum: ['PUT', 'CALL'] },
-        strikes: {
-          type: 'array',
-          items: { type: 'number' },
-          description: 'Four strikes [k1, k2, k3, k4] ascending',
-        },
-        expiry: { type: 'number' },
-        numContracts: { type: 'number' },
-        isLong: { type: 'boolean' },
-        collateralToken: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC'] },
-        requesterPublicKey: { type: 'string' },
-        offerDeadlineMinutes: { type: 'number' },
-        reservePrice: { type: 'number' },
-      },
-      required: ['requester', 'underlying', 'optionType', 'strikes', 'expiry', 'numContracts', 'isLong', 'collateralToken', 'requesterPublicKey'],
-    },
-  },
-  {
-    name: 'build_iron_condor_rfq',
-    description: 'Build RFQ request for a four-leg iron condor (put spread + call spread)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        requester: { type: 'string' },
-        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
-        strikes: {
-          type: 'array',
-          items: { type: 'number' },
-          description: 'Four strikes [putLower, putUpper, callLower, callUpper]',
-        },
-        expiry: { type: 'number' },
-        numContracts: { type: 'number' },
-        isLong: { type: 'boolean' },
-        collateralToken: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC'] },
-        requesterPublicKey: { type: 'string' },
-        offerDeadlineMinutes: { type: 'number' },
-        reservePrice: { type: 'number' },
-      },
-      required: ['requester', 'underlying', 'strikes', 'expiry', 'numContracts', 'isLong', 'collateralToken', 'requesterPublicKey'],
-    },
-  },
-  {
-    name: 'build_physical_option_rfq',
-    description: 'Build RFQ request for physical-settled vanilla PUT or CALL (delivers actual underlying)',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        requester: { type: 'string' },
-        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
-        optionType: { type: 'string', enum: ['PUT', 'CALL'] },
-        strike: { type: 'number' },
-        expiry: { type: 'number' },
-        numContracts: { type: 'number' },
-        isLong: { type: 'boolean' },
-        collateralToken: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC'] },
-        requesterPublicKey: { type: 'string' },
-        offerDeadlineMinutes: { type: 'number' },
-        reservePrice: { type: 'number' },
-      },
-      required: ['requester', 'underlying', 'optionType', 'strike', 'expiry', 'numContracts', 'isLong', 'collateralToken', 'requesterPublicKey'],
-    },
-  },
 
-  // === RFQ Transaction Encoding ===
-  {
-    name: 'encode_request_for_quotation',
-    description: 'Encode RFQ creation transaction from built request parameters. Returns {to, data} for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        rfqParams: {
-          type: 'object',
-          description: 'RFQ parameters from build_rfq_request or other builder tool',
-        },
-      },
-      required: ['rfqParams'],
-    },
-  },
 
   // === Chain Configuration ===
   {
@@ -1162,75 +1022,6 @@ const tools: Tool[] = [
     },
   },
 
-  // === RFQ Settlement & Cancellation ===
-  {
-    name: 'encode_settle_quotation',
-    description: 'Encode a settlement transaction for an RFQ after reveal phase. Returns transaction data for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        quotationId: {
-          type: 'string',
-          description: 'Quotation ID to settle',
-        },
-      },
-      required: ['quotationId'],
-    },
-  },
-  {
-    name: 'encode_settle_quotation_early',
-    description: 'Encode an early settlement transaction to accept a specific offer before offer period ends. Returns transaction data for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        quotationId: {
-          type: 'string',
-          description: 'Quotation ID to settle',
-        },
-        offerAmount: {
-          type: 'string',
-          description: 'Offer amount (in collateral token decimals)',
-        },
-        nonce: {
-          type: 'string',
-          description: 'Nonce from decrypted offer',
-        },
-        offeror: {
-          type: 'string',
-          description: 'Address of the offeror/market maker',
-        },
-      },
-      required: ['quotationId', 'offerAmount', 'nonce', 'offeror'],
-    },
-  },
-  {
-    name: 'encode_cancel_quotation',
-    description: 'Encode a cancellation transaction for an RFQ (requester only). Returns transaction data for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        quotationId: {
-          type: 'string',
-          description: 'Quotation ID to cancel',
-        },
-      },
-      required: ['quotationId'],
-    },
-  },
-  {
-    name: 'encode_cancel_offer',
-    description: 'Encode a transaction to cancel your offer for an RFQ (offeror only). Returns transaction data for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        quotationId: {
-          type: 'string',
-          description: 'Quotation ID to cancel offer for',
-        },
-      },
-      required: ['quotationId'],
-    },
-  },
   {
     name: 'get_quotation',
     description: 'Get detailed quotation info by ID including parameters and current state',
@@ -1246,53 +1037,7 @@ const tools: Tool[] = [
     },
   },
 
-  // === Order Book Encoding ===
-  {
-    name: 'encode_fill_order',
-    description: 'Encode a transaction to fill an order from the orderbook. Returns transaction data for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        orderIndex: {
-          type: 'number',
-          description: 'Index of the order from fetch_orders result',
-        },
-        usdcAmount: {
-          type: 'string',
-          description: 'Amount of USDC to spend (in 6 decimals). If not provided, fills max available.',
-        },
-        referrer: {
-          type: 'string',
-          description: 'Optional referrer address',
-        },
-      },
-      required: ['orderIndex'],
-    },
-  },
 
-  // === ERC20 Encoding ===
-  {
-    name: 'encode_approve',
-    description: 'Encode a token approval transaction. Returns transaction data for wallet signing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tokenAddress: {
-          type: 'string',
-          description: 'Token contract address to approve',
-        },
-        spenderAddress: {
-          type: 'string',
-          description: 'Address to approve as spender (e.g., OptionBook or OptionFactory)',
-        },
-        amount: {
-          type: 'string',
-          description: 'Amount to approve (in token decimals). Use "max" for unlimited approval.',
-        },
-      },
-      required: ['tokenAddress', 'spenderAddress', 'amount'],
-    },
-  },
 
   // === Additional User Data ===
   {
@@ -1890,52 +1635,193 @@ const tools: Tool[] = [
       required: [],
     },
   },
+
+  // === prepare_* — WRITE-PATH BUILDERS (v1.0.0) ==========================
+  // Every prepare_* tool returns `{ chain, calls }` ready to hand to Base
+  // MCP `send_calls`. No private keys ever leave the user's wallet. The
+  // server fills `to` from the live r12 chain config — never the LLM. Tools
+  // marked AUTH-GATED require an `auth: { wallet, nonce, sig }` block whose
+  // signature was produced by signing the message returned by
+  // `prepare_auth_challenge` via Base MCP's `sign` tool.
+  // =======================================================================
+  {
+    name: 'prepare_auth_challenge',
+    description: 'Mint a single-use signing challenge for an auth-gated prepare_* tool. Returns { nonce, message, expiresAt }. The caller signs `message` via Base MCP `sign(type: "personal_sign")` and passes the resulting { wallet, nonce, sig } back as the `auth` argument on the next call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        wallet: { type: 'string', description: 'Wallet address (0x...) that will sign and submit the next prepare_* call.' },
+      },
+      required: ['wallet'],
+    },
+  },
+  {
+    name: 'prepare_approve',
+    description: 'AUTH-GATED. Build a constrained OptionFactory token approval call. Returns Base-MCP-ready `{ chain, calls }`. Use only if you need to set an allowance OUTSIDE a prepare_request_rfq flow — RFQs already bundle exact approvals when needed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        auth: {
+          type: 'object',
+          description: '{ wallet, nonce, sig } from prepare_auth_challenge + Base MCP sign',
+          properties: {
+            wallet: { type: 'string' },
+            nonce: { type: 'string' },
+            sig: { type: 'string' },
+          },
+          required: ['wallet', 'nonce', 'sig'],
+        },
+        from: { type: 'string', description: 'Owner wallet (0x...)' },
+        token: { type: 'string', description: 'Configured Thetanuts collateral token contract address' },
+        spender: { type: 'string', description: 'Current OptionFactory address only' },
+        amount: { type: 'string', description: 'Allowance amount in token base units (decimal string, no "max")' },
+      },
+      required: ['auth', 'from', 'token', 'spender', 'amount'],
+    },
+  },
+  {
+    name: 'prepare_request_rfq',
+    description: 'AUTH-GATED. Build an RFQ creation envelope. Persists the ECDH keypair under the authenticated wallet so MM offers come back decryptable.\n\n⚠ `reservePrice` is PER CONTRACT, not total. Actual escrow pulled from the requester = `reservePrice × numContracts`. For a BUY RFQ, you pay UP TO that much premium; for a SELL RFQ, MMs bid AT LEAST that much. Setting reservePrice too low guarantees no MM will quote — they need it above their fair-value mark.\n\n⚠ Use `prepare_suggest_reserve_price` to compute a sensible reserve from the live IV surface — do NOT guess.\n\nApprove handling: the returned `calls[]` automatically includes the correct ERC-20 approve as the FIRST call for both BUY (USDC premium) and SELL (collateral token) RFQs — sized exactly to `reservePrice × numContracts` (plus a 5% safety buffer). Never call prepare_approve separately for an RFQ flow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        auth: {
+          type: 'object',
+          description: '{ wallet, nonce, sig } from prepare_auth_challenge + Base MCP sign',
+          properties: {
+            wallet: { type: 'string' },
+            nonce: { type: 'string' },
+            sig: { type: 'string' },
+          },
+          required: ['wallet', 'nonce', 'sig'],
+        },
+        from: { type: 'string', description: 'Must equal auth.wallet' },
+        product: { type: 'string', enum: ['PUT', 'CALL', 'CALL_SPREAD', 'PUT_SPREAD', 'CALL_FLY', 'PUT_FLY', 'CALL_CONDOR', 'PUT_CONDOR', 'IRON_CONDOR'] },
+        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
+        collateral: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC', 'aBasWETH', 'aBascbBTC', 'aBasUSDC', 'cbDOGE', 'cbXRP'] },
+        strikes: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 4, description: 'Strikes as decimal strings, e.g. ["1700"] or ["1700", "1800"]' },
+        numContracts: { type: 'string', description: 'Number of contracts as a decimal string' },
+        expiry: { type: 'number', description: 'Unix timestamp (seconds) for option expiry' },
+        offerEndTimestamp: { type: 'number', description: 'Optional Unix timestamp (seconds) for offer window end. DEFAULT: now+120s (was now+30s prior to v1.0.1 — 30s is too short for MM watcher polling cycles). Use ≥120s for first-time tests so MMs have realistic time to bid.' },
+        isRequestingLongPosition: { type: 'boolean', description: 'true = BUY (you pay premium), false = SELL (you post collateral)' },
+        reservePrice: { type: 'string', description: 'PER-CONTRACT premium price as decimal string. Actual escrow = reservePrice × numContracts. Get a sensible value from prepare_suggest_reserve_price.' },
+        isIronCondor: { type: 'boolean', description: 'Set true for iron condor structures' },
+      },
+      required: ['auth', 'from', 'product', 'underlying', 'collateral', 'strikes', 'numContracts', 'expiry', 'isRequestingLongPosition'],
+    },
+  },
+  {
+    name: 'prepare_suggest_reserve_price',
+    description: 'Suggest a per-contract `reservePrice` for `prepare_request_rfq` derived from the live IV surface. For BUY (long) RFQs, returns a reserve ~1.5× the IV-implied mid so any honest MM will bid below it. For SELL (short) RFQs, returns ~0.5× the mid so MMs have room to bid up against you. Use the returned `suggested` as the `reservePrice` argument to `prepare_request_rfq` verbatim. Returns `null` if the IV surface has no point for the requested strike/expiry — in that case, refuse to RFQ and tell the user the market has no liquidity for that strike.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        product: { type: 'string', enum: ['PUT', 'CALL', 'CALL_SPREAD', 'PUT_SPREAD', 'CALL_FLY', 'PUT_FLY', 'CALL_CONDOR', 'PUT_CONDOR', 'IRON_CONDOR'] },
+        underlying: { type: 'string', enum: ['ETH', 'BTC'] },
+        strikes: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 4 },
+        expiry: { type: 'number', description: 'Unix timestamp (seconds)' },
+        isRequestingLongPosition: { type: 'boolean', description: 'true = BUY, false = SELL' },
+      },
+      required: ['product', 'underlying', 'strikes', 'expiry', 'isRequestingLongPosition'],
+    },
+  },
+  {
+    name: 'prepare_make_offer',
+    description: 'AUTH-GATED. STEP 1 of make-offer. Encrypts the offer + returns the EIP-712 typed-data payload to sign. After signing via Base MCP `sign(type: "typed_data")`, call prepare_make_offer_with_signature with the result.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        auth: {
+          type: 'object',
+          properties: { wallet: { type: 'string' }, nonce: { type: 'string' }, sig: { type: 'string' } },
+          required: ['wallet', 'nonce', 'sig'],
+        },
+        from: { type: 'string', description: 'Offeror wallet (must equal auth.wallet)' },
+        quotationId: { type: 'string', description: 'RFQ id (decimal string)' },
+        offerAmount: { type: 'string', description: 'Offer amount in collateral token base units' },
+      },
+      required: ['auth', 'from', 'quotationId', 'offerAmount'],
+    },
+  },
+  {
+    name: 'prepare_make_offer_with_signature',
+    description: 'STEP 2 of make-offer. Takes the signature produced from prepare_make_offer\'s payload plus the encrypted-offer fields it returned. Returns Base-MCP-ready `{ chain, calls }`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string' },
+        quotationId: { type: 'string' },
+        signature: { type: 'string', description: 'EIP-712 signature hex' },
+        signingKey: { type: 'string', description: 'Returned by prepare_make_offer' },
+        encryptedOffer: { type: 'string', description: 'Returned by prepare_make_offer' },
+      },
+      required: ['from', 'quotationId', 'signature', 'signingKey', 'encryptedOffer'],
+    },
+  },
+  {
+    name: 'prepare_settle_rfq',
+    description: 'Build a settle-quotation call (after reveal phase ends). Returns Base-MCP-ready `{ chain, calls }`. No auth required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string' },
+        quotationId: { type: 'string' },
+      },
+      required: ['from', 'quotationId'],
+    },
+  },
+  {
+    name: 'prepare_settle_rfq_early',
+    description: 'AUTH-GATED. Build a settle-early call accepting a specific offer before the offer window closes. Decrypts the stored offer using the requester\'s ECDH key from the keystore.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        auth: {
+          type: 'object',
+          properties: { wallet: { type: 'string' }, nonce: { type: 'string' }, sig: { type: 'string' } },
+          required: ['wallet', 'nonce', 'sig'],
+        },
+        from: { type: 'string' },
+        quotationId: { type: 'string' },
+        offerorAddress: { type: 'string', description: 'Address of the offer to accept' },
+      },
+      required: ['auth', 'from', 'quotationId', 'offerorAddress'],
+    },
+  },
+  {
+    name: 'prepare_cancel_rfq',
+    description: 'Build a cancelQuotation call (requester only). Returns Base-MCP-ready `{ chain, calls }`. No auth required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string' },
+        quotationId: { type: 'string' },
+      },
+      required: ['from', 'quotationId'],
+    },
+  },
+  {
+    name: 'prepare_cancel_offer',
+    description: 'Build a cancelOfferForQuotation call (offeror only). Returns Base-MCP-ready `{ chain, calls }`. No auth required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string' },
+        quotationId: { type: 'string' },
+      },
+      required: ['from', 'quotationId'],
+    },
+  },
 ];
 
-// ============================================================================
-// TNU-AUDIT-0053 — `encode_*` MCP tools violate SPEC.md "no state-changing
-// operations" mandate. Default-off behind THETANUTS_MCP_ENABLE_ENCODE=1.
-// When disabled (default), the tools are removed from the ListTools response
-// and any CallTool invocation returns a structured error. encode_approve also
-// rejects `amount: "max"` and caps at a per-call ceiling regardless of flag.
-// ============================================================================
-const ENCODE_TOOLS = new Set<string>([
-  'encode_request_for_quotation',
-  'encode_settle_quotation',
-  'encode_settle_quotation_early',
-  'encode_cancel_quotation',
-  'encode_cancel_offer',
-  'encode_fill_order',
-  'encode_approve',
-]);
-
-const ENCODE_ENABLED = process.env.THETANUTS_MCP_ENABLE_ENCODE === '1';
-
-// Per-call ceiling for encode_approve when the gate is on: 2^128 - 1. Refuses
-// infinite-allowance (`"max"`) and bigint values above this cap. Operator can
-// still escalate at the wallet layer; the MCP must never emit `0xff…ff`.
-const ENCODE_APPROVE_MAX = (1n << 128n) - 1n;
-
-// Trim the listed tool surface when the gate is off so LLMs cannot discover
-// the encode_* surface.
-const publicTools: Tool[] = ENCODE_ENABLED
-  ? tools
-  : tools.filter(t => !ENCODE_TOOLS.has(t.name));
+// All MCP tools are listed unchanged. The legacy `encode_*` gating from
+// TNU-AUDIT-0053 was retired in v1.0.0 — those tools were deleted entirely
+// (writes now go through `prepare_*` which return Base-MCP-ready envelopes
+// and require an auth-block for keystore-touching operations).
+const publicTools: Tool[] = tools;
 
 // ============ Tool Handlers ============
 async function handleTool(name: string, args: Record<string, unknown>): Promise<string> {
-  // TNU-AUDIT-0053 enforcement at the dispatch boundary. Even if a caller
-  // names a gated tool directly (e.g. by stale tool listing), refuse.
-  if (ENCODE_TOOLS.has(name) && !ENCODE_ENABLED) {
-    return JSON.stringify({
-      error: 'TOOL_DISABLED',
-      tool: name,
-      reason:
-        'encode_* tools are disabled by default per SPEC.md ("no state-changing operations"). ' +
-        'Set THETANUTS_MCP_ENABLE_ENCODE=1 on the MCP server process to enable. See TNU-AUDIT-0053.',
-    }, null, 2);
-  }
-
   // SDK context tools don't need a chain connection — return embedded docs and exit early.
   switch (name) {
     case 'get_sdk_context':
@@ -2564,209 +2450,6 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         return JSON.stringify(result, null, 2);
       }
 
-      // === RFQ Builder Tools ===
-      case 'build_rfq_request': {
-        const request = c.optionFactory.buildRFQRequest({
-          requester: args.requester as `0x${string}`,
-          underlying: args.underlying as 'ETH' | 'BTC',
-          optionType: args.optionType as 'PUT' | 'CALL',
-          strikes: args.strike as number,  // Single strike for vanilla options
-          expiry: args.expiry as number,
-          numContracts: args.numContracts as number,
-          isLong: args.isLong as boolean,
-          collateralToken: args.collateralToken as 'USDC' | 'WETH' | 'cbBTC',
-          requesterPublicKey: args.requesterPublicKey as string,
-          offerDeadlineMinutes: (args.offerDeadlineMinutes as number) || 60,
-          reservePrice: args.reservePrice as number | undefined,
-        });
-        return JSON.stringify({
-          success: true,
-          rfqParams: request,
-          note: 'Use encode_request_for_quotation to get transaction data',
-        }, null, 2);
-      }
-      case 'build_spread_rfq': {
-        const strikes = args.strikes as number[];
-        if (strikes.length !== 2) {
-          return JSON.stringify({ error: `Spread requires exactly 2 strikes, got ${strikes.length}` }, null, 2);
-        }
-        const request = c.optionFactory.buildSpreadRFQ({
-          requester: args.requester as `0x${string}`,
-          underlying: args.underlying as 'ETH' | 'BTC',
-          optionType: args.optionType as 'PUT' | 'CALL',
-          lowerStrike: strikes[0],
-          upperStrike: strikes[1],
-          expiry: args.expiry as number,
-          numContracts: args.numContracts as number,
-          isLong: args.isLong as boolean,
-          collateralToken: args.collateralToken as 'USDC' | 'WETH' | 'cbBTC',
-          requesterPublicKey: args.requesterPublicKey as string,
-          offerDeadlineMinutes: (args.offerDeadlineMinutes as number) || 60,
-          reservePrice: args.reservePrice as number | undefined,
-        });
-        return JSON.stringify({
-          success: true,
-          rfqParams: request,
-          note: 'Use encode_request_for_quotation to get transaction data',
-        }, null, 2);
-      }
-      case 'build_butterfly_rfq': {
-        const strikes = args.strikes as number[];
-        if (strikes.length !== 3) {
-          return JSON.stringify({ error: `Butterfly requires exactly 3 strikes, got ${strikes.length}` }, null, 2);
-        }
-        // Validate first
-        const validation = validateButterfly(strikes);
-        if (!validation.valid) {
-          return JSON.stringify({ error: validation.error, validation }, null, 2);
-        }
-        const request = c.optionFactory.buildButterflyRFQ({
-          requester: args.requester as `0x${string}`,
-          underlying: args.underlying as 'ETH' | 'BTC',
-          optionType: args.optionType as 'PUT' | 'CALL',
-          lowerStrike: strikes[0],
-          middleStrike: strikes[1],
-          upperStrike: strikes[2],
-          expiry: args.expiry as number,
-          numContracts: args.numContracts as number,
-          isLong: args.isLong as boolean,
-          collateralToken: args.collateralToken as 'USDC' | 'WETH' | 'cbBTC',
-          requesterPublicKey: args.requesterPublicKey as string,
-          offerDeadlineMinutes: (args.offerDeadlineMinutes as number) || 60,
-          reservePrice: args.reservePrice as number | undefined,
-        });
-        return JSON.stringify({
-          success: true,
-          rfqParams: request,
-          validation,
-          note: 'Use encode_request_for_quotation to get transaction data',
-        }, null, 2);
-      }
-      case 'build_condor_rfq': {
-        const strikes = args.strikes as number[];
-        if (strikes.length !== 4) {
-          return JSON.stringify({ error: `Condor requires exactly 4 strikes, got ${strikes.length}` }, null, 2);
-        }
-        const validation = validateCondor(strikes);
-        if (!validation.valid) {
-          return JSON.stringify({ error: validation.error, validation }, null, 2);
-        }
-        const request = c.optionFactory.buildCondorRFQ({
-          requester: args.requester as `0x${string}`,
-          underlying: args.underlying as 'ETH' | 'BTC',
-          optionType: args.optionType as 'PUT' | 'CALL',
-          strike1: strikes[0],
-          strike2: strikes[1],
-          strike3: strikes[2],
-          strike4: strikes[3],
-          expiry: args.expiry as number,
-          numContracts: args.numContracts as number,
-          isLong: args.isLong as boolean,
-          collateralToken: args.collateralToken as 'USDC' | 'WETH' | 'cbBTC',
-          requesterPublicKey: args.requesterPublicKey as string,
-          offerDeadlineMinutes: (args.offerDeadlineMinutes as number) || 60,
-          reservePrice: args.reservePrice as number | undefined,
-        });
-        return JSON.stringify({
-          success: true,
-          rfqParams: request,
-          validation,
-          note: 'Use encode_request_for_quotation to get transaction data',
-        }, null, 2);
-      }
-      case 'build_iron_condor_rfq': {
-        const strikes = args.strikes as number[];
-        if (strikes.length !== 4) {
-          return JSON.stringify({ error: `Iron condor requires exactly 4 strikes, got ${strikes.length}` }, null, 2);
-        }
-        const validation = validateIronCondor(strikes);
-        if (!validation.valid) {
-          return JSON.stringify({ error: validation.error, validation }, null, 2);
-        }
-        const request = c.optionFactory.buildIronCondorRFQ({
-          requester: args.requester as `0x${string}`,
-          underlying: args.underlying as 'ETH' | 'BTC',
-          strike1: strikes[0],
-          strike2: strikes[1],
-          strike3: strikes[2],
-          strike4: strikes[3],
-          expiry: args.expiry as number,
-          numContracts: args.numContracts as number,
-          isLong: args.isLong as boolean,
-          collateralToken: args.collateralToken as 'USDC' | 'WETH' | 'cbBTC',
-          requesterPublicKey: args.requesterPublicKey as string,
-          offerDeadlineMinutes: (args.offerDeadlineMinutes as number) || 60,
-          reservePrice: args.reservePrice as number | undefined,
-        });
-        return JSON.stringify({
-          success: true,
-          rfqParams: request,
-          validation,
-          note: 'Use encode_request_for_quotation to get transaction data',
-        }, null, 2);
-      }
-      case 'build_physical_option_rfq': {
-        // Check if physical options are deployed using chain config
-        const chainConfig = getChainConfigById(CHAIN_ID);
-        const implType = args.optionType === 'PUT' ? 'PHYSICAL_PUT' : 'PHYSICAL_CALL';
-        const implAddress = chainConfig.implementations[implType as keyof typeof chainConfig.implementations];
-        if (!implAddress || implAddress === '0x0000000000000000000000000000000000000000') {
-          const availablePhysical = Object.entries(chainConfig.implementations)
-            .filter(([k, v]) => k.startsWith('PHYSICAL') && v !== '0x0000000000000000000000000000000000000000')
-            .map(([k]) => k);
-          return JSON.stringify({
-            error: `${implType} not deployed on chain ${CHAIN_ID}`,
-            availablePhysical,
-          }, null, 2);
-        }
-        // Determine delivery token based on option type and underlying
-        const underlying = args.underlying as 'ETH' | 'BTC';
-        const optionType = args.optionType as 'PUT' | 'CALL';
-        let deliveryToken: `0x${string}`;
-        if (optionType === 'CALL') {
-          // CALL: buyer pays strike in USDC
-          deliveryToken = chainConfig.tokens.USDC.address as `0x${string}`;
-        } else {
-          // PUT: buyer delivers underlying (WETH for ETH, cbBTC for BTC)
-          deliveryToken = (underlying === 'ETH'
-            ? chainConfig.tokens.WETH.address
-            : chainConfig.tokens.cbBTC.address) as `0x${string}`;
-        }
-        const request = c.optionFactory.buildPhysicalOptionRFQ({
-          requester: args.requester as `0x${string}`,
-          underlying,
-          optionType,
-          strike: args.strike as number,
-          expiry: args.expiry as number,
-          numContracts: args.numContracts as number,
-          isLong: args.isLong as boolean,
-          deliveryToken,
-          collateralToken: args.collateralToken as 'USDC' | 'WETH' | 'cbBTC',
-          requesterPublicKey: args.requesterPublicKey as string,
-          offerDeadlineMinutes: (args.offerDeadlineMinutes as number) || 60,
-          reservePrice: args.reservePrice as number | undefined,
-        });
-        return JSON.stringify({
-          success: true,
-          rfqParams: request,
-          settlementType: 'physical',
-          deliveryToken,
-          note: 'Physical options deliver actual underlying on exercise',
-        }, null, 2);
-      }
-
-      // === RFQ Transaction Encoding ===
-      case 'encode_request_for_quotation': {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rfqParams = args.rfqParams as any;
-        const encoded = c.optionFactory.encodeRequestForQuotation(rfqParams);
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: 'Send this transaction to create the RFQ',
-          note: 'Ensure you have approved sufficient collateral before sending',
-        }, null, 2);
-      }
 
       // === Chain Configuration ===
       case 'get_chain_config_by_id': {
@@ -2851,57 +2534,6 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         }, null, 2);
       }
 
-      // === RFQ Settlement & Cancellation ===
-      case 'encode_settle_quotation': {
-        const quotationId = BigInt(args.quotationId as string);
-        const encoded = c.optionFactory.encodeSettleQuotation(quotationId);
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: `Settle quotation ${quotationId} (call after reveal phase ends)`,
-          usage: 'Send this transaction to settle the RFQ with the winning offer',
-        }, null, 2);
-      }
-      case 'encode_settle_quotation_early': {
-        const quotationId = BigInt(args.quotationId as string);
-        const offerAmount = BigInt(args.offerAmount as string);
-        const nonce = BigInt(args.nonce as string);
-        const offeror = args.offeror as string;
-        const encoded = c.optionFactory.encodeSettleQuotationEarly(
-          quotationId,
-          offerAmount,
-          nonce,
-          offeror
-        );
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: `Accept offer early for quotation ${quotationId}`,
-          offeror,
-          offerAmount: offerAmount.toString(),
-          usage: 'Send this transaction to accept a specific offer before offer period ends',
-        }, null, 2);
-      }
-      case 'encode_cancel_quotation': {
-        const quotationId = BigInt(args.quotationId as string);
-        const encoded = c.optionFactory.encodeCancelQuotation(quotationId);
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: `Cancel quotation ${quotationId}`,
-          usage: 'Send this transaction to cancel your RFQ (requester only)',
-        }, null, 2);
-      }
-      case 'encode_cancel_offer': {
-        const quotationId = BigInt(args.quotationId as string);
-        const encoded = c.optionFactory.encodeCancelOfferForQuotation(quotationId);
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: `Cancel offer for quotation ${quotationId}`,
-          usage: 'Send this transaction to cancel your offer (offeror only)',
-        }, null, 2);
-      }
       case 'get_quotation': {
         const quotationId = BigInt(args.quotationId as string);
         const quotation = await c.optionFactory.getQuotation(quotationId);
@@ -2931,80 +2563,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         }, null, 2);
       }
 
-      // === Order Book Encoding ===
-      case 'encode_fill_order': {
-        const orders = await c.api.fetchOrders();
-        const orderIndex = args.orderIndex as number;
-        if (orderIndex < 0 || orderIndex >= orders.length) {
-          throw new Error(`Invalid order index: ${orderIndex}. Available: 0-${orders.length - 1}`);
-        }
-        const order = orders[orderIndex];
-        const usdcAmount = args.usdcAmount ? BigInt(args.usdcAmount as string) : undefined;
-        const referrer = args.referrer as string | undefined;
-        const encoded = c.optionBook.encodeFillOrder(order, usdcAmount, referrer);
-        const preview = c.optionBook.previewFillOrder(order, usdcAmount);
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: `Fill order #${orderIndex}`,
-          preview: {
-            numContracts: preview.numContracts?.toString(),
-            totalCollateral: preview.totalCollateral?.toString(),
-            pricePerContract: preview.pricePerContract?.toString(),
-            isCall: preview.isCall,
-            strikes: preview.strikes?.map(s => s.toString()),
-          },
-          usage: 'Send this transaction to fill the order. Ensure you have approved USDC spending first.',
-        }, null, 2);
-      }
 
-      // === ERC20 Encoding ===
-      case 'encode_approve': {
-        const tokenAddr = args.tokenAddress as string;
-        const spender = args.spenderAddress as string;
-        const amountStr = args.amount as string;
-        // TNU-AUDIT-0053: refuse infinite-allowance "max" and cap at
-        // ENCODE_APPROVE_MAX so the MCP can never emit `0xff…ff` (or anything
-        // close to it) regardless of LLM prompt injection.
-        if (typeof amountStr !== 'string') {
-          return JSON.stringify({ error: 'amount must be a decimal string' }, null, 2);
-        }
-        if (amountStr.toLowerCase() === 'max') {
-          return JSON.stringify({
-            error: 'INFINITE_ALLOWANCE_FORBIDDEN',
-            reason:
-              'amount: "max" is disabled. Pass a bounded decimal string. See TNU-AUDIT-0053.',
-          }, null, 2);
-        }
-        let amount: bigint;
-        try {
-          amount = BigInt(amountStr);
-        } catch {
-          return JSON.stringify({ error: 'amount must parse as a non-negative integer' }, null, 2);
-        }
-        if (amount < 0n) {
-          return JSON.stringify({ error: 'amount must be non-negative' }, null, 2);
-        }
-        if (amount > ENCODE_APPROVE_MAX) {
-          return JSON.stringify({
-            error: 'AMOUNT_EXCEEDS_CAP',
-            cap: ENCODE_APPROVE_MAX.toString(),
-            requested: amount.toString(),
-            reason:
-              'encode_approve hard-caps amount at 2^128 - 1 to prevent runaway allowances. See TNU-AUDIT-0053.',
-          }, null, 2);
-        }
-        const encoded = c.erc20.encodeApprove(tokenAddr, spender, amount);
-        return JSON.stringify({
-          to: encoded.to,
-          data: encoded.data,
-          description: `Approve ${spender} to spend ${amount.toString()} tokens`,
-          tokenAddress: tokenAddr,
-          spender,
-          amount: amount.toString(),
-          usage: 'Send this transaction to approve token spending',
-        }, null, 2);
-      }
 
       // === Additional User Data ===
       case 'get_user_offers': {
@@ -3374,6 +2933,92 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       case 'get_clvex_vaults': {
         const vaults = await c.strategyVault.getClvexVaults();
         return JSON.stringify(vaults, jsonReplacer, 2);
+      }
+
+      // === prepare_* write-path handlers (v1.0.0) ============================
+      case 'prepare_auth_challenge': {
+        const parsed = AuthChallengeArgs.parse(args);
+        const { authStore } = getPrepareLayer();
+        const res = authChallengeCore(parsed, authStore);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_approve': {
+        const parsed = ApproveArgs.parse(args);
+        const { authStore } = getPrepareLayer();
+        const auth = await verifyAuthBlock(authStore, parsed.auth, parsed.from);
+        if (!auth.ok) return JSON.stringify(auth.error, null, 2);
+        const res = approveCore(parsed, { sharedClient: c });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_suggest_reserve_price': {
+        const parsed = SuggestReservePriceArgs.parse(args);
+        const res = await suggestReservePriceCore(parsed, { sharedClient: c });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_request_rfq': {
+        const parsed = RequestRfqArgs.parse(args);
+        const { authStore, keystore } = getPrepareLayer();
+        const auth = await verifyAuthBlock(authStore, (args as { auth?: unknown }).auth, parsed.from);
+        if (!auth.ok) return JSON.stringify(auth.error, null, 2);
+        const res = await requestRfqCore(parsed, {
+          provider: getProvider(),
+          keystore,
+          authedWallet: auth.wallet,
+        });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_make_offer': {
+        const parsed = MakeOfferArgs.parse(args);
+        const { authStore, keystore } = getPrepareLayer();
+        const auth = await verifyAuthBlock(authStore, (args as { auth?: unknown }).auth, parsed.from);
+        if (!auth.ok) return JSON.stringify(auth.error, null, 2);
+        const res = await makeOfferCore(parsed, {
+          provider: getProvider(),
+          keystore,
+          authedWallet: auth.wallet,
+        });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_make_offer_with_signature': {
+        const parsed = MakeOfferWithSignatureArgs.parse(args);
+        const res = makeOfferWithSignatureCore(parsed, { sharedClient: c });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_settle_rfq': {
+        const parsed = SettleRfqArgs.parse(args);
+        const res = settleRfqCore(parsed, { sharedClient: c });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_settle_rfq_early': {
+        const parsed = SettleRfqEarlyArgs.parse(args);
+        const { authStore, keystore } = getPrepareLayer();
+        const auth = await verifyAuthBlock(authStore, (args as { auth?: unknown }).auth, parsed.from);
+        if (!auth.ok) return JSON.stringify(auth.error, null, 2);
+        const res = await settleRfqEarlyCore(parsed, {
+          provider: getProvider(),
+          keystore,
+          authedWallet: auth.wallet,
+        });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_cancel_rfq': {
+        const parsed = CancelRfqArgs.parse(args);
+        const res = cancelRfqCore(parsed, { sharedClient: c });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
+      }
+      case 'prepare_cancel_offer': {
+        const parsed = CancelRfqArgs.parse(args);
+        const res = cancelOfferCore(parsed, { sharedClient: c });
+        if (!res.ok) return JSON.stringify(res.error, null, 2);
+        return JSON.stringify(res.data, null, 2);
       }
 
       default:

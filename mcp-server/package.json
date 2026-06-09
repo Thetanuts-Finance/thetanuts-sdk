@@ -1,7 +1,7 @@
 {
   "name": "@thetanuts-finance/mcp",
-  "version": "0.1.0",
-  "description": "MCP server for the Thetanuts SDK — read-only LLM tool access for options trading on Base + Ethereum",
+  "version": "1.0.0",
+  "description": "MCP server for the Thetanuts SDK — reads, RFQ writes, auth-gated keystore. Single MCP for Base + Ethereum options trading via Claude / Cursor / ChatGPT.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -50,10 +50,15 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.4",
     "@thetanuts-finance/thetanuts-client": "file:..",
+    "better-sqlite3": "^11.3.0",
     "ethers": "^6.13.0",
+    "viem": "^2.47.0",
     "zod": "^3.23.0"
   },
+  "optionalDependencies": {},
+  "peerDependenciesMeta": {},
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0"

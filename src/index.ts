@@ -206,6 +206,7 @@ export type {
   RFQUnderlying,
   RFQOptionType,
   RFQCollateralToken,
+  OfferTypedData,
 } from './types/optionFactory.js';
 
 // ============ Types — Option ============

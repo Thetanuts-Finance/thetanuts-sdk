@@ -227,8 +227,8 @@ test('INV-4: approve is called before transferFrom in erc20 module', () => {
 
 // ---------------------------------------------------------------------------
 // INVARIANT 5: Address normalization
-// validateAddress calls ethers.isAddress which rejects invalid strings.
-// But it does NOT normalize (lowercase/mixed-case) → documented violation.
+// validateAddress calls ethers.isAddress to reject invalid strings and
+// ethers.getAddress to normalize valid lowercase/mixed-case input.
 // ---------------------------------------------------------------------------
 
 test('INV-5: validateAddress rejects obviously invalid address', () => {
@@ -239,19 +239,17 @@ test('INV-5: validateAddress rejects obviously invalid address', () => {
   assert(!isAddress(''), 'ethers.isAddress must reject empty string');
 });
 
-test('INV-5: ethers.isAddress accepts both checksummed and lowercase (VIOLATION: no normalization)', () => {
+test('INV-5: validateAddress normalizes lowercase input to EIP-55 checksum', () => {
   // ethers v6 isAddress is case-insensitive (accepts both forms)
   const checksummed = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
   const lower = checksummed.toLowerCase();
-  const mixedInvalid = '0xd8da6bf26964af9d7eed9e03e53415d37aa96045'; // valid lowercase hex
 
   assert(isAddress(checksummed), 'isAddress accepts checksummed');
-  assert(isAddress(lower), 'isAddress accepts lowercase — VIOLATION: mixed-case unchecksummed strings pass through to calldata without normalization');
+  assert(isAddress(lower), 'isAddress accepts lowercase');
   // Confirm getAddress would give canonical form
   assert(getAddress(lower) === checksummed, 'ethers.getAddress normalizes to EIP-55 checksum');
-  // The SDK does NOT call getAddress — addresses pass through as-is
   const src = loadSrc('src/utils/validation.ts');
-  assert(!src.includes('getAddress'), 'VIOLATION confirmed: validateAddress does not call getAddress for normalization');
+  assert(src.includes('getAddress'), 'validateAddress must call getAddress for normalization');
 });
 
 test('INV-5: validateAddress is called on all module address params (sample check)', () => {

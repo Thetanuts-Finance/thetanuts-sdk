@@ -872,24 +872,32 @@ localStorage.setItem(`offer_${quotationId}`, JSON.stringify({
 
 ### Example: Decrypt Incoming Offers (Requester)
 
+The `OfferMade` event itself only carries `(quotationId, offeror)` after the
+SDK's curated decoder runs — the encrypted payload and the offeror's
+ephemeral `signingKey` are not surfaced on the event type. Fetch the
+hydrated offers from the State API instead:
+
 ```typescript
 // As requester, decrypt offers to evaluate bids
-const offers = await client.events.getOfferMadeEvents({ quotationId });
+const rfq = await client.api.getRfq(quotationId.toString());
 const keyPair = await client.rfqKeys.loadKeyPair();
 
-for (const offer of offers) {
+for (const [offerorAddr, offer] of Object.entries(rfq.offers ?? {})) {
   try {
     const decrypted = await client.rfqKeys.decryptOffer(
-      offer.encryptedOffer,
-      offer.signingKey, // Offeror's public key
+      offer.signedOfferForRequester,
+      offer.signingKey, // Offeror's ephemeral public key
       keyPair
     );
-    console.log(`Offer from ${offer.offeror}: ${client.utils.fromUsdcDecimals(decrypted.offerAmount)} USDC`);
+    console.log(`Offer from ${offerorAddr}: ${client.utils.fromUsdcDecimals(decrypted.offerAmount)} USDC`);
   } catch (error) {
-    console.log(`Could not decrypt offer from ${offer.offeror}`);
+    console.log(`Could not decrypt offer from ${offerorAddr}`);
   }
 }
 ```
+
+To fetch a single offer instead of iterating, use
+`client.api.getOffer(quotationId, offerorAddress)`.
 
 ### Encryption Details
 
