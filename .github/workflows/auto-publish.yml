@@ -1,0 +1,177 @@
+name: Auto-publish on version bump
+
+# Fires on every push to main. Compares the local package.json version against
+# the latest version published to npm under @thetanuts-finance/thetanuts-client.
+# If local > npm → run CI gates, publish to npm, tag the commit, draft a GitHub
+# Release. If local <= npm → skip silently. The check is fast (one HTTP call)
+# so it's cheap to run on every main push.
+#
+# Required secrets:
+#   NPM_TOKEN — npm automation token with publish scope on @thetanuts-finance
+#
+# Permissions: contents:write (tag + release), id-token:write (npm provenance).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+      # Allow manual re-runs if the package.json push got swallowed somehow
+      - '.github/workflows/auto-publish.yml'
+  workflow_dispatch:
+
+# Serialize publish runs so two concurrent merges can't race the version check.
+concurrency:
+  group: auto-publish-main
+  cancel-in-progress: false
+
+# Default to read-only; the publish job re-grants what it specifically needs.
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: Check if version bumped
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_publish: ${{ steps.compare.outputs.should_publish }}
+      local_version: ${{ steps.compare.outputs.local_version }}
+      published_version: ${{ steps.compare.outputs.published_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Compare local vs published version
+        id: compare
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          PKG_NAME=$(node -p "require('./package.json').name")
+
+          # Defense in depth: reject anything that isn't strict semver.
+          # Protects later steps (tag creation, gh release create) from a
+          # maliciously crafted package.json that smuggles shell metacharacters
+          # through the version field.
+          if ! echo "$LOCAL" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid semver in package.json version: $LOCAL"
+            exit 1
+          fi
+          if ! echo "$PKG_NAME" | grep -qE '^(@[a-z0-9][a-z0-9-]*/)?[a-z0-9][a-z0-9._-]*$'; then
+            echo "::error::Invalid npm package name: $PKG_NAME"
+            exit 1
+          fi
+
+          echo "local_version=$LOCAL" >> $GITHUB_OUTPUT
+          echo "Local: $PKG_NAME@$LOCAL"
+
+          # `npm view` exits 0 with the version, or non-zero if the package
+          # has never been published. Treat "never published" as "publish now".
+          PUBLISHED=$(npm view "$PKG_NAME" version 2>/dev/null || echo "0.0.0")
+          echo "published_version=$PUBLISHED" >> $GITHUB_OUTPUT
+          echo "Published: $PKG_NAME@$PUBLISHED"
+
+          # semver comparison via node — handles 0.2.6 > 0.2.5 correctly,
+          # also handles prereleases like 0.3.0-beta.1.
+          SHOULD_PUBLISH=$(node -e "
+            const [a, b] = process.argv.slice(1);
+            const parse = (v) => v.split(/[-+]/)[0].split('.').map(Number);
+            const [aMaj, aMin, aPatch] = parse(a);
+            const [bMaj, bMin, bPatch] = parse(b);
+            if (aMaj !== bMaj) { console.log(aMaj > bMaj); process.exit(); }
+            if (aMin !== bMin) { console.log(aMin > bMin); process.exit(); }
+            if (aPatch !== bPatch) { console.log(aPatch > bPatch); process.exit(); }
+            // Equal core versions — fall back to string compare for prerelease
+            // ordering. Good enough for our 0.x release cadence.
+            console.log(a > b);
+          " "$LOCAL" "$PUBLISHED")
+          echo "should_publish=$SHOULD_PUBLISH" >> $GITHUB_OUTPUT
+
+          if [ "$SHOULD_PUBLISH" = "true" ]; then
+            echo "::notice::Will publish $PKG_NAME@$LOCAL (currently $PUBLISHED on npm)"
+          else
+            echo "::notice::Skipping publish — local $LOCAL is not newer than npm $PUBLISHED"
+          fi
+
+  publish:
+    name: Build, test, publish
+    needs: check-version
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # tag + release
+      id-token: write    # npm provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need full history so we can push a tag.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@thetanuts-finance'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create git tag
+        env:
+          VERSION: ${{ needs.check-version.outputs.local_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.local_version }}
+          PREV_VERSION: ${{ needs.check-version.outputs.published_version }}
+        run: |
+          # Extract the relevant CHANGELOG section for the release notes.
+          # Looks for a heading like `## 0.2.6` or `## [0.2.6]`. Falls back to
+          # the "Unreleased" section if no version-specific heading exists.
+          NOTES=$(awk -v version="$VERSION" '
+            BEGIN { capture=0; found=0 }
+            /^## / {
+              if (capture) exit
+              if ($0 ~ "## (\\[)?" version "(\\])?( |$)") { capture=1; found=1; next }
+            }
+            capture { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md 2>/dev/null) || NOTES=$(awk '
+            BEGIN { capture=0 }
+            /^## Unreleased/ { capture=1; next }
+            /^## / && capture { exit }
+            capture { print }
+          ' CHANGELOG.md 2>/dev/null) || NOTES="Release v$VERSION"
+
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes "$NOTES" \
+            --verify-tag
