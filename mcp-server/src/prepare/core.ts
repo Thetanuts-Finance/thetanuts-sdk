@@ -205,19 +205,25 @@ const PRODUCT = z.enum([
   'CALL_CONDOR', 'PUT_CONDOR',
   'IRON_CONDOR',
 ]);
+type Product = z.infer<typeof PRODUCT>;
 const POSITIVE_DECIMAL_STRING = z.string()
   .regex(/^\d+(\.\d+)?$/)
   .refine((value) => {
     const n = Number(value);
     return Number.isFinite(n) && n > 0;
   }, 'must be a positive decimal string');
-const NON_NEGATIVE_DECIMAL_STRING = z.string()
-  .regex(/^\d+(\.\d+)?$/)
-  .refine((value) => {
-    const n = Number(value);
-    return Number.isFinite(n) && n >= 0;
-  }, 'must be a non-negative decimal string');
 const PRICE_SCALE = 100_000_000n;
+const PRODUCT_STRIKE_COUNT: Record<Product, number> = {
+  PUT: 1,
+  CALL: 1,
+  CALL_SPREAD: 2,
+  PUT_SPREAD: 2,
+  CALL_FLY: 3,
+  PUT_FLY: 3,
+  CALL_CONDOR: 4,
+  PUT_CONDOR: 4,
+  IRON_CONDOR: 4,
+};
 
 export const RequestRfqArgs = z.object({
   from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
@@ -237,8 +243,38 @@ export const RequestRfqArgs = z.object({
    */
   offerEndTimestamp: z.number().int().positive().optional(),
   isRequestingLongPosition: z.boolean(),
-  reservePrice: NON_NEGATIVE_DECIMAL_STRING.optional(),
+  reservePrice: POSITIVE_DECIMAL_STRING.optional(),
   isIronCondor: z.boolean().optional(),
+}).superRefine((args, ctx) => {
+  const expected = PRODUCT_STRIKE_COUNT[args.product];
+  if (args.strikes.length !== expected) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['strikes'],
+      message: `${args.product} requires exactly ${expected} strike${expected === 1 ? '' : 's'}`,
+    });
+  }
+  if (args.product !== 'IRON_CONDOR' && args.isIronCondor === true) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['isIronCondor'],
+      message: 'isIronCondor may only be true when product is IRON_CONDOR',
+    });
+  }
+  if (args.product === 'IRON_CONDOR' && args.isIronCondor === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['isIronCondor'],
+      message: 'IRON_CONDOR always uses the iron-condor implementation',
+    });
+  }
+  if (args.isRequestingLongPosition && args.reservePrice === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['reservePrice'],
+      message: 'BUY RFQs require a positive reservePrice',
+    });
+  }
 });
 export type RequestRfqArgs = z.infer<typeof RequestRfqArgs>;
 
@@ -264,6 +300,7 @@ export async function requestRfqCore(
 
   const strikes = args.strikes.map(parseFloat);
   const optionType: RFQBuilderParams['optionType'] = args.product.startsWith('PUT') ? 'PUT' : 'CALL';
+  const isIronCondor = args.product === 'IRON_CONDOR';
 
   const rfqRequest = userClient.optionFactory.buildRFQRequest({
     requester: deps.authedWallet as `0x${string}`,
@@ -277,21 +314,15 @@ export async function requestRfqCore(
     collateralToken: args.collateral,
     reservePrice: args.reservePrice ? parseFloat(args.reservePrice) : undefined,
     requesterPublicKey: keypair.compressedPublicKey,
-    isIronCondor: args.isIronCondor ?? false,
+    isIronCondor,
   });
 
   const encoded = userClient.optionFactory.encodeRequestForQuotation(rfqRequest);
 
   const calls: PreparedCall[] = [];
   // Auto-prepend the right ERC-20 approve for both SELL and BUY paths.
-  // SELL: collateral token, amount = strike × numContracts (max payout).
-  // BUY: same collateral token (premium payment uses it too), amount = the
-  // requester's escrow = reservePrice. Add a 5% buffer so the approve covers
-  // rounding inside `calculateReservePrice` if the LLM passes a low-precision
-  // float — better to over-approve by pennies than have the tx revert. (Note:
-  // a non-zero reservePrice is required for BUY anyway; if reservePrice is 0
-  // the call will revert downstream — the LLM should use
-  // prepare_suggest_reserve_price to size it.)
+  // SELL: product max loss. BUY: total reserve price plus a small buffer so
+  // low-precision decimal input does not under-approve after builder rounding.
   const collateralToken = rfqRequest.params.collateral;
   const required = args.isRequestingLongPosition
     ? withBuffer(rfqRequest.reservePrice, 5)
@@ -324,7 +355,7 @@ function computeCollateralRequired(params: {
   strikes: bigint[];
   numContracts: bigint;
   isRequestingLongPosition: boolean;
-}, product: RequestRfqArgs['product']): bigint {
+}, product: Product): bigint {
   if (params.isRequestingLongPosition) return 0n;
 
   const strike = (index: number): bigint => {

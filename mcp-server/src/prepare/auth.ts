@@ -26,7 +26,7 @@ import type Database from 'better-sqlite3';
  */
 
 const NONCE_TTL_MS = 5 * 60 * 1000;
-const MESSAGE_PREFIX = 'Thetanuts prepare-service auth\nWallet: ';
+const MESSAGE_PREFIX = 'Thetanuts MCP auth\nWallet: ';
 const HEADER_RE = /^Thetanuts\s+wallet=(0x[0-9a-fA-F]{40}),\s*nonce=(0x[0-9a-fA-F]{32}),\s*sig=(0x[0-9a-fA-F]+)$/;
 
 const NONCE_SCHEMA = `

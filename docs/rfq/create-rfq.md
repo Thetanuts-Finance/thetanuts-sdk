@@ -168,7 +168,7 @@ The `reservePrice` parameter protects you from unfavorable fills:
 |----------|---------|----------------------|
 | BUY (`isLong: true`) | Maximum price per contract you will pay | RFQ fails; deposit returned |
 | SELL (`isLong: false`) | Minimum price per contract you will accept | RFQ fails |
-| `0` | No price protection | Accept any offer |
+| omitted or `0` | No price protection | Accept any offer |
 
 **Example:** BUY with reserve price 0.015 USDC, 10 contracts → total escrow = 0.015 × 10 = **0.15 USDC** locked until settlement.
 
@@ -184,7 +184,7 @@ In `buildRFQRequest`, pass `reservePrice` as a human-readable number (e.g. `0.01
 | `underlying` | `'ETH' \| 'BTC'` | Underlying asset |
 | `optionType` | `'CALL' \| 'PUT'` | Option type |
 | `strike` | `number` | Strike price (human-readable) |
-| `strikes` | `number[]` | Strike array for multi-leg (auto-detects structure) |
+| `strikes` | `number[]` | Strike array for multi-leg. The generic SDK builder selects structure from option type plus strike count; MCP callers use explicit `product`. |
 | `expiry` | `number` | Unix timestamp; must be after offer deadline |
 | `numContracts` | `number \| bigint \| string` | Contract count; use `bigint` when closing positions |
 | `isLong` | `boolean` | `true` = BUY, `false` = SELL |

@@ -286,7 +286,7 @@ const rfqRequest = client.optionFactory.buildRFQRequest({
   isLong: true,                // true = BUY, false = SELL
   offerDeadlineMinutes: 60,
   collateralToken: 'USDC',
-  reservePrice: 0.015,         // Optional: max price per contract you'd accept
+  reservePrice: 0.015,         // BUY: max price per contract you'd accept
   requesterPublicKey: keyPair.compressedPublicKey,
 });
 
@@ -304,7 +304,7 @@ See the [RFQ workflow guide](docs/RFQ_WORKFLOW.md) for the full lifecycle: MM of
 
 #### Multi-leg RFQs (spread, butterfly, condor)
 
-Pass an array of strikes instead of a single strike. The implementation is selected automatically from the leg count.
+Pass an array of strikes instead of a single strike. The generic SDK builder selects the implementation from option type plus strike count; MCP callers must pass the explicit `product` that matches the strike count (`*_SPREAD` = 2, `*_FLY` = 3, `*_CONDOR` / `IRON_CONDOR` = 4).
 
 ```typescript
 const keyPair = await client.rfqKeys.getOrCreateKeyPair();
