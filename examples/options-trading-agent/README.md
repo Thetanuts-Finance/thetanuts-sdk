@@ -134,6 +134,6 @@ After 60 s waiting, 0x9fa... bid 13.2 USDC (revealed). Settled early; tx 0x7c...
 ## See also
 
 - **Phase A — Base MCP plugin** at `mcp-server/plugins/base-mcp/` for the user-in-the-loop signing pattern (Claude Desktop, Cursor, ChatGPT).
-- **Phase A prepare service** at `mcp-server/prepare-service/` — the backend the Base MCP plugin calls.
+- **Phase A Base MCP plugin** at `mcp-server/plugins/base-mcp/` — user-in-the-loop signing with the single `@thetanuts-finance/mcp` server.
 - **Phase B AgentKit package** at https://github.com/Thetanuts-Finance/thetanuts-agentkit — the ActionProvider this example imports.
 - **SDK reference** at https://docs.thetanuts.finance/sdk.

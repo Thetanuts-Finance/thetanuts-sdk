@@ -75,7 +75,7 @@ async function createBuyRFQ(client: ThetanutsClient): Promise<string> {
     offerDeadlineMinutes: 60,    // Market makers have 60 mins to respond
     collateralToken: 'USDC',     // Collateral token
 
-    // Optional: max price you're willing to pay per contract
+    // BUY: max price you're willing to pay per contract
     reservePrice: 0.015,         // $0.015 per contract (in USDC)
 
     // ECDH public key for encrypted offers (real key from above — never a placeholder)

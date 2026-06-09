@@ -197,7 +197,7 @@ Aggregates: `getProtocolStats()`, `getDailyStats()` (combines book + factory) pl
 RFQ lifecycle. Cash-settled by default; physical settlement for vanilla only.
 
 Builders (compose RFQ params for you):
-- `buildRFQRequest(params)` — generic, auto-detects structure from strikes length
+- `buildRFQRequest(params)` — generic SDK builder; selects structure from option type plus strike count
 - `buildVanillaRFQ`, `buildSpreadRFQ`, `buildButterflyRFQ`, `buildCondorRFQ`, `buildIronCondorRFQ`
 - `buildPhysicalOptionRFQ` (vanilla only); `buildPhysicalSpreadRFQ` etc. exist but throw `INVALID_PARAMS` because the contracts are not yet deployed (zero-address placeholders in r12)
 
@@ -472,7 +472,7 @@ const rfqRequest = client.optionFactory.buildRFQRequest({
   isLong: true,                  // BUY (the user wants to be long the put)
   offerDeadlineMinutes: 60,
   collateralToken: 'USDC',
-  reservePrice: 0.015,           // max premium per contract
+  reservePrice: 0.015,           // BUY: max premium per contract
   requesterPublicKey: keyPair.compressedPublicKey,
 });
 

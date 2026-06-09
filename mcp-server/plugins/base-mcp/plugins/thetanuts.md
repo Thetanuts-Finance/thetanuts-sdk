@@ -65,7 +65,7 @@ Auth-gated tools require an `auth: { wallet, nonce, sig }` block. Generate it li
    {
      "wallet": "0x...",
      "nonce": "0x<16-byte-hex>",
-     "message": "Thetanuts prepare-service auth\nWallet: 0x...\nNonce: 0x...\nExpires: 2026-06-04T15:22:34.740Z",
+     "message": "Thetanuts MCP auth\nWallet: 0x...\nNonce: 0x...\nExpires: 2026-06-04T15:22:34.740Z",
      "expiresAt": 1780586554740
    }
    ```
@@ -136,13 +136,16 @@ mcp__thetanuts-mcp__prepare_request_rfq({
   product:                  "PUT",           // PUT | CALL | CALL_SPREAD | PUT_SPREAD | CALL_FLY | PUT_FLY | CALL_CONDOR | PUT_CONDOR | IRON_CONDOR
   underlying:               "ETH",            // ETH | BTC
   collateral:               "USDC",           // USDC | WETH | cbBTC | aBasWETH | aBascbBTC | aBasUSDC | cbDOGE | cbXRP
-  strikes:                  ["1850"],         // 1-4 strikes, human-readable USD (e.g. "1850" not "185000000000")
+  strikes:                  ["1850"],         // product-specific count: PUT/CALL=1, *_SPREAD=2, *_FLY=3, *_CONDOR/IRON_CONDOR=4
   numContracts:             "1",              // decimal string
   expiry:                   <unix-sec>,       // option expiry timestamp (seconds)
-  offerEndTimestamp:        <unix-sec>,       // OPTIONAL — defaults to now + 30 SECONDS
-  isRequestingLongPosition: true              // true = BUY; false = SELL (requires collateral approval)
+  offerEndTimestamp:        <unix-sec>,       // OPTIONAL — defaults to now + 120 seconds
+  isRequestingLongPosition: true,             // true = BUY; false = SELL (requires collateral approval)
+  reservePrice:              "<suggested>"    // required for BUY; per-contract premium
 })
 ```
+
+`product` is authoritative. Do not pass `product: "CALL_FLY"` with one strike or `product: "IRON_CONDOR"` with `isIronCondor: false`; the MCP rejects mismatched product/strike shapes before it builds calldata.
 
 #### Default offer window
 

@@ -1681,7 +1681,7 @@ const tools: Tool[] = [
   },
   {
     name: 'prepare_request_rfq',
-    description: 'AUTH-GATED. Build an RFQ creation envelope. Persists the ECDH keypair under the authenticated wallet so MM offers come back decryptable.\n\n⚠ `reservePrice` is PER CONTRACT, not total. Actual escrow pulled from the requester = `reservePrice × numContracts`. For a BUY RFQ, you pay UP TO that much premium; for a SELL RFQ, MMs bid AT LEAST that much. Setting reservePrice too low guarantees no MM will quote — they need it above their fair-value mark.\n\n⚠ Use `prepare_suggest_reserve_price` to compute a sensible reserve from the live IV surface — do NOT guess.\n\nApprove handling: the returned `calls[]` automatically includes the correct ERC-20 approve as the FIRST call for both BUY (USDC premium) and SELL (collateral token) RFQs — sized exactly to `reservePrice × numContracts` (plus a 5% safety buffer). Never call prepare_approve separately for an RFQ flow.',
+    description: 'AUTH-GATED. Build an RFQ creation envelope. Persists the ECDH keypair under the authenticated wallet so MM offers come back decryptable.\n\nProduct determines exact strike count: PUT/CALL=1, *_SPREAD=2, *_FLY=3, *_CONDOR/IRON_CONDOR=4. IRON_CONDOR automatically uses the iron-condor implementation.\n\n⚠ `reservePrice` is PER CONTRACT, not total. BUY RFQs require a positive reservePrice; actual escrow pulled from the requester = `reservePrice × numContracts`. For a SELL RFQ, MMs bid AT LEAST that much. Setting reservePrice too low guarantees no MM will quote — they need it above their fair-value mark.\n\n⚠ Use `prepare_suggest_reserve_price` to compute a sensible reserve from the live IV surface — do NOT guess.\n\nApprove handling: the returned `calls[]` automatically includes the correct ERC-20 approve as the FIRST call when needed. BUY approval is sized to total reserve plus a 5% safety buffer; SELL approval is sized to product max loss. Never call prepare_approve separately for an RFQ flow.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1699,13 +1699,13 @@ const tools: Tool[] = [
         product: { type: 'string', enum: ['PUT', 'CALL', 'CALL_SPREAD', 'PUT_SPREAD', 'CALL_FLY', 'PUT_FLY', 'CALL_CONDOR', 'PUT_CONDOR', 'IRON_CONDOR'] },
         underlying: { type: 'string', enum: ['ETH', 'BTC'] },
         collateral: { type: 'string', enum: ['USDC', 'WETH', 'cbBTC', 'aBasWETH', 'aBascbBTC', 'aBasUSDC', 'cbDOGE', 'cbXRP'] },
-        strikes: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 4, description: 'Strikes as decimal strings, e.g. ["1700"] or ["1700", "1800"]' },
+        strikes: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 4, description: 'Human-readable USD strikes as decimal strings. Exact count is product-specific: PUT/CALL=1, *_SPREAD=2, *_FLY=3, *_CONDOR/IRON_CONDOR=4.' },
         numContracts: { type: 'string', description: 'Number of contracts as a decimal string' },
         expiry: { type: 'number', description: 'Unix timestamp (seconds) for option expiry' },
         offerEndTimestamp: { type: 'number', description: 'Optional Unix timestamp (seconds) for offer window end. DEFAULT: now+120s (was now+30s prior to v1.0.1 — 30s is too short for MM watcher polling cycles). Use ≥120s for first-time tests so MMs have realistic time to bid.' },
         isRequestingLongPosition: { type: 'boolean', description: 'true = BUY (you pay premium), false = SELL (you post collateral)' },
-        reservePrice: { type: 'string', description: 'PER-CONTRACT premium price as decimal string. Actual escrow = reservePrice × numContracts. Get a sensible value from prepare_suggest_reserve_price.' },
-        isIronCondor: { type: 'boolean', description: 'Set true for iron condor structures' },
+        reservePrice: { type: 'string', description: 'PER-CONTRACT premium price as positive decimal string. Required for BUY RFQs. Actual escrow = reservePrice × numContracts. Get a sensible value from prepare_suggest_reserve_price.' },
+        isIronCondor: { type: 'boolean', description: 'Deprecated compatibility flag. Use product: "IRON_CONDOR"; the prepare layer sets the implementation automatically.' },
       },
       required: ['auth', 'from', 'product', 'underlying', 'collateral', 'strikes', 'numContracts', 'expiry', 'isRequestingLongPosition'],
     },

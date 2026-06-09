@@ -7,8 +7,8 @@ import type { KeyStorageProvider } from '@thetanuts-finance/thetanuts-client';
  * Per-wallet, AES-256-GCM-encrypted sqlite keystore for RFQ ECDH private keys.
  *
  * The SDK's RFQKeyManagerModule scopes keys by chainId only — fine for a
- * single-user CLI but not for a multi-tenant prepare service. Each request to
- * the prepare service is on behalf of a different wallet, so we wrap a fresh
+ * single-user CLI but not for a multi-wallet MCP process. Each request to
+ * the MCP prepare layer is on behalf of a different wallet, so we wrap a fresh
  * provider per request that scopes by `${chainId}:${wallet}`.
  *
  * Master key (32 bytes hex) is supplied via KEYSTORE_MASTER_KEY env var. In
