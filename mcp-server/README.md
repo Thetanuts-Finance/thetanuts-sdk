@@ -115,7 +115,7 @@ The context is embedded at build time via the `prebuild` npm script (`scripts/em
 | `validate_butterfly` | Validate butterfly option strike configuration (3 strikes with equal wing widths) |
 | `validate_condor` | Validate condor option strike configuration (4 strikes with equal spread widths) |
 | `validate_iron_condor` | Validate iron condor strike configuration (put spread below, call spread above) |
-| `validate_ranger` | Validate ranger (range) option strike configuration (2 strikes) |
+| `validate_ranger` | Validate ranger (zone-bound) option strike configuration (4 strikes: `[callLower, callUpper, putLower, putUpper]`, equal spread widths, callUpper < putLower) |
 
 #### Chain Configuration Tools
 | Tool | Description |

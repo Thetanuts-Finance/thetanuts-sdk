@@ -87,21 +87,65 @@ Calculate option payoff at a given settlement price. Pure math — no chain call
 
 ```typescript
 const payout = client.utils.calculatePayout({
-  type: 'call',                           // 'call' | 'put' | 'call_spread' | 'put_spread'
+  type: 'call',                           // see PayoutType union below
   strikes: [200000000000n],               // Strike(s) in 8 decimals
   settlementPrice: 250000000000000000n,   // Settlement price in 8 decimals
   numContracts: 10000000000000000000n,    // In 18 decimals (SIZE decimals)
 });
 ```
 
-**Supported types:**
+**Supported types and strike orderings.** Strike order must match what the
+on-chain factory expects — pass strikes exactly as listed:
 
-| `type` | Strikes | Description |
-|--------|---------|-------------|
-| `'call'` | 1 | Vanilla call (INVERSE_CALL) |
-| `'put'` | 1 | Vanilla put |
-| `'call_spread'` | 2 | Call spread |
-| `'put_spread'` | 2 | Put spread |
+| `type` | Strikes | Order | Invariant |
+|--------|---------|-------|-----------|
+| `'call'` | 1 | `[strike]` | — |
+| `'put'` | 1 | `[strike]` | — |
+| `'call_spread'` | 2 | `[lower, upper]` ASCENDING | — |
+| `'put_spread'` | 2 | `[lower, upper]` ASCENDING | — |
+| `'call_fly'` | 3 | `[K1, K2, K3]` ASCENDING | `K2 - K1 === K3 - K2` (equidistant) |
+| `'put_fly'` | 3 | `[K3, K2, K1]` DESCENDING | `K3 - K2 === K2 - K1` (equidistant) |
+| `'call_condor'` | 4 | `[K1, K2, K3, K4]` ASCENDING | `K2 - K1 === K4 - K3` (equal wings) |
+| `'put_condor'` | 4 | `[K1, K2, K3, K4]` ASCENDING (condors are always ascending) | `K2 - K1 === K4 - K3` |
+| `'iron_condor'` | 4 | `[putLower, putUpper, callLower, callUpper]` | `putUpper <= callLower` |
+| `'ranger'` | 4 | `[callLower, callUpper, putLower, putUpper]` | spread widths equal AND `callUpper < putLower` |
+
+**Multi-leg example (iron condor — buyer's payoff):**
+
+```typescript
+const payout = client.utils.calculatePayout({
+  type: 'iron_condor',
+  strikes: [
+    180000000000n, // putLower  $1800
+    190000000000n, // putUpper  $1900
+    210000000000n, // callLower $2100
+    220000000000n, // callUpper $2200
+  ],
+  settlementPrice: 175000000000n, // $1750 (left wing fully ITM)
+  numContracts: 1000000000000000000n,
+});
+// Returns 100000000n (= $100 USDC, capped at max(put-spread, call-spread))
+```
+
+**Ranger example (zone-bound):**
+
+```typescript
+const payout = client.utils.calculatePayout({
+  type: 'ranger',
+  strikes: [
+    190000000000n, // callLower $1900
+    200000000000n, // callUpper $2000
+    210000000000n, // putLower  $2100
+    220000000000n, // putUpper  $2200
+  ],
+  settlementPrice: 205000000000n, // $2050 (inside the zone)
+  numContracts: 1000000000000000000n,
+});
+// Returns 100000000n (= $100 USDC, max payout = spread width k)
+```
+
+Ranger seller posts `2k` collateral (use `calculateCollateral`) even though
+the buyer's max payoff is `k` — either ramp can max out independently.
 
 ### calculateCollateral()
 

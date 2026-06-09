@@ -27,6 +27,7 @@
     "test:collar": "npx tsx scripts/test-collar-module.ts",
     "test:collar:live": "npx tsx scripts/test-collar-module.ts --live",
     "test:properties": "npx tsx tests/properties/invariants.test.ts",
+    "test:multileg": "npx tsx tests/properties/payout-multileg.test.ts",
     "verify:abi": "npx tsx scripts/verify-abi-parity.ts",
     "test:benchmark": "npx tsx scripts/benchmark-indexer.ts",
     "lint": "eslint src --ext .ts",

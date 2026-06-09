@@ -2,6 +2,46 @@
 
 All notable changes to `@thetanuts-finance/thetanuts-client` are documented here.
 
+## Unreleased
+
+### Added
+
+- **Off-chain payout + collateral math for all multi-leg structures.**
+  `client.utils.calculatePayout()` and `client.utils.calculateCollateral()`
+  now support `call_fly`, `put_fly`, `call_condor`, `put_condor`, `iron_condor`,
+  and `ranger` in addition to the existing `call` / `put` / `call_spread` /
+  `put_spread` cases. All formulas are pure bigint, no RPC required — usable
+  for dapp UI previews against hypothetical strikes pre-trade. Previously
+  every multi-leg type threw `INVALID_PARAMS`, forcing callers to use the
+  on-chain `client.option.calculatePayout()` (any BaseOption) or
+  `client.ranger.calculatePayout()` (RANGER), both of which require a
+  deployed contract address and an `eth_call` per quote. See the strike-order
+  table in `docs/reference/utilities.md` — order must match the on-chain
+  factory's expectations (e.g. `put_fly` is descending, `ranger` strikes are
+  `[callLower, callUpper, putLower, putUpper]`). MCP server's
+  `calculate_payout` tool enum widened to match.
+
+### Fixed
+
+- **MCP `validate_ranger` tool now requires 4 strikes, matching the SDK
+  validator.** The tool description and schema previously claimed
+  `[lower, upper]` (2 strikes), and the handler hard-rejected anything not
+  length 2 — but `validateRanger()` in `src/utils/rfqCalculations.ts:161`
+  has always required 4 strikes `[callLower, callUpper, putLower, putUpper]`
+  with equal spread widths and a zone gap. The MCP tool therefore rejected
+  every valid ranger config before the validator ran. The new multi-leg
+  payout work made the inconsistency visible; both the tool description
+  and the length check are now aligned with the SDK contract.
+- **`calculateMaxPayout` / `calculatePayoutAtPrice` no longer fall through
+  to `'call_spread'` for 3- and 4-strike orders.** The internal helper
+  `getPayoutTypeFromOptionType` previously returned `'call_spread' | 'put_spread'`
+  for any order with 2 or more strikes, silently producing wrong payouts and
+  collateral for butterflies and condors. It now correctly maps 3 strikes to
+  `'call_fly' | 'put_fly'` and 4 strikes to `'call_condor' | 'put_condor'`
+  (or `'iron_condor'` / `'ranger'` when the order shape carries those flags).
+  Both methods accept optional `isIronCondor` / `isRanger` discriminators on
+  the order object to disambiguate the 4-strike case.
+
 ## 0.2.5 — 2026-06-02
 
 ### Fixed
