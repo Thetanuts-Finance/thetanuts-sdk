@@ -81,7 +81,7 @@ Upload the zip at https://chatgpt.com/skills.
 | Cancel your offer | `mcp__thetanuts-mcp__prepare_cancel_offer` | |
 | Standalone approve | `mcp__thetanuts-mcp__prepare_approve` | Bundled automatically by RFQ when needed |
 
-OptionBook fills (`fill-order`, `swap-and-fill`) and atomic `swap-and-call` are **not** surfaced — see the design plan's Phase A.6 for rationale. RFQ is the only write path.
+OptionBook fills (`fill-order`, `swap-and-fill`) and atomic `swap-and-call` are **not** surfaced — their silent-rejection failure modes (maker offline, indexer lag, race-loss) make poor first-trade UX for chat-driven trading. RFQ is the only write path.
 
 Reads (orderbook, positions, RFQs, IV surface, pricing) are served by the same Thetanuts MCP — this plugin focuses on the **signed-write** path.
 

@@ -3,7 +3,7 @@
 A worked end-to-end example of an autonomous Thetanuts options agent. One file, one strategy: **a covered-call premium hunter** that reads the ETH market, opens an RFQ to sell a short-dated out-of-the-money call, watches for offers, and settles early when a maker bids above the reserve.
 
 Stack:
-- **[`@thetanuts-finance/agentkit`](https://github.com/Thetanuts-Finance/thetanuts-agentkit)** — Phase B AgentKit ActionProvider for Thetanuts.
+- **[`@thetanuts-finance/agentkit`](https://github.com/Thetanuts-Finance/thetanuts-agentkit)** — the Thetanuts AgentKit ActionProvider, for autonomous agents that own their own wallet.
 - **`@coinbase/agentkit`** + **CDP MPC wallet** — the agent's key never leaves Coinbase's MPC network.
 - **Vercel AI SDK** + **Anthropic Claude** — the model that drives the loop.
 
@@ -133,7 +133,6 @@ After 60 s waiting, 0x9fa... bid 13.2 USDC (revealed). Settled early; tx 0x7c...
 
 ## See also
 
-- **Phase A — Base MCP plugin** at `mcp-server/plugins/base-mcp/` for the user-in-the-loop signing pattern (Claude Desktop, Cursor, ChatGPT).
-- **Phase A Base MCP plugin** at `mcp-server/plugins/base-mcp/` — user-in-the-loop signing with the single `@thetanuts-finance/mcp` server.
-- **Phase B AgentKit package** at https://github.com/Thetanuts-Finance/thetanuts-agentkit — the ActionProvider this example imports.
+- **Base MCP plugin** at `mcp-server/plugins/base-mcp/` — the user-in-the-loop alternative: `@thetanuts-finance/mcp` builds the calldata and the user approves each transaction in Base Account (Claude Desktop, Cursor, ChatGPT).
+- **Thetanuts AgentKit package** at https://github.com/Thetanuts-Finance/thetanuts-agentkit — the ActionProvider this example imports.
 - **SDK reference** at https://docs.thetanuts.finance/sdk.
