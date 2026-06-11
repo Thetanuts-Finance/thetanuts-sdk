@@ -14,7 +14,7 @@
     "@coinbase/agentkit": "^0.10.0",
     "@coinbase/agentkit-vercel-ai-sdk": "^0.1.0",
     "@thetanuts-finance/agentkit": "^0.2.0",
-    "@thetanuts-finance/thetanuts-client": "^0.2.5",
+    "@thetanuts-finance/thetanuts-client": "^0.3.0",
     "ai": "^4.0.0",
     "dotenv": "^16.4.5",
     "reflect-metadata": "^0.2.0"

@@ -2,10 +2,18 @@
 
 All notable changes to `@thetanuts-finance/thetanuts-client` are documented here.
 
-## Unreleased
+## 0.3.0 — 2026-06-11
 
 ### Added
 
+- **RFQ sealed-bid agent helpers.** `optionFactory.buildOfferTypedData()`
+  builds the EIP-712 `Offer` envelope for `make_offer` flows and verifies the
+  live on-chain `OFFER_TYPEHASH` against the SDK's pinned struct definition
+  (fails closed on drift). `api.getRequesterPublicKey(quotationId)` and
+  `api.getOffer(...)` expose the State API paths needed to encrypt sealed-bid
+  offers to a requester and recover them at settlement. These are the APIs
+  that power `@thetanuts-finance/agentkit` and the MCP prepare service —
+  agentkit's peer range requires `>=0.3.0` for exactly this reason.
 - **Off-chain payout + collateral math for all multi-leg structures.**
   `client.utils.calculatePayout()` and `client.utils.calculateCollateral()`
   now support `call_fly`, `put_fly`, `call_condor`, `put_condor`, `iron_condor`,
@@ -41,6 +49,16 @@ All notable changes to `@thetanuts-finance/thetanuts-client` are documented here
   (or `'iron_condor'` / `'ranger'` when the order shape carries those flags).
   Both methods accept optional `isIronCondor` / `isRanger` discriminators on
   the order object to disambiguate the 4-strike case.
+
+### Security
+
+- **Hardened SDK and MCP write paths.** Write methods assert the connected
+  network before building transactions; OptionBook swap paths
+  (`swapAndFillOrder`, `marketFill`) validate the swap router and source
+  token addresses, require a positive `swapSrcAmount`, and reject empty
+  `swapData`; OptionFactory builders gain stricter input validation. On the
+  MCP side, prepare tools tighten auth handling and error responses redact
+  URLs.
 
 ## 0.2.5 — 2026-06-02
 
