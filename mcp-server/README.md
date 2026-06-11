@@ -8,6 +8,20 @@ The server **builds transactions but doesn't sign them.** The signing layer is i
 
 This server **does not** hold private keys, sign messages, or broadcast transactions on its own. That layer is your wallet's job — by design, so an LLM can't be tricked into authorizing transactions you never intended.
 
+### This MCP vs `@thetanuts-finance/agentkit`
+
+Both packages are thin layers over the same [`@thetanuts-finance/thetanuts-client`](https://www.npmjs.com/package/@thetanuts-finance/thetanuts-client) encode helpers. The difference is **who signs and where the safety boundary lives**:
+
+| | `@thetanuts-finance/mcp` (this package) | [`@thetanuts-finance/agentkit`](https://github.com/Thetanuts-Finance/thetanuts-agentkit) |
+|---|---|---|
+| What it is | MCP server: ~100 tools an LLM client calls over the Model Context Protocol | Coinbase AgentKit `ActionProvider` library you embed in your own agent code |
+| Who signs | Never signs. Pairs with a signer — Base MCP (user approves each tx in Base Account), Safe, or a CDP policy wallet | The agent's own wallet (CDP, viem, Privy server wallets), unattended |
+| Runs in | Claude Desktop, Cursor, ChatGPT — any MCP client | Your backend agent process (LangChain, Vercel AI SDK) |
+| Safety boundary | Outside the LLM: wallet approval UI or signer policy | In code: fail-closed `SafetyPolicy` (notional caps, collateral allowlist, host hook) |
+| Use when | Human-in-the-loop chat trading; maximum client reach | Headless trading bots, MM bots, custodied agent vaults |
+
+Want an MCP server that **does** sign by itself? That exists too — as a deliberately separate artifact: the agentkit repo's [`examples/mcp-server-quickstart.ts`](https://github.com/Thetanuts-Finance/thetanuts-agentkit/blob/main/examples/mcp-server-quickstart.ts) runs the ActionProvider as an autonomous-signing MCP server via Coinbase's official MCP adapter, with its CDP wallet and `SafetyPolicy` caps. Keeping that separate is what lets *this* package guarantee it can never move funds — autonomous signing stays an explicit opt-in, and the two servers can be installed side by side.
+
 ### LLM context (call this first)
 
 If you are an LLM connecting to this server for the first time, your single best move is to call `get_sdk_context` once and cache the result for the rest of the session. It returns the full embedded SDK context (every module, key types, common workflows, gotchas) — the same content as `<repo-root>/llms-full.txt`. Roughly 35 KiB of markdown.
@@ -381,7 +395,7 @@ This is the same architecture every DeFi frontend uses: the website builds the c
 
 - **Want to read?** This MCP alone is enough.
 - **Want to fill orders?** This MCP + a signer-MCP. You stay in control of signing.
-- **Want autonomous agents?** This MCP + Coinbase AgentKit (or Safe, or thirdweb Engine) with policies you configure.
+- **Want autonomous agents?** Either this MCP + a policy signer (CDP, Safe, thirdweb Engine), or run [`@thetanuts-finance/agentkit`](https://github.com/Thetanuts-Finance/thetanuts-agentkit) — embedded in your bot, or as its own autonomous-signing MCP server via Coinbase's MCP adapter.
 
 For the full SDK context (every module, every workflow, every gotcha), call `get_sdk_context` once at session start.
 

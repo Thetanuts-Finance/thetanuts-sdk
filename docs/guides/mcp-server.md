@@ -8,6 +8,19 @@ For full details, see [mcp-server/README.md](../../mcp-server/README.md) and [mc
 
 > **Tip for LLM users:** if you don't need a persistent MCP connection, you can paste a one-line prompt into Claude or Cursor and have your LLM fetch the SDK context directly. See [LLM Context](../resources/llm-context.md) for the copy-paste prompt.
 
+## This MCP vs `@thetanuts-finance/agentkit`
+
+Both are thin layers over the same `@thetanuts-finance/thetanuts-client` encode helpers — the difference is who signs and where the safety boundary lives:
+
+| | `@thetanuts-finance/mcp` | [`@thetanuts-finance/agentkit`](https://github.com/Thetanuts-Finance/thetanuts-agentkit) |
+|---|---|---|
+| What it is | MCP server for chat clients (Claude Desktop, Cursor, ChatGPT) | Coinbase AgentKit `ActionProvider` library for your own agent code |
+| Who signs | Never signs — pair with Base MCP (you approve each tx in Base Account) or another signer | The agent's own wallet (CDP, viem, Privy), unattended |
+| Safety boundary | Outside the LLM: wallet approval UI or signer policy | In code: fail-closed `SafetyPolicy` (notional caps, collateral allowlist) |
+| Use when | Human-in-the-loop chat trading | Headless trading bots, MM bots, custodied agent vaults |
+
+For an MCP server that *does* sign by itself, see the agentkit repo's [`examples/mcp-server-quickstart.ts`](https://github.com/Thetanuts-Finance/thetanuts-agentkit/blob/main/examples/mcp-server-quickstart.ts) — it runs the ActionProvider as an autonomous-signing MCP server via Coinbase's official MCP adapter. It is deliberately a separate artifact, so this server keeps the guarantee that it can never move funds.
+
 ## Available Tools
 
 ### LLM Context Tools (call these first)
