@@ -4,7 +4,9 @@ Version history for the Thetanuts Finance SDK.
 
 ## Current Version
 
-**v0.2.3** — [View all releases on GitHub](https://github.com/Thetanuts-Finance/thetanuts-sdk/releases)
+**v0.3.0** — [View all releases on GitHub](https://github.com/Thetanuts-Finance/thetanuts-sdk/releases)
+
+Companion packages: [`@thetanuts-finance/mcp`](https://www.npmjs.com/package/@thetanuts-finance/mcp) **v1.0.0** (MCP server) and [`@thetanuts-finance/agentkit`](https://www.npmjs.com/package/@thetanuts-finance/agentkit) **v0.2.x** (autonomous agents) — see [AI Agents](../guides/agents-overview.md).
 
 This SDK follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`. Patch releases contain bug fixes and non-breaking improvements. Minor releases add new functionality in a backwards-compatible manner. Major releases may contain breaking changes and will be accompanied by a migration guide.
 
@@ -16,6 +18,29 @@ This SDK follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`
 ---
 
 ## Release History
+
+### v0.3.0 — RFQ agent helpers, multi-leg payout math, hardening
+
+Minor release, no breaking changes.
+
+**Added:**
+- **RFQ sealed-bid agent helpers** — `optionFactory.buildOfferTypedData()` (EIP-712 `Offer` envelope with live `OFFER_TYPEHASH` verification, fails closed on drift), `api.getRequesterPublicKey(quotationId)`, and `api.getOffer(...)`. These power [`@thetanuts-finance/agentkit`](../guides/agentkit.md) and the MCP prepare service; agentkit's peer range requires `>=0.3.0`.
+- **Off-chain payout + collateral math for all multi-leg structures.** `client.utils.calculatePayout()` / `calculateCollateral()` now cover `call_fly`, `put_fly`, `call_condor`, `put_condor`, `iron_condor`, and `ranger` — pure bigint, no RPC, usable for pre-trade UI previews. Previously multi-leg types threw `INVALID_PARAMS`.
+
+**Fixed:** MCP `validate_ranger` schema matched to the SDK validator (4 strikes); `calculateMaxPayout` / `calculatePayoutAtPrice` no longer fall through to spread math for 3- and 4-strike orders.
+
+**Security:** write methods assert the connected network before building transactions; OptionBook swap paths validate router/token addresses and swap data; MCP prepare tools tighten auth and redact URLs from errors.
+
+### v0.2.5 — loan indexer r12 fixes
+
+- Loan indexer URL repointed to the r12 worker — consumers were reading r12 contract state but querying the legacy v1 indexer, seeing archived loans and missing every r12 RFQ/offer/loan.
+- `LoanModule` backfills the r12 indexer's missing fields (`strike`, `expiryTimestamp`, `buyer`, `seller`) from on-chain `getOptionInfo()`, so `getLendingOpportunities()` and `getUserLoans()` return complete rows.
+- 9 collar types re-exported from the package barrel (they shipped in 0.2.4 but weren't reachable from the public API).
+
+### v0.2.4 — Collar Loan module + security audit closeout
+
+- **`client.collar`** — zero-interest, capped-upside loans via RFQ (buy put at `K_lo` + sell call at `K_hi`; MM funds an up-front USDC loan from the call premium). Pricing/read methods work today against live Deribit quotes; write methods throw `NETWORK_UNSUPPORTED` until the coordinator contract deploys.
+- **Security audit closeout** — remediates the full `SECURITY_AUDIT_BETA.md` backlog (1 Critical, 24 High, 73 Medium/Low/Informational): admin-only entrypoints removed from SDK ABIs, WheelVault allowance + event-log filtering fixes, `marketFill` swap-router validation made unconditional, `splitOption`/`reclaimCollateral` fee-forwarding wrappers, and more — see the per-finding tracker in the repo.
 
 ### v0.2.3 — strategyVault rename (BREAKING)
 

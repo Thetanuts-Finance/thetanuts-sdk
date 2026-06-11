@@ -52,6 +52,13 @@
 * [Filters & Utilities](pricing/filters-utilities.md)
 * [Collateral Cost Reference](pricing/collateral-cost.md)
 
+## AI Agents
+
+* [Overview — Pick Your Route](guides/agents-overview.md)
+* [MCP Server](guides/mcp-server.md)
+* [Trade from Chat (Base MCP Plugin)](guides/base-mcp-plugin.md)
+* [AgentKit (Autonomous Agents)](guides/agentkit.md)
+
 ## Guides
 
 * [Position Management](guides/position-management.md)
@@ -61,7 +68,6 @@
 * [Blockchain Events](guides/events.md)
 * [Error Handling](guides/error-handling.md)
 * [Production Checklist](guides/production-checklist.md)
-* [MCP Server](guides/mcp-server.md)
 
 ## SDK Reference
 

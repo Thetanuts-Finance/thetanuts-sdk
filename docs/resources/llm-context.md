@@ -66,7 +66,7 @@ The file is generated at the same time as the npm package, so what you see match
 The two LLM files track the latest published SDK release. To pin to a specific version, replace `main` in the URL with a version tag:
 
 ```
-https://raw.githubusercontent.com/Thetanuts-Finance/thetanuts-sdk/v0.2.3/llms-full.txt
+https://raw.githubusercontent.com/Thetanuts-Finance/thetanuts-sdk/v0.3.0/llms-full.txt
 ```
 
 See [GitHub Releases](https://github.com/Thetanuts-Finance/thetanuts-sdk/releases) for the available tags.

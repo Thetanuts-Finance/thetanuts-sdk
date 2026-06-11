@@ -10,6 +10,8 @@ For full details, see [mcp-server/README.md](../../mcp-server/README.md) and [mc
 
 ## This MCP vs `@thetanuts-finance/agentkit`
 
+> Full landscape, including the trade-from-chat and headless-bot routes: [AI Agents — Pick Your Route](agents-overview.md).
+
 Both are thin layers over the same `@thetanuts-finance/thetanuts-client` encode helpers — the difference is who signs and where the safety boundary lives:
 
 | | `@thetanuts-finance/mcp` | [`@thetanuts-finance/agentkit`](https://github.com/Thetanuts-Finance/thetanuts-agentkit) |
