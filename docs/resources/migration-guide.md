@@ -4,6 +4,7 @@ Upgrade guide for existing users moving to the latest SDK patterns and APIs.
 
 ## Table of Contents
 
+- [Migrating to v0.3.0](#migrating-to-v030)
 - [Migrating to v0.2.1 (Base_r12 deployment)](#migrating-to-v021-base_r12-deployment)
 - [Breaking Changes](#breaking-changes)
 - [New Helper Methods](#new-helper-methods)
@@ -12,6 +13,16 @@ Upgrade guide for existing users moving to the latest SDK patterns and APIs.
 - [Indexer Migration Notes](#indexer-migration-notes)
 
 ---
+
+## Migrating to v0.3.0
+
+**No breaking changes** — 0.3.0 is additive over 0.2.x. Upgrade with a plain `npm install @thetanuts-finance/thetanuts-client@^0.3.0`. One heads-up between the 0.2.x patches: v0.2.3 renamed two `strategyVault` symbols (see [Changelog](changelog.md)) — if you're jumping from ≤0.2.2, apply that find-and-replace.
+
+What you gain:
+
+- **RFQ sealed-bid agent helpers** — `optionFactory.buildOfferTypedData()`, `api.getRequesterPublicKey()`, `api.getOffer()`. Required by [`@thetanuts-finance/agentkit`](../guides/agentkit.md) (its peer range is `>=0.3.0`).
+- **Off-chain multi-leg payout/collateral math** — `client.utils.calculatePayout()` / `calculateCollateral()` for flies, condors, iron condors, and rangers (previously `INVALID_PARAMS`).
+- **Hardened write paths** — pre-write network assertions and stricter swap-parameter validation. Code that previously passed malformed swap params to `swapAndFillOrder` / `marketFill` now fails fast with `INVALID_PARAMS` instead of reverting on-chain.
 
 ## Migrating to v0.2.1 (Base_r12 deployment)
 

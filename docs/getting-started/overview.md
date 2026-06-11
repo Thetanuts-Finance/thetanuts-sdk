@@ -2,7 +2,7 @@
 
 TypeScript SDK for Thetanuts Finance V4 — options trading on EVM chains.
 
-> **Using an LLM (Claude, Cursor, ChatGPT)?** This SDK ships an MCP server that exposes ~100 tools — read state, build transactions, run pricing math. One-line install: `npx -y @thetanuts-finance/mcp`, or paste [the LLM context prompt](../resources/llm-context.md) into your LLM. See the [MCP Server guide](../guides/mcp-server.md) for details.
+> **Using an LLM (Claude, Cursor, ChatGPT)?** This SDK ships an MCP server that exposes ~100 tools — read state, build transactions, run pricing math. One-line install: `npx -y @thetanuts-finance/mcp`, or paste [the LLM context prompt](../resources/llm-context.md) into your LLM. Want to actually **trade** from chat? Pair it with Base MCP and approve each transaction in your wallet ([Trade from Chat](../guides/base-mcp-plugin.md)), or run a fully autonomous agent with its own wallet ([AgentKit](../guides/agentkit.md)). Start at [AI Agents — Pick Your Route](../guides/agents-overview.md).
 
 ## Features
 
