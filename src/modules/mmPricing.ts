@@ -808,15 +808,36 @@ export class MMPricingModule {
       : 0;
 
     // Calculate separate buy/sell nets using fee-adjusted prices (matches v4-webapp)
-    // Condor: +1 at K1, -1 at K2, -1 at K3, +1 at K4
-    // Buy net (user buys condor): use ask for bought legs, bid for sold legs
-    const buyNet =
-      legs[0].feeAdjustedAsk - legs[1].feeAdjustedBid -
-      legs[2].feeAdjustedBid + legs[3].feeAdjustedAsk;
-    // Sell net (user sells condor): use bid for bought legs, ask for sold legs
-    const sellNet =
-      legs[0].feeAdjustedBid - legs[1].feeAdjustedAsk -
-      legs[2].feeAdjustedAsk + legs[3].feeAdjustedBid;
+    let buyNet: number;
+    let sellNet: number;
+
+    if (params.type === 'iron') {
+      // Iron condor legs: [Put K1, Put K2, Call K3, Call K4]
+      // The position SELLS the inner pair (K2 put, K3 call) and BUYS the outer wings
+      // (K1 put, K4 call) — a net CREDIT, since the inner options are worth more
+      //
+      // sellNet = credit collected entering the (short) iron condor:
+      //   receive bid on the sold inner legs, pay ask on the bought outer legs
+      sellNet =
+        legs[1].feeAdjustedBid + legs[2].feeAdjustedBid -
+        legs[0].feeAdjustedAsk - legs[3].feeAdjustedAsk;
+      // buyNet = cost to take the opposite side (long body: buy inner, sell outer):
+      //   pay ask on the inner legs, receive bid on the outer legs
+      buyNet =
+        legs[1].feeAdjustedAsk + legs[2].feeAdjustedAsk -
+        legs[0].feeAdjustedBid - legs[3].feeAdjustedBid;
+    } else {
+      // Vanilla call/put condor: long outer (K1, K4), short inner (K2, K3) — a net debit
+      // Condor: +1 at K1, -1 at K2, -1 at K3, +1 at K4
+      // Buy net (user buys condor): use ask for bought legs, bid for sold legs
+      buyNet =
+        legs[0].feeAdjustedAsk - legs[1].feeAdjustedBid -
+        legs[2].feeAdjustedBid + legs[3].feeAdjustedAsk;
+      // Sell net (user sells condor): use bid for bought legs, ask for sold legs
+      sellNet =
+        legs[0].feeAdjustedBid - legs[1].feeAdjustedAsk -
+        legs[2].feeAdjustedAsk + legs[3].feeAdjustedBid;
+    }
 
     // For backward compat, netCondorPrice = buy-side net
     const netCondorPrice = buyNet;
