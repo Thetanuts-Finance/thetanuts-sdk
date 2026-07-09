@@ -698,9 +698,16 @@ export class MMPricingModule {
     // Apply single spread-level CC + FEE_MULTIPLIER to get final MM prices
     // ASK: (price + CC) * FEE_MULTIPLIER (user pays more when buying long)
     // BID: (price - CC) / FEE_MULTIPLIER (user receives less when selling short)
-    const netMmAskPrice = (netSpreadPriceAsk + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    // Clamp the FINAL quoted prices (after FEE_MULTIPLIER) to [0, width/spot]
+    // Quotes are in underlying terms, so the structural max payout (widthUsd) maps to
+    // widthUsd / underlyingPrice. Clamp AFTER ×FEE_MULTIPLIER
+    const widthPerUnderlying = near.underlyingPrice > 0
+      ? widthUsd / near.underlyingPrice
+      : Number.POSITIVE_INFINITY;
+    const rawAskPrice = (netSpreadPriceAsk + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    const netMmAskPrice = Math.min(Math.max(0, rawAskPrice), widthPerUnderlying);
     const rawBidPrice = (netSpreadPriceBid - spreadCCPerUnderlying) / FEE_MULTIPLIER;
-    const netMmBidPrice = Math.max(0, rawBidPrice);
+    const netMmBidPrice = Math.min(Math.max(0, rawBidPrice), widthPerUnderlying);
     if (rawBidPrice < 0) {
       this.client.logger.debug('Spread bid price floored to 0', {
         rawBidPrice, netSpreadPriceBid, spreadCCPerUnderlying, ticker1, ticker2,
@@ -815,9 +822,14 @@ export class MMPricingModule {
     const netCondorPrice = buyNet;
 
     // Apply CC + FEE_MULTIPLIER (matches v4-webapp calculateCallCondorParams.ts)
-    const netMmAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    // Clamp the FINAL quoted prices (after FEE_MULTIPLIER) to [0, width/spot]
+    const widthPerUnderlying = legs[0].underlyingPrice > 0
+      ? widthUsd / legs[0].underlyingPrice
+      : Number.POSITIVE_INFINITY;
+    const rawAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    const netMmAskPrice = Math.min(Math.max(0, rawAskPrice), widthPerUnderlying);
     const rawBidPrice = (sellNet - spreadCCPerUnderlying) / FEE_MULTIPLIER;
-    const netMmBidPrice = Math.max(0, rawBidPrice);
+    const netMmBidPrice = Math.min(Math.max(0, rawBidPrice), widthPerUnderlying);
     if (rawBidPrice < 0) {
       this.client.logger.debug('Condor bid price floored to 0', {
         rawBidPrice, sellNet, spreadCCPerUnderlying, tickers,
@@ -915,9 +927,14 @@ export class MMPricingModule {
     const netButterflyPrice = buyNet;
 
     // Apply CC + FEE_MULTIPLIER (matches v4-webapp)
-    const netMmAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    // Clamp the FINAL quoted prices (after FEE_MULTIPLIER) to [0, width/spot]
+    const widthPerUnderlying = legs[0].underlyingPrice > 0
+      ? widthUsd / legs[0].underlyingPrice
+      : Number.POSITIVE_INFINITY;
+    const rawAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    const netMmAskPrice = Math.min(Math.max(0, rawAskPrice), widthPerUnderlying);
     const rawBidPrice = (sellNet - spreadCCPerUnderlying) / FEE_MULTIPLIER;
-    const netMmBidPrice = Math.max(0, rawBidPrice);
+    const netMmBidPrice = Math.min(Math.max(0, rawBidPrice), widthPerUnderlying);
     if (rawBidPrice < 0) {
       this.client.logger.debug('Butterfly bid price floored to 0', {
         rawBidPrice, sellNet, spreadCCPerUnderlying, tickers,
