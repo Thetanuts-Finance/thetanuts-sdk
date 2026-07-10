@@ -20,7 +20,7 @@ import type {
 import { COLLATERAL_APR, DEFAULT_CARRY_RATE, FEE_MULTIPLIER } from '../types/mmPricing.js';
 import { mapHttpError } from '../utils/errors.js';
 import { NotFoundError } from '../types/errors.js';
-import { floatToBigInt, FLOAT_SCALE } from '../utils/decimals.js';
+import { floatToBigInt, toBigInt, FLOAT_SCALE } from '../utils/decimals.js';
 
 /**
  * Month abbreviation to number mapping for ticker parsing
@@ -584,9 +584,12 @@ export class MMPricingModule {
       FLOAT_SCALE (1e12) gives 12 decimal places — sufficient for pricing
     */
     const numContractsBig = BigInt(params.numContracts);
-    const collateralPerContractScaled = floatToBigInt(collPricing.collateralAmount);
+    // USD-magnitude values (strike-sized collateral, spot price) go through the
+    // string-exact toBigInt path — floatToBigInt's guard rejects |value| >= ~9007
+    // at 1e12 scale (TNU-AUDIT-0056), which every BTC option would otherwise hit.
+    const collateralPerContractScaled = toBigInt(collPricing.collateralAmount.toFixed(12), 12);
     const collateralCostPerUnitScaled = floatToBigInt(collPricing.collateralCostPerUnit);
-    const underlyingPriceScaled = floatToBigInt(vanilla.underlyingPrice);
+    const underlyingPriceScaled = toBigInt(vanilla.underlyingPrice.toFixed(12), 12);
 
     /*
       Calculate collateral required (in collateral token's smallest unit)
@@ -596,9 +599,13 @@ export class MMPricingModule {
     */
     const collateralRequired = (collateralPerContractScaled * numContractsBig * decimalScale) / FLOAT_SCALE;
 
+    // Premium and collateral cost are quoted in underlying terms. 
+    // Convert to USD only when the collateral is in USD
+    const conv = collateralAsset === 'USD' ? underlyingPriceScaled : FLOAT_SCALE;
+
     // Calculate collateral cost (in collateral token's smallest unit)
     // collateralCostPerUnit is dimensionless (fraction of underlying)
-    const collateralCost = (collateralCostPerUnitScaled * numContractsBig * underlyingPriceScaled * decimalScale) / (FLOAT_SCALE * FLOAT_SCALE);
+    const collateralCost = (collateralCostPerUnitScaled * numContractsBig * conv * decimalScale) / (FLOAT_SCALE * FLOAT_SCALE);
 
     // Calculate base premium (in collateral token's smallest unit)
     // basePrice is dimensionless (fraction of underlying)
@@ -606,7 +613,7 @@ export class MMPricingModule {
     const basePrice = params.isLong ? vanilla.feeAdjustedAsk : vanilla.feeAdjustedBid;
     const basePriceScaled = floatToBigInt(basePrice);
     const basePremium =
-      (basePriceScaled * numContractsBig * underlyingPriceScaled * decimalScale)
+      (basePriceScaled * numContractsBig * conv * decimalScale)
       / (FLOAT_SCALE * FLOAT_SCALE);
 
     // Total price
@@ -719,7 +726,7 @@ export class MMPricingModule {
 
     // Calculate collateral required — pure bigint to avoid float overflow
     const numContracts = params.numContracts ?? BigInt(10 ** 18);
-    const widthScaled = floatToBigInt(widthUsd);
+    const widthScaled = toBigInt(widthUsd.toFixed(12), 12);
     const collateral = (widthScaled * numContracts) / (FLOAT_SCALE * (10n ** 12n));
 
     return {
@@ -859,7 +866,7 @@ export class MMPricingModule {
 
     // Calculate collateral — pure bigint to avoid float overflow
     const numContracts = params.numContracts ?? BigInt(10 ** 18);
-    const widthScaled = floatToBigInt(widthUsd);
+    const widthScaled = toBigInt(widthUsd.toFixed(12), 12);
     const collateral = (widthScaled * numContracts) / (FLOAT_SCALE * (10n ** 12n));
 
     let condorType: 'call_condor' | 'put_condor' | 'iron_condor';
@@ -964,7 +971,7 @@ export class MMPricingModule {
 
     // Calculate collateral (width between middle and outer) — pure bigint to avoid float overflow
     const numContracts = params.numContracts ?? BigInt(10 ** 18);
-    const widthScaled = floatToBigInt(widthUsd);
+    const widthScaled = toBigInt(widthUsd.toFixed(12), 12);
     const collateral = (widthScaled * numContracts) / (FLOAT_SCALE * (10n ** 12n));
 
     return {
