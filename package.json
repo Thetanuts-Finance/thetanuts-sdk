@@ -31,6 +31,7 @@
     "test:mmpricing": "npx tsx tests/properties/mmpricing-bounds.test.ts",
     "test:ironcondor": "npx tsx tests/properties/iron-condor-pricing.test.ts",
     "test:positionpricing": "npx tsx tests/properties/position-pricing.test.ts",
+    "test:maxcontracts": "npx tsx tests/properties/maxcontracts.test.ts",
     "verify:abi": "npx tsx scripts/verify-abi-parity.ts",
     "test:benchmark": "npx tsx scripts/benchmark-indexer.ts",
     "lint": "eslint src --ext .ts",
