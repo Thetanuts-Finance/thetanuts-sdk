@@ -283,7 +283,7 @@ export function calculateNumContracts(params: {
       // LINEAR_CALL is a capped call at 2x strike, same collateral formula as PUT
       // PHYSICAL_PUT uses USDC collateral, same formula as PUT
       const strike = strikes[0];
-      return strike !== undefined && strike > 0 ? tradeAmount / strike : tradeAmount;
+      return strike !== undefined && strike > 0 ? tradeAmount / strike : 0;
     }
 
     case 'RANGER': {
@@ -314,7 +314,7 @@ export function calculateNumContracts(params: {
     }
 
     default: {
-      // All other multi-leg USD products: tradeAmount / (K_max - K_min)
+      // All other multi-leg USD products: tradeAmount / (width between the two smallest strikes)
       // Covers CALL_SPREAD, PUT_SPREAD, CALL_FLY, PUT_FLY,
       //         CALL_CONDOR, PUT_CONDOR
       const sorted = strikes.filter((s) => s > 0).sort((a, b) => a - b);

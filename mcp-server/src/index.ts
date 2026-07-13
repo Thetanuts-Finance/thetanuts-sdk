@@ -785,7 +785,8 @@ const tools: Tool[] = [
         },
         strikes: {
           type: 'array',
-          items: { type: 'number' },
+          items: { type: 'number', exclusiveMinimum: 0 },
+          minItems: 1,
           description: 'Strike prices (human-readable, e.g., [1800] for PUT, [1700,1800,1900,2000] for IRON_CONDOR)',
         },
         isBuy: {

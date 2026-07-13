@@ -33,6 +33,7 @@
     "test:positionpricing": "npx tsx tests/properties/position-pricing.test.ts",
     "test:maxcontracts": "npx tsx tests/properties/maxcontracts.test.ts",
     "test:frombigint": "npx tsx tests/properties/frombigint-sign.test.ts",
+    "test:numcontracts": "npx tsx tests/properties/numcontracts-guard.test.ts",
     "verify:abi": "npx tsx scripts/verify-abi-parity.ts",
     "test:benchmark": "npx tsx scripts/benchmark-indexer.ts",
     "lint": "eslint src --ext .ts",
