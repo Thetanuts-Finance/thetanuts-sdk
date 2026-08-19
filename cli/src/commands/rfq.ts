@@ -16,6 +16,12 @@ import { jsonReplacer, render, renderError, buildTxReceiptPayload, fetchEthUsdSa
 import { confirm } from '../confirm.js';
 import { computePayoutSummary, computeScenarios } from '../payout.js';
 import { underlyingSymbolByPriceFeed } from '../format.js';
+import {
+  refreshRfqOfferDeadline,
+  routeLoadedCliRfqRequest,
+  routeCliRfqRequest,
+  type CliRfqStructure,
+} from '../rfqImplementation.js';
 
 // ----------------------------------------------------------------------------
 // RFQ Constants
@@ -30,6 +36,7 @@ type Underlying = 'ETH' | 'BTC';
 type OptionType = 'PUT' | 'CALL';
 type StructureType =
   | 'PUT'
+  | 'LINEAR_CALL'
   | 'INVERSE_CALL'
   | 'PUT_SPREAD'
   | 'CALL_SPREAD'
@@ -56,14 +63,15 @@ interface BuildInputs {
 }
 
 /**
- * Map (strikeCount, optionType, isIronCondor) → on-screen structure label.
- *
- * Verbatim port of OpenClaw build-rfq.ts:52-67 cross-checked against
- * src/modules/optionFactory.ts:1730-1764 (private getImplementationForStructure).
- * For display only — the SDK's buildRFQParams owns the actual implementation
- * address resolution, so this stays a pure label function.
+ * Map CLI RFQ inputs to the implementation family used for routing.
+ * Vanilla calls are inverse calls; collateral validation later requires the
+ * user to select WETH explicitly for that one structure.
  */
-function getStructureType(strikeCount: number, optionType: OptionType, isIronCondor: boolean): StructureType {
+function getStructureType(
+  strikeCount: number,
+  optionType: OptionType,
+  isIronCondor: boolean
+): CliRfqStructure {
   if (isIronCondor) {
     if (strikeCount !== 4) {
       throw new Error(`--structure iron-condor requires exactly 4 strikes (got ${strikeCount})`);
@@ -131,15 +139,13 @@ function validateStrikeOrdering(
 }
 
 /**
- * v0.1.0 is USDC-only across all structures on the CLI surface. The SDK still
- * supports WETH collateral for the inverse-CALL family, but the CLI rejects
- * non-USDC up front (see buildFromFlags). Always default to USDC so the
- * default code path doesn't trip the new validator.
+ * Keep USDC as the general default. Vanilla CALL deliberately does not inherit
+ * this default: buildFromFlags requires an explicit --collateral-token WETH so
+ * a numeric --collateral-amount can never silently change units from USDC to
+ * WETH.
  *
  * Structure → implementation mapping (collateral is what swings this):
- *   single-strike CALL + USDC           → LINEAR_CALL  (cash, capped payoff)
  *   single-strike CALL + WETH           → INVERSE_CALL (cash, payoff (S−K)/S in ETH)
- *   single-strike CALL + WETH +physical → PHYSICAL_CALL
  *   PUT / spread / fly / condor + USDC  → linear cash-settled impl
  */
 function defaultCollateral(_type: OptionType, _strikeCount: number): 'USDC' | 'WETH' {
@@ -150,21 +156,18 @@ function defaultCollateral(_type: OptionType, _strikeCount: number): 'USDC' | 'W
  * Map the CLI's display-only StructureType + collateralToken to the SDK's
  * ProductName enum used by `calculateNumContracts` / `calculateCollateralRequired`.
  *
- * Only the INVERSE_CALL family swings with collateral choice:
- *   single-strike CALL + WETH  → INVERSE_CALL  (1:1 underlying collateral)
- *   single-strike CALL + USDC  → LINEAR_CALL   (capped-at-2×-strike, USDC collat)
- *   two-strike CALL  + WETH  → INVERSE_CALL_SPREAD
- *   everything else passes straight through.
+ * Only vanilla INVERSE_CALL uses WETH in the CLI. Multi-leg structures remain
+ * on their USDC implementations.
  */
 function toProductName(
   structureType: StructureType,
   collateralToken: 'USDC' | 'WETH'
 ): ProductName {
   if (structureType === 'INVERSE_CALL') {
-    return collateralToken === 'WETH' ? 'INVERSE_CALL' : 'LINEAR_CALL';
-  }
-  if (structureType === 'CALL_SPREAD' && collateralToken === 'WETH') {
-    return 'INVERSE_CALL_SPREAD';
+    if (collateralToken !== 'WETH') {
+      throw new Error('INVERSE_CALL requires WETH collateral');
+    }
+    return 'INVERSE_CALL';
   }
   return structureType;
 }
@@ -597,13 +600,26 @@ async function buildFromFlags(
     throw new Error('--collateral-token must be USDC or WETH');
   }
 
-  // v0.1.0 is USDC-only on the CLI. The SDK still supports WETH collateral for
-  // the inverse-CALL family, but it's not exposed here; reject any non-USDC
-  // collateral up front so users don't get a clean-looking build artifact
-  // they can't submit.
-  if (collateralToken !== 'USDC') {
+  const isVanillaCall = type === 'CALL' && strikes.length === 1 && !isIronCondor;
+  if (isVanillaCall) {
+    if (local.collateralToken === undefined || collateralToken !== 'WETH') {
+      const err = new Error(
+        'Vanilla CALL RFQs use INVERSE_CALL and require explicit --collateral-token WETH. ' +
+        '--collateral-amount is denominated in WETH, not USDC.'
+      );
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+    if (underlying !== 'ETH') {
+      const err = new Error(
+        'WETH INVERSE_CALL is valid only for ETH underlying; BTC inverse calls require cbBTC, which the CLI does not expose yet'
+      );
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+  } else if (collateralToken !== 'USDC') {
     const err = new Error(
-      'v0.1.0 supports USDC collateral only — WETH/cbBTC will be enabled in a future release'
+      'WETH collateral is supported only for a one-strike ETH CALL (INVERSE_CALL); use USDC for this structure'
     );
     (err as Error & { exitCode?: number }).exitCode = 4;
     throw err;
@@ -659,7 +675,7 @@ async function buildFromFlags(
   }
 
   // Resolve contract count from EITHER --contracts (direct) OR --collateral-amount
-  // (derived from USDC budget for buy, or collateral deposit for sell). Mutex.
+  // (derived from a budget/deposit denominated in the selected collateral). Mutex.
   const rawContracts = local.contracts !== undefined && local.contracts !== ''
     ? local.contracts
     : undefined;
@@ -676,7 +692,8 @@ async function buildFromFlags(
   }
   if (rawContracts === undefined && rawCollateralAmount === undefined) {
     throw new Error(
-      'Must pass either --contracts (direct contract count) or --collateral-amount (USDC spend; CLI derives contracts).'
+      'Must pass either --contracts (direct contract count) or --collateral-amount ' +
+        '(amount in the selected collateral token; CLI derives contracts).'
     );
   }
   let contractsNum: number;
@@ -724,7 +741,7 @@ async function buildFromFlags(
   // a pure off-chain construction, and not every build is ready to be sent.
   // `rfq request` (commit 3) will fill this in from the keystore.
   let requesterPublicKey: string | undefined = local.requesterPublicKey;
-  if (requesterPublicKey === '') requesterPublicKey = undefined;
+  if (requesterPublicKey === '' || requesterPublicKey === '0x') requesterPublicKey = undefined;
 
   const inputs: BuildInputs = {
     underlying: underlying as Underlying,
@@ -742,11 +759,11 @@ async function buildFromFlags(
     ...(requesterPublicKey !== undefined ? { requesterPublicKey } : {}),
   };
 
-  // Defer to SDK — this is where strike sorting / impl resolution / decimal
-  // conversion actually happens. The OpenClaw equality test in §6 #1 only
-  // passes because the CLI hands the SDK the same human inputs OpenClaw does.
+  // Defer strike sorting and decimal conversion to the SDK. Implementation
+  // routing is corrected immediately afterwards because the current SDK
+  // ignores collateral when choosing a vanilla CALL implementation.
   const { client } = result;
-  const rfqRequest = isIronCondor
+  const sdkRfqRequest = isIronCondor
     ? client.optionFactory.buildIronCondorRFQ({
         requester: inputs.requester as `0x${string}`,
         underlying: inputs.underlying,
@@ -778,6 +795,20 @@ async function buildFromFlags(
         ...(inputs.requesterPublicKey !== undefined ? { requesterPublicKey: inputs.requesterPublicKey } : {}),
       });
 
+  const expectedCollateral = client.chainConfig.tokens[collateralToken]?.address;
+  if (!expectedCollateral || sdkRfqRequest.params.collateral.toLowerCase() !== expectedCollateral.toLowerCase()) {
+    throw new Error(
+      `RFQ builder produced the wrong collateral address for ${collateralToken}; refusing to encode request`
+    );
+  }
+
+  const rfqRequest = routeCliRfqRequest(
+    sdkRfqRequest,
+    structureType,
+    collateralToken,
+    client.chainConfig.implementations
+  );
+
   const ticker = formatTicker(inputs.underlying, inputs.expiry, inputs.strikes, inputs.type);
   const deadlineSeconds = Math.round(inputs.deadlineMinutes * 60);
 
@@ -803,15 +834,15 @@ function attachBuildFlags(cmd: Command, { allFlagsOptional = false }: { allFlags
   cmd.option('--contracts <n>', 'contract count (human-readable). Mutually exclusive with --collateral-amount.');
   cmd.option(
     '--collateral-amount <n>',
-    'USDC budget for BUY (requires --reserve-price as price ceiling) OR collateral deposit for SELL. ' +
+    'budget for BUY or collateral deposit for SELL, denominated in --collateral-token. ' +
       'CLI derives --contracts automatically. Mutually exclusive with --contracts.'
   );
   requireDirection('--direction <buy|sell>', 'buy = long position, sell = short position');
   return cmd
 
     .option(
-      '--collateral-token <USDC>',
-      'collateral token (v0.1.0: USDC only; WETH/cbBTC planned for a future release)'
+      '--collateral-token <USDC|WETH>',
+      'collateral token (default USDC; explicit WETH required for vanilla ETH CALL / INVERSE_CALL)'
     )
     .option(
       '--deadline-minutes <n>',
@@ -843,7 +874,7 @@ export function register(program: Command): void {
     .command('rfq')
     .description(
       'Request-for-Quotation lifecycle: build / encode / submit / inspect quotations and referrals. ' +
-        'Numeric defaults (0.75min deadline, single-strike-CALL→WETH collateral) match OpenClaw build-rfq.ts.'
+        'Defaults to a 45-second deadline. RFQs use USDC except vanilla ETH calls, which require explicit WETH.'
     );
 
   registerBuild(grp);
@@ -1000,7 +1031,13 @@ function registerBuild(grp: Command): void {
       try {
         const result = getClient(opts);
         const built = await buildFromFlags(result, local, opts);
-        const encoded = result.client.optionFactory.encodeRequestForQuotation(built.rfqRequest);
+        // Encoding requires a real compressed RFQ public key. Keep `rfq build`
+        // side-effect free when no key was supplied: the saved request remains
+        // valid input for `rfq request`, which stamps the keystore key before
+        // encoding and broadcasting.
+        const encoded = built.rfqRequest.requesterPublicKey
+          ? result.client.optionFactory.encodeRequestForQuotation(built.rfqRequest)
+          : undefined;
 
         const payoutArgs = {
           structureType: built.structureType,
@@ -1032,11 +1069,18 @@ function registerBuild(grp: Command): void {
           },
           payout,
           ...serializeRfqRequest(built.rfqRequest),
-          transaction: {
-            to: encoded.to,
-            data: encoded.data,
-            value: '0',
-          },
+          ...(encoded
+            ? {
+                transaction: {
+                  to: encoded.to,
+                  data: encoded.data,
+                  value: '0',
+                },
+              }
+            : {
+                encodingNote:
+                  'No transaction encoded because requesterPublicKey is empty; `rfq request` will load/create the RFQ key before submission.',
+              }),
         };
 
         if (local.out && local.out.length > 0) {
@@ -1175,6 +1219,7 @@ function parseRFQRequest(raw: unknown): RFQRequest {
 interface LoadedBuildFile {
   request: RFQRequest;
   ticker?: string;
+  deadlineSeconds?: number;
   // (underlying, optionType) the build was authored against. When present, the
   // caller re-validates against the live MM grid before broadcast — closes the
   // window where a stale build file submits to a rotated-out strike.
@@ -1210,6 +1255,7 @@ async function loadRequestFromBuildFile(filePath: string): Promise<LoadedBuildFi
   const summary = top.rfq as Record<string, unknown> | undefined;
   let gridCheck: LoadedBuildFile['gridCheck'];
   let ticker: string | undefined;
+  let deadlineSeconds: number | undefined;
   if (summary && typeof summary === 'object') {
     const underlying = (summary.underlying as string | undefined)?.toUpperCase();
     const optionType = (summary.type as string | undefined)?.toUpperCase();
@@ -1218,6 +1264,10 @@ async function loadRequestFromBuildFile(filePath: string): Promise<LoadedBuildFi
       : undefined;
     const expiry = typeof summary.expiry === 'number' ? summary.expiry : Number(summary.expiry);
     ticker = typeof summary.ticker === 'string' ? summary.ticker : undefined;
+    const parsedDeadlineSeconds = Number(summary.deadlineSeconds);
+    if (Number.isSafeInteger(parsedDeadlineSeconds) && parsedDeadlineSeconds > 0) {
+      deadlineSeconds = parsedDeadlineSeconds;
+    }
     if (
       (underlying === 'ETH' || underlying === 'BTC') &&
       (optionType === 'PUT' || optionType === 'CALL') &&
@@ -1229,7 +1279,7 @@ async function loadRequestFromBuildFile(filePath: string): Promise<LoadedBuildFi
     }
   }
 
-  return { request, ticker, gridCheck };
+  return { request, ticker, deadlineSeconds, gridCheck };
 }
 
 /**
@@ -1283,9 +1333,26 @@ async function loadOrBuildRequest(
   result: GetClientResult,
   local: Record<string, string | undefined>,
   globalOpts: ReturnType<typeof getGlobalOpts>
-): Promise<{ request: RFQRequest; fromFile: boolean; structureType?: StructureType; ticker?: string }> {
+): Promise<{
+  request: RFQRequest;
+  fromFile: boolean;
+  structureType?: StructureType;
+  ticker?: string;
+  deadlineSeconds: number;
+}> {
   if (local.fromBuildFile) {
     const loaded = await loadRequestFromBuildFile(local.fromBuildFile);
+    const usdcAddress = result.client.chainConfig.tokens.USDC?.address;
+    const wethAddress = result.client.chainConfig.tokens.WETH?.address;
+    if (!usdcAddress || !wethAddress) {
+      throw new Error('USDC and WETH must both be configured on this network');
+    }
+    const routed = routeLoadedCliRfqRequest(
+      loaded.request,
+      { USDC: usdcAddress, WETH: wethAddress },
+      result.client.chainConfig.implementations
+    );
+    loaded.request = routed.request;
     // Build-file path: re-validate the (strike, expiry, type) against the live
     // MM grid unless the user explicitly overrode pricing with --reserve-price.
     const hasUserReserve = local.reservePrice !== undefined && local.reservePrice !== '';
@@ -1311,10 +1378,22 @@ async function loadOrBuildRequest(
         }
       }
     }
-    return { request: loaded.request, fromFile: true, ticker: loaded.ticker };
+    return {
+      request: loaded.request,
+      fromFile: true,
+      structureType: routed.structureType,
+      ticker: loaded.ticker,
+      deadlineSeconds: loaded.deadlineSeconds ?? Math.round(DEFAULT_DEADLINE_MINUTES * 60),
+    };
   }
   const built = await buildFromFlags(result, local, globalOpts);
-  return { request: built.rfqRequest, fromFile: false, structureType: built.structureType, ticker: built.ticker };
+  return {
+    request: built.rfqRequest,
+    fromFile: false,
+    structureType: built.structureType,
+    ticker: built.ticker,
+    deadlineSeconds: built.deadlineSeconds,
+  };
 }
 
 /**
@@ -1540,7 +1619,15 @@ function registerRequest(grp: Command): void {
         requireSigner(result);
 
         const loaded = await loadOrBuildRequest(result, local, opts);
-        const requestWithPk = await ensureRequesterPublicKey(result, loaded.request);
+        let requestWithPk = await ensureRequesterPublicKey(result, loaded.request);
+        // Build artifacts contain an absolute timestamp. Refresh it before the
+        // preview so an artifact created earlier (or loaded from disk) does not
+        // fail merely because its original offer window elapsed.
+        requestWithPk = refreshRfqOfferDeadline(
+          requestWithPk,
+          Math.floor(Date.now() / 1000),
+          loaded.deadlineSeconds
+        );
         checkOfferDeadlineFuture(requestWithPk);
 
         render(
@@ -1573,8 +1660,16 @@ function registerRequest(grp: Command): void {
         });
         if (!ok) process.exit(3);
 
+        // ERC-20 approval + human confirmations can consume most or all of the
+        // original 45-second window. Refresh again at the final broadcast
+        // boundary so the mined RFQ gives makers the full requested window.
         const submittedAt = Math.floor(Date.now() / 1000);
-        const receipt = await result.client.optionFactory.requestForQuotation(requestWithPk);
+        const requestToSubmit = refreshRfqOfferDeadline(
+          requestWithPk,
+          submittedAt,
+          loaded.deadlineSeconds
+        );
+        const receipt = await result.client.optionFactory.requestForQuotation(requestToSubmit);
         const quotationId = extractQuotationIdFromReceipt(
           receipt.logs,
           result.client.optionFactory.contractAddress
@@ -1584,7 +1679,11 @@ function registerRequest(grp: Command): void {
           buildTxReceiptPayload(
             receipt,
             ethUsd,
-            quotationId !== undefined ? { quotationId } : undefined
+            {
+              ...(quotationId !== undefined ? { quotationId } : {}),
+              offerEndTimestamp: requestToSubmit.params.offerEndTimestamp.toString(),
+              offerWindowSeconds: loaded.deadlineSeconds,
+            }
           ),
           { output: opts.output, noColor: !opts.color }
         );
@@ -1957,6 +2056,42 @@ function registerOffers(grp: Command): void {
           return;
         }
         render(rows, { output: opts.output, noColor: !opts.color });
+
+        // Keep machine-readable JSON clean, but give interactive users the
+        // exact next command after they discover an offer. The amount is a
+        // total collateral amount, so an RFQ buyer must never early-accept an
+        // offer above the reserve amount chosen at request time.
+        if (opts.output !== 'json') {
+          const actionable = rows.filter(
+            (row) => row.status !== 'accepted' && row.status !== 'rejected'
+          );
+          let reserve: bigint | undefined;
+          let isBuyer = false;
+          try {
+            const quotation = await client.optionFactory.getQuotation(id);
+            isBuyer = quotation.params.isRequestingLongPosition;
+            if (isBuyer) reserve = quotation.params.requesterDeposit;
+          } catch {
+            // Do not fail offer discovery if this supplementary RPC read fails.
+          }
+          const eligible = reserve === undefined
+            ? actionable
+            : actionable.filter((row) => row.offerAmount !== undefined && BigInt(row.offerAmount) <= reserve!);
+          if (isBuyer && reserve !== undefined && actionable.length > 0 && eligible.length === 0) {
+            process.stderr.write(
+              `\nNo displayed offer is within this RFQ's fixed reserve (${reserve.toString()} raw collateral units). ` +
+              'A buyer cannot top up an existing RFQ; create a new RFQ with a higher --collateral-amount instead.\n'
+            );
+          }
+          if (eligible.length > 0) {
+            const first = eligible[0]!;
+            process.stderr.write(
+              '\nTo accept an offer early (only if its offerAmountHuman is at or below your RFQ reserve):\n' +
+              `  thetanuts rfq accept --id ${id.toString()} --offeror ${first.offeror}\n` +
+              'Otherwise, wait for auto-settlement after the offer deadline; a buyer cannot top up an existing RFQ.\n'
+            );
+          }
+        }
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
         const exit = (err as { exitCode?: number }).exitCode ?? 1;
@@ -2110,6 +2245,19 @@ function registerAccept(grp: Command): void {
         }
 
         const { collateralAddress, decimals } = await readQuotationCollateralDecimals(result, id);
+        const quotation = await client.optionFactory.getQuotation(id);
+        if (
+          quotation.params.isRequestingLongPosition &&
+          offerAmount > quotation.params.requesterDeposit
+        ) {
+          const err = new Error(
+            `Offer amount ${offerAmount.toString()} exceeds this RFQ's fixed buyer reserve ` +
+              `${quotation.params.requesterDeposit.toString()}. A buyer cannot top up an existing RFQ; ` +
+              'create a new request with a higher --collateral-amount.'
+          );
+          (err as Error & { exitCode?: number }).exitCode = 4;
+          throw err;
+        }
         const preview = {
           action: 'settleQuotationEarly',
           quotationId: id.toString(),
