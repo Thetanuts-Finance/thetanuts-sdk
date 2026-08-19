@@ -4,7 +4,7 @@ TypeScript CLI for [Thetanuts Finance V4](https://thetanuts.finance) options on 
 
 > **Warning:** This is early, experimental software. Use at your own risk and do not use with large amounts of funds. APIs, commands, and behavior may change without notice. Always run `--dry-run` first, start with a dedicated wallet (not your main funds wallet), and verify transactions before confirming.
 
-> **v0.1.0 — USDC collateral only.** All trading (book fills, RFQ requests) is denominated in USDC. WETH and cbBTC collateral are planned for a future release.
+> **v0.2.0 — cash-settled USDC book buys only.** `book orders`, `book preview`, and `book fill` exclude physical implementations, maker bids, and non-USDC collateral. RFQ covers the wider direction/structure workflow documented below, including WETH `INVERSE_CALL` for vanilla ETH calls. See [CHANGELOG.md](./CHANGELOG.md) — 0.2.0 corrects OptionBook premium/contract scaling and restricts `book fill --order-index` to `--dry-run`.
 
 ## Install
 
@@ -150,7 +150,7 @@ thetanuts -o json market data
 
 Piping works cleanly — EPIPE is handled, so `thetanuts ... | head` exits silently with status 0. Errors emit on stderr by default; pass `--json-errors` for a structured JSON error on stderr. Either way the exit code is non-zero.
 
-> **v0.1.0 display note.** `book orders` and `book preview` now render humanized columns (ticker, $-formatted strike/premium/available, ISO expiry) in table mode. JSON output stays byte-stable with the raw on-chain decimals scripts depend on. A few other indexer-backed list endpoints still surface raw decimals in table mode; end-to-end humanization is on the v0.1.1 polish list.
+> **Display note.** `book orders` and `book preview` now render humanized columns (ticker, $-formatted strike/premium/available, ISO expiry) in table mode. JSON output stays byte-stable with the raw on-chain decimals scripts depend on. A few other indexer-backed list endpoints still surface raw decimals in table mode; end-to-end humanization is on the v0.1.1 polish list.
 
 ### Exit codes
 
@@ -273,20 +273,20 @@ thetanuts wallet approve --token USDC --for optionBook --amount 0.5
 thetanuts book orders --underlying ETH --type PUT
 ```
 
-In table mode, v0.1.0 renders humanized columns — a derived `ticker`, $-formatted `strike` / `premium` / `available`, ISO-stamped `expiry`, and `collateralSymbol`. Under `-o json` the raw on-chain decimals are preserved (8-decimal strikes / prices, 6-decimal USDC amounts) so scripts stay byte-stable.
+The list is the executable CLI book: current cash-settled USDC maker asks only. Physical options and bids in aBasWETH/aBasUSDC are intentionally hidden. In table mode, the CLI renders humanized columns — a derived `ticker`, $-formatted `strike` / `premium` / `available`, ISO-stamped `expiry`, `collateralSymbol`, implementation, and settlement style. Under `-o json` the raw on-chain decimals are preserved (8-decimal strikes / prices, 6-decimal USDC and contract amounts) so scripts stay byte-stable.
 
 ```
-┌───────┬────────────────────────────────────────────┬─────────────────────┬────────┬──────────┬────────────────────────────────┬───────────┬──────────────────┐
-│ index │ maker                                      │ ticker              │ strike │ premium  │ expiry                         │ available │ collateralSymbol │
-├───────┼────────────────────────────────────────────┼─────────────────────┼────────┼──────────┼────────────────────────────────┼───────────┼──────────────────┤
-│ 0     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-19MAY26-2100-P  │ $2,100 │ $149.37  │ 1779177600 (2026-05-19T08:00Z) │ $10,000   │ USDC             │
-│ 1     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-19MAY26-2125-P  │ $2,125 │ $493.84  │ 1779177600 (2026-05-19T08:00Z) │ $10,000   │ USDC             │
-│ 2     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20MAY26-2025-P  │ $2,025 │ $214.86  │ 1779264000 (2026-05-20T08:00Z) │ $10,000   │ USDC             │
-│ 3     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20MAY26-2050-P  │ $2,050 │ $366.89  │ 1779264000 (2026-05-20T08:00Z) │ $10,000   │ USDC             │
-└───────┴────────────────────────────────────────────┴─────────────────────┴────────┴──────────┴────────────────────────────────┴───────────┴──────────────────┘
+┌───────┬────────────────────────────────────────────┬────────────────────┬────────┬─────────┬────────────────────────────────┬───────────┬──────────────────┬────────────────┬────────────┐
+│ index │ maker                                      │ ticker             │ strike │ premium │ expiry                         │ available │ collateralSymbol │ implementation │ settlement │
+├───────┼────────────────────────────────────────────┼────────────────────┼────────┼─────────┼────────────────────────────────┼───────────┼──────────────────┼────────────────┼────────────┤
+│ 0     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20AUG26-1880-P │ $1,880 │ $2.04   │ 1787212800 (2026-08-20T08:00Z) │ $10,000   │ USDC             │ PUT            │ cash       │
+│ 1     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20AUG26-1900-P │ $1,900 │ $5.39   │ 1787212800 (2026-08-20T08:00Z) │ $10,000   │ USDC             │ PUT            │ cash       │
+│ 2     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20AUG26-1920-P │ $1,920 │ $13.47  │ 1787212800 (2026-08-20T08:00Z) │ $10,000   │ USDC             │ PUT            │ cash       │
+│ 3     │ 0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E │ ETH-20AUG26-1940-C │ $1,940 │ $7.09   │ 1787212800 (2026-08-20T08:00Z) │ $10,000   │ USDC             │ LINEAR_CALL    │ cash       │
+└───────┴────────────────────────────────────────────┴────────────────────┴────────┴─────────┴────────────────────────────────┴───────────┴──────────────────┴────────────────┴────────────┘
 ```
 
-Reading row 0: a PUT struck at `$2,100` with a per-contract premium of `$149.37`, expiring `2026-05-19T08:00Z`, with `$10,000` USDC of maker collateral available. The `premium` column is the per-contract USDC cost the SDK normalizes relative to the strike denominator — `book preview` will show the total USDC cost for the size you want.
+Reading row 0: a PUT struck at `$1,880` with a per-contract premium of `$2.04`, expiring `2026-08-20T08:00Z`, with `$10,000` USDC of maker collateral available. The `premium` column uses the protocol's fixed 8-decimal price scale; `book preview` shows the total USDC cost for the size you want.
 
 For machine-friendly output, use `-o json` and `jq`:
 
@@ -318,11 +318,11 @@ thetanuts -o json book preview --underlying ETH --type PUT --strike 2075 --expir
   "strikes": ["207500000000"],
   "payout": {
     "direction": "buy",
-    "contracts": 0.00011516,
-    "premiumPerContract": "86.834316 USDC",
+    "contracts": 0.011516,
+    "premiumPerContract": "0.86834316 USDC",
     "totalPremium": "0.00999984 USDC",
     "maxLoss": "0.00999984 USDC (premium paid if option expires OTM)",
-    "maxGain": "0.2290 USDC (max intrinsic minus premium)",
+    "maxGain": "23.8857 USDC (max intrinsic minus premium)",
     "note": "Estimates assume fill at the listed premium. Actual maker quote may beat reserve."
   }
 }
@@ -434,14 +434,13 @@ thetanuts position info --address 0x5F712F331c1f0f30F913c22b053985bf2ac88dc4
 └─────────────────┴───────────────────────────────────────────────────┘
 ```
 
-After expiry, claim the payout:
+After expiry, inspect the automatic payout:
 
 ```bash
-thetanuts position payout --address 0x5F71...8dc4 --dry-run     # simulate first
-thetanuts position payout --address 0x5F71...8dc4               # claim
+thetanuts position payout --address 0x5F71...8dc4
 ```
 
-Pre-expiry, both commands print `option has not expired yet` and exit non-zero — no tx is sent. After expiry, the simulator first prints the resolved TWAP, `numContracts`, `strikes`, and `simulatedPayout`, then (in non-`--dry-run` mode) prompts to confirm and broadcasts the `claim()` tx; the receipt block shows `txHash`, `status`, `gasUsed`, and `feeUsd`. The claim sweeps the payout to the position holder's wallet. Live capture coming in v0.1.1.
+Pre-expiry, the command prints `option has not expired yet` and exits non-zero. On r12 there is no user-callable `claim()`/`payout()` transaction: the factory settles automatically and sends any buyer payout directly to the holder wallet. After expiry, this command prints the resolved TWAP, `numContracts`, `strikes`, and simulated payout so you can verify the result.
 
 ---
 
@@ -469,12 +468,18 @@ thetanuts keys ensure
 thetanuts keys export --out ~/rfq-key-backup.key
 ```
 
-### Step 2 — Approve USDC for the OptionFactory
+### Step 2 — Approve collateral for the OptionFactory
 
 For BUY-side RFQs, the OptionFactory escrows your `reservePrice` at request time. Approve enough.
 
 ```bash
 thetanuts wallet approve --token USDC --for optionFactory --amount 10
+```
+
+Vanilla ETH calls use `INVERSE_CALL`, so they require WETH instead:
+
+```bash
+thetanuts wallet approve --token WETH --for optionFactory --amount 0.001
 ```
 
 ### Step 3 — Discover what's tradeable
@@ -496,7 +501,7 @@ thetanuts rfq quote --underlying ETH --type put
 └────────────┴────────────┴────────┴──────┴─────────────────────┴───────────┴───────────┴──────────┴────────────┴────────────┘
 ```
 
-`bid` / `ask` / `mark` are MM-quoted prices per unit of underlying. `usdcAsk` is the implied USDC premium per contract (what you'd pay if you BUY this strike). `wethAsk` is the parallel WETH-collateral price — informational only for v0.1.0 since the CLI is USDC-only.
+`bid` / `ask` / `mark` are MM-quoted prices per unit of underlying. `usdcAsk` is the implied USDC premium per contract. `wethAsk` is the WETH premium used by vanilla ETH `INVERSE_CALL` RFQs.
 
 > The CLI enforces this grid. If a (strike, expiry) is not listed, `rfq build` and `rfq request` refuse it with exit 4 and point you back at `rfq quote`.
 
@@ -526,7 +531,7 @@ thetanuts rfq build --underlying ETH --type PUT --strike 2000 \
     "maxGain": "22.32 USDC",
     "note": "PUT: pays max(strike − spot, 0). If filled, premium is the maximum loss."
   },
-  "transaction": { "data": "0x...", "to": "0x..." }
+  "encodingNote": "No transaction encoded because requesterPublicKey is empty; `rfq request` will load/create the RFQ key before submission."
 }
 ```
 
@@ -664,14 +669,13 @@ thetanuts position info --address 0xE4bc5F4FdD7ad74d7E08ed2FCc38ee44d8535d64
 └─────────────────┴───────────────────────────────────────────────────┘
 ```
 
-After expiry, claim the payout the same way as the OptionBook flow:
+After expiry, inspect the automatic payout the same way as the OptionBook flow:
 
 ```bash
-thetanuts position payout --address 0xE4bc...5d64 --dry-run     # simulate first
-thetanuts position payout --address 0xE4bc...5d64               # claim
+thetanuts position payout --address 0xE4bc...5d64
 ```
 
-Pre-expiry, both commands exit non-zero with `option has not expired yet` and never broadcast. After expiry, the dry-run prints the resolved TWAP, `numContracts`, `strikes`, and `simulatedPayout`; the non-`--dry-run` form then prompts to confirm and broadcasts `claim()`, returning a tx receipt with `txHash`/`status`/`gasUsed`/`feeUsd`. Settled USDC is swept to the position holder's wallet. Live capture coming in v0.1.1.
+Pre-expiry, the command exits non-zero with `option has not expired yet`. On r12 settlement is automatic: the factory sends any buyer payout directly to the holder wallet, and no manual claim transaction exists. After expiry, `position payout` displays the resolved TWAP and simulated payout for verification.
 
 #### How the `pnl` column is computed
 
@@ -691,6 +695,8 @@ To unwind a position before expiry, open an **opposite-direction RFQ on the same
 thetanuts position close --address 0xE4bc...5d64 --dry-run     # preview
 thetanuts position close --address 0xE4bc...5d64               # broadcast
 ```
+
+Closes work for both USDC- and WETH-collateralized positions. `--reserve-price` is denominated in the position's own collateral — USDC for cash structures, WETH for inverse calls — and reserve sizing is exact bigint arithmetic, so 18-decimal amounts are not rounded through a float.
 
 By default, the CLI fetches the MM's current bid (for closing a long) or ask (for closing a short) and uses it as the reserve price. To override (useful when the MM has retreated and the auto-fetch fails):
 
@@ -736,7 +742,7 @@ thetanuts setup
 
 ```bash
 thetanuts chain info                # chainId, RPC, contracts
-thetanuts chain tokens              # configured tokens (USDC is the v0.1.0 trading collateral)
+thetanuts chain tokens              # configured tokens (USDC for cash structures, WETH for inverse calls)
 thetanuts chain contracts           # contract addresses
 ```
 
@@ -812,7 +818,7 @@ thetanuts pricing condor    --underlying ETH --strikes 1600,1700,1800,1900 --exp
 ### Book — OptionBook orderflow
 
 ```bash
-thetanuts book orders --underlying ETH                                   # all live orders
+thetanuts book orders --underlying ETH                                   # eligible cash USDC asks
 thetanuts book orders --underlying ETH --type PUT                        # filter by type
 
 # Preview / max contracts by structure identity (recommended)
@@ -822,14 +828,14 @@ thetanuts book max-contracts --underlying ETH --type PUT --strike 2100 --expiry 
 
 # Pre-trade liquidity check
 thetanuts book check --underlying ETH --type PUT --strike 2200 \
-                     --expiry 1778832000 --direction sell
+                     --expiry 1778832000 --direction buy
 
 # Fill (always dry-run first)
 thetanuts book fill --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1 --dry-run
 thetanuts book fill --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1
 
-# Legacy --order-index path still works but is volatile across calls:
-thetanuts book fill --order-index 0 --collateral 1
+# Legacy --order-index is read-only/dry-run because indices are volatile:
+thetanuts book fill --order-index 0 --collateral 1 --dry-run
 ```
 
 **Flags for `book fill`:**
@@ -838,7 +844,7 @@ thetanuts book fill --order-index 0 --collateral 1
 | ---- | ------- |
 | `--underlying <ETH\|BTC>` + `--type <PUT\|CALL>` + `--strike <usd>` + `--expiry <ts>` | Preferred: select by structure identity. Stable across calls. For multi-leg, pass `--strikes <csv>` instead of `--strike`. |
 | `--strict` | When the selector matches multiple orders, error instead of picking the cheapest. |
-| `--order-index <n>` | Legacy: position in the live order book (0-indexed). Resolved fresh at broadcast — may change between commands. |
+| `--order-index <n>` | Legacy read-only path. Allowed with `--dry-run`; live fills require stable selector flags. |
 | `--collateral <n>` | USDC amount to spend. CLI derives contracts from the order's price. Omit to fill the max available. |
 | `--approve-amount <val>` | If allowance is short. Default: exact. `max` approves MaxUint256 (WARNING printed). |
 | `--yes` | Skip both prompts (approval + fill) |
@@ -853,7 +859,7 @@ thetanuts position list --source rfq                     # only RFQ settlements
 thetanuts position info --address 0x...                  # decoded terms
 thetanuts position full --address 0x...                  # full on-chain math
 thetanuts position close --address 0x... --dry-run       # close early via flipped-direction RFQ
-thetanuts position payout --address 0x... --dry-run      # post-expiry: claim payout
+thetanuts position payout --address 0x...                # inspect automatic post-expiry payout
 thetanuts position calc-payout --type call --strikes 2000 --price 2150 --contracts 1
 ```
 
@@ -905,6 +911,11 @@ Full requester lifecycle in 9 subcommands: `quote` → `build` → `request` →
 **Multi-leg examples:**
 
 ```bash
+# Vanilla ETH CALL: explicit WETH is required and amounts are in WETH
+thetanuts rfq build --underlying ETH --type CALL --strike 1950 \
+  --expiry 1779177600 --collateral-amount 0.0001 --direction buy \
+  --collateral-token WETH
+
 # PUT spread (sell): pass 2 strikes
 thetanuts rfq build --underlying ETH --type PUT --strikes 2050,2000 \
   --expiry 1779177600 --collateral-amount 1 --direction sell
@@ -927,9 +938,11 @@ thetanuts rfq request --from-build-file /tmp/build.json
 **Sizing rules** — pass exactly one of:
 
 - `--contracts <n>` (direct count)
-- `--collateral-amount <n>` (USDC budget for BUY; collateral deposit for SELL)
+- `--collateral-amount <n>` (budget for BUY; collateral deposit for SELL, in the selected collateral token)
   - BUY without `--reserve-price` → CLI fetches the live MM ask and derives contracts.
   - SELL → CLI computes contracts offline from the structure's max-loss formula.
+
+Vanilla ETH calls require explicit `--collateral-token WETH` and route to `INVERSE_CALL`. The CLI intentionally rejects vanilla CALL + USDC because the active maker does not support `LINEAR_CALL`. PUTs and multi-leg structures continue to use USDC.
 
 **Structure rules:**
 
@@ -1003,10 +1016,12 @@ fi
 ## Safety
 
 - **Every write op shows a preview before prompting** — you see the expected outcome before signing.
-- **`--dry-run` always emits encoded calldata without broadcasting.** For `book fill` it emits both the `approve` and `fill` blocks.
-- **Order freshness check.** `book fill` re-fetches the order book between the confirm prompt and broadcast, re-resolving by `(maker, nonce)`. If the order was filled or repriced since preview, the CLI aborts cleanly.
+- **`--dry-run` always emits encoded calldata without broadcasting.** For `book fill` it emits both the `approve` and `fill` blocks. Table mode abbreviates long calldata to `0x<selector>…<tail> (N chars)`; use `-o json` for the full bytes. Addresses, tx hashes, and RFQ public keys are never abbreviated.
+- **Order freshness check.** `book fill` re-fetches the order book between confirmation and broadcast, re-resolving the exact EIP-712 signature. Odette reuses nonces across products, so `(maker, nonce)` is not treated as unique. If the signed order disappeared or liquidity changed, the CLI aborts cleanly.
 - **MM grid gating.** RFQ submissions are rejected if the (strike, expiry) isn't in the MM's live quote grid — run `rfq quote` first.
+- **RFQ deadline freshness.** The CLI refreshes `offerEndTimestamp` immediately before broadcast, after any approval and confirmation prompts, so makers receive the full requested quote window.
 - **Gas accounting.** Every successful write tx renders `gasUsed`, `gasPriceGwei`, `feeEth`, and `feeUsd` after the receipt.
+- **Fill identity.** A successful book fill also renders the created option address, ticker, buyer/seller, and an on-chain `position info` command; `position list` may lag briefly while the indexer catches up.
 - **`--yes` skips prompts.** Use it in CI / automation only.
 - **Approvals are never bundled silently with fills** — they require their own confirmation.
 - **`max` approvals require explicit opt-in.** `--approve-amount max` (or `wallet approve --amount max`) prints a stderr WARNING and cannot be combined with key-disclosure flags.
