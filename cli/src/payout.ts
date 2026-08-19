@@ -25,6 +25,7 @@ import type { ProductName } from '@thetanuts-finance/thetanuts-client';
 export type StructureType =
   | 'PUT'
   | 'CALL'
+  | 'LINEAR_CALL'
   | 'INVERSE_CALL'
   | 'PUT_SPREAD'
   | 'CALL_SPREAD'
@@ -173,6 +174,7 @@ function payoffPerContract(
     case 'PUT':
       return pos(strikes[0]! - spot);
     case 'CALL':
+    case 'LINEAR_CALL':
       // LINEAR_CALL (USDC-only): payoff capped at strike
       return Math.min(strikes[0]!, pos(spot - strikes[0]!));
     case 'INVERSE_CALL':
@@ -323,13 +325,24 @@ export function computeScenarios(args: {
   const maxIntrinsicPerContract = calculateCollateralRequired(1, product, strikes);
   const totalIntrinsic = maxIntrinsicPerContract * contracts;
 
+  // WETH-collateralized inverse calls pay out in ETH — `payoffPerContract`
+  // returns (S-K)/S in underlying terms, not dollars. Labelling those rows
+  // with a `$` overstates them by roughly the spot price.
+  const isUsdDenominated = collateralToken !== 'WETH';
+  const unit = (body: string): string =>
+    isUsdDenominated ? `$${body}` : `${body} WETH`;
   const fmtUsd = (n: number): string => {
     const sign = n >= 0 ? '+' : '-';
     const abs = Math.abs(n);
+    // 2dp is fine for dollars but destroys an ETH-denominated PnL.
+    if (!isUsdDenominated) return `${sign}${unit(abs.toFixed(8))}`;
     if (abs < 0.01 && abs > 0) return `${sign}$${abs.toFixed(6)}`;
     return `${sign}$${abs.toFixed(2)}`;
   };
   const fmtPlain = (n: number): string => {
+    // ETH amounts are routinely well below 0.01, so keep more precision than
+    // the USD path's 2dp would leave.
+    if (!isUsdDenominated) return unit(n.toFixed(8));
     if (n < 0.01 && n > 0) return `$${n.toFixed(6)}`;
     return `$${n.toFixed(2)}`;
   };

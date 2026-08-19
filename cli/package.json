@@ -1,6 +1,6 @@
 {
   "name": "@thetanuts-finance/cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Thetanuts Finance V4 command-line interface",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,8 @@
     "start": "node dist/index.js",
     "prepublishOnly": "node scripts/swap-sdk-dep.cjs && npm run build && chmod +x dist/index.js",
     "postpublish": "node scripts/restore-sdk-dep.cjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "keywords": [
     "thetanuts",
@@ -44,12 +45,15 @@
     "access": "public"
   },
   "dependencies": {
-    "@thetanuts-finance/thetanuts-client": "^0.2.3",
+    "@thetanuts-finance/thetanuts-client": "file:..",
     "cli-table3": "^0.6.5",
     "commander": "^12.1.0",
     "ethers": "^6.13.0",
     "picocolors": "^1.1.0",
     "prompts": "^2.4.2"
+  },
+  "overrides": {
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

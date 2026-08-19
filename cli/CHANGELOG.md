@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-19
+
+Correctness release for the OptionBook and RFQ paths. Several fixes change
+displayed numbers and command behavior, so read the Changed/Removed sections
+before upgrading automation.
+
+### Fixed
+
+- **OptionBook premiums were displayed 100x too high, and contract counts
+  100x too low.** `book preview` / `book fill` divided `pricePerContract` by
+  the collateral token's decimals (6) instead of the protocol's fixed 8-decimal
+  price scale, and divided contract quantities by 1e8 instead of the 6-decimal
+  contract scale. `book check` separately reported maker collateral as if it
+  were a contract count; it now uses the SDK's structure-aware
+  `calculateMaxContracts`.
+- **`book preview` overstated the premium when maker liquidity capped the
+  fill.** The SDK echoes the requested spend ceiling back as `totalCollateral`
+  when one is supplied; the CLI now recomputes the premium for the contracts
+  that will actually be filled. Approvals are sized to the ceiling of that
+  value so a fill cannot revert on a one-unit rounding difference.
+- **`book fill` could re-resolve the wrong order just before broadcast.**
+  Odette reuses nonces across batches, so `(maker, nonce)` is not a unique
+  identity; the pre-broadcast freshness check now matches the exact EIP-712
+  signature.
+- **RFQ vanilla calls were built with an invalid collateral/implementation
+  pairing.** The SDK selects a vanilla CALL implementation without considering
+  collateral, so a USDC vanilla call produced a USDC + `INVERSE_CALL` request
+  that no maker could fill. Vanilla ETH calls now require explicit
+  `--collateral-token WETH` and route to `INVERSE_CALL`; every other structure
+  stays USDC. Saved build artifacts with the old pairing are rejected rather
+  than silently migrated.
+- **RFQs could be mined already expired.** `offerEndTimestamp` is an absolute
+  stamp fixed at build time, and an ERC-20 approval plus two confirmation
+  prompts routinely consumed the whole 45-second window. Both `rfq request`
+  and `position close` now restamp the deadline immediately before broadcast.
+  `position close` additionally rejects, up front, a close whose option expires
+  within the offer window, so a doomed request cannot burn an approval first.
+- **`rfq build` threw when no RFQ key was present.** Encoding requires a
+  compressed public key; a keyless build now emits the request plus an
+  `encodingNote` instead, and `rfq request` stamps the key before broadcast.
+- **`rfq accept` could submit an offer above the RFQ's fixed buyer reserve.**
+  A buyer cannot top up an existing RFQ, so such an offer always fails on
+  chain; it is now rejected locally with exit 4.
+- **`position payout` demanded a signer for a read-only inspection** and
+  flattened every error to exit 1. It no longer requires a signer, and exit
+  codes propagate (pre-expiry is exit 4, expired-OTM is exit 0).
+- **Table output truncated addresses, tx hashes, and RFQ public keys.**
+  Addresses (42 chars), hashes (66), and compressed public keys (68) now
+  always render whole; only larger blobs collapse, and they keep a
+  `(N chars)` length suffix. Key/value tables wrap to the terminal instead of
+  overflowing it.
+
+### Added
+
+- **`position close` supports WETH-collateralized positions.** Reserve pricing
+  is now exact bigint arithmetic, so 18-decimal amounts — which exceed
+  `Number.MAX_SAFE_INTEGER` — no longer round-trip through a float. MM quotes
+  resolve in collateral terms, so an inverse call prices in ETH rather than USD.
+- `wallet balance` reports the native ETH balance alongside ERC-20 tokens, and
+  accepts `--token ETH`.
+- `book orders` shows `implementation` and `settlement` columns.
+- A successful `book fill` decodes the `OrderFilled` event and renders the
+  created option address, ticker, buyer/seller, premium paid, protocol fee, and
+  a ready-to-run `position info` command.
+- `book check --direction sell` routes to RFQ with a concrete next command
+  instead of recommending an unimplemented `book preview` path.
+- `position list` shows a `structure` column.
+- Regression tests for book eligibility and RFQ implementation routing, wired
+  to `npm test`.
+
+### Changed
+
+- **`book orders`, `book preview`, `book check`, and `book fill` now show only
+  executable orders**: cash-settled, USDC-collateralized maker asks. Physical
+  implementations, non-USDC collateral, maker bids, expired orders, and
+  zero-liquidity orders are excluded. `book orders` previously listed orders
+  the CLI could not fill.
+- **`--scenarios` labels WETH payouts in ETH.** Inverse-call payoffs are
+  denominated in the underlying; they were previously printed with a `$`
+  prefix, overstating them by roughly the spot price.
+- `position payout` is documented and described as an inspection command. On
+  r12 the factory settles automatically and pays the holder directly; there is
+  no user-callable `claim()`. Its dry-run `action` field changed from `payout`
+  to `inspect-automatic-payout`.
+- `--collateral-amount` is denominated in the selected collateral token rather
+  than always USDC.
+
+### Removed
+
+- **`book fill --order-index` no longer performs live fills.** Book indices
+  shift as orders fill and cancel, so the flag is accepted only with
+  `--dry-run`; live fills require the stable selector flags
+  (`--underlying`, `--type`, `--strike`/`--strikes`, `--expiry`) and exit 2
+  otherwise.
+- **Vanilla BTC CALL RFQs are rejected.** They previously produced a broken
+  USDC inverse-call request. BTC inverse calls need cbBTC collateral, which the
+  CLI does not expose yet.
+
 ## [0.1.1] — 2026-05-19
 
 Docs-only patch. No code changes; behavior identical to `0.1.0`.

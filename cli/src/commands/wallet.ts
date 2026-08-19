@@ -157,7 +157,9 @@ export function register(program: Command): void {
         const source = privateKeySource(opts);
         render(
           { address, source, configPath: path },
-          { output: opts.output, noColor: !opts.color }
+          // This is the primary copy/paste surface for a wallet address; keep
+          // it complete even though generic table rows compact long values.
+          { output: opts.output, noColor: !opts.color, truncate: false }
         );
       } catch (err) {
         renderError(err, { jsonErrors: Boolean(opts.jsonErrors), noColor: !opts.color });
@@ -168,7 +170,7 @@ export function register(program: Command): void {
   grp
     .command('balance')
     .description(
-      'Show balance for a token or all configured tokens. ' +
+      'Show native ETH, a token, or all configured token balances. ' +
         'By default, tokens whose balanceOf call fails (known SDK config quirks: aBasUSDC, cbDOGE, cbXRP) ' +
         'are silently skipped — pass --all to inspect them.'
     )
@@ -186,8 +188,23 @@ export function register(program: Command): void {
         const result = getClient(opts);
         const { client } = result;
         const owner = await resolveOwner(client, result, local.address);
+        const nativeSymbol = client.chainConfig.nativeCurrency;
 
         if (local.token) {
+          if (local.token.toUpperCase() === nativeSymbol.toUpperCase()) {
+            const balance = await client.provider.getBalance(owner);
+            render(
+              {
+                address: 'native',
+                symbol: nativeSymbol,
+                decimals: 18,
+                balance: client.utils.fromBigInt(balance, 18),
+                raw: balance.toString(),
+              },
+              { output: opts.output, noColor: !opts.color }
+            );
+            return;
+          }
           const tokenAddr = resolveToken(client, local.token);
           const balance = await client.erc20.getBalance(tokenAddr, owner);
           // SDK types getDecimals() as number but ethers v6 returns bigint at
@@ -216,6 +233,13 @@ export function register(program: Command): void {
         // checksum mismatches on cbDOGE/cbXRP)
         const rows: Array<Record<string, unknown>> = [];
         const skipped: string[] = [];
+        const nativeBalance = await client.provider.getBalance(owner);
+        rows.push({
+          symbol: nativeSymbol,
+          address: 'native',
+          balance: client.utils.fromBigInt(nativeBalance, 18),
+          raw: nativeBalance.toString(),
+        });
         for (const [symbol, t] of Object.entries(client.chainConfig.tokens)) {
           try {
             const balance = await client.erc20.getBalance(t.address, owner);

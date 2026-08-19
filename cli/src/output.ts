@@ -8,7 +8,9 @@ export interface RenderOptions {
   /** When true, ANSI color escapes are suppressed even if stdout is a TTY. */
   noColor?: boolean;
   /**
-   * When true (table mode only), collapse long string cells
+ * When true (table mode only), collapse long string cells. Table output
+ * defaults to compact; pass `truncate: false` only for deliberately verbose
+ * diagnostic views.
    */
   truncate?: boolean;
 }
@@ -54,18 +56,24 @@ function toCellString(v: unknown): string {
  * Encoded fill / approve / settle calldata routinely exceeds 4 KB on
  * multi-leg structures and renders as 50+ wrapped rows otherwise.
  */
-const TRUNCATE_HEX_THRESHOLD = 64; // 4-byte selector + a couple words
-const TRUNCATE_STRING_THRESHOLD = 80;
+// Addresses (42), tx hashes / bytes32 (66), and compressed RFQ public keys
+// (68) are the copy/paste primitives of a chain CLI — `chain contracts`,
+// `keys show`, `position list` -> `position info --address`, and every
+// receipt -> block-explorer flow depends on them rendering whole. Only
+// genuinely large blobs collapse (EIP-712 signatures are 132, encoded
+// calldata far more), and they keep the length suffix so a dry-run's size
+// stays checkable. Raise this if a longer primitive is ever displayed.
+const TRUNCATE_HEX_THRESHOLD = 68;
+// Long enough to preserve a full copy/paste next-step command. The longest
+// the CLI emits is `book check`'s "Preview fill: thetanuts book preview …
+// --collateral <amount>" at ~122 chars; keep headroom above that.
+const TRUNCATE_STRING_THRESHOLD = 140;
 
 function truncateForCell(s: string): string {
-  if (s.length <= TRUNCATE_STRING_THRESHOLD) return s;
-  // Hex calldata: show selector (0x + 8 chars) + ellipsis + tail (8 chars) +
-  // length suffix so the user can sanity-check the size.
   if (/^0x[0-9a-fA-F]+$/.test(s) && s.length > TRUNCATE_HEX_THRESHOLD) {
-    const head = s.slice(0, 10); // 0x + 4-byte selector
-    const tail = s.slice(-8);
-    return `${head}…${tail} (${s.length} chars)`;
+    return `${s.slice(0, 10)}…${s.slice(-6)} (${s.length} chars)`;
   }
+  if (s.length <= TRUNCATE_STRING_THRESHOLD) return s;
   return `${s.slice(0, TRUNCATE_STRING_THRESHOLD - 1)}…`;
 }
 
@@ -96,7 +104,36 @@ function toCellStringTruncated(v: unknown): string {
   return String(v);
 }
 
-function renderArrayTable(rows: unknown[], truncate = false): string {
+const EXPENDABLE_TABLE_COLUMNS = new Set([
+  'signingKey',
+  'offerSignature',
+  'transactionHash',
+  'signature',
+  'calldata',
+  'data',
+  'rawApiData',
+]);
+
+function estimatedTableWidth(headers: string[], rows: Array<Record<string, unknown>>, cell: (v: unknown) => string): number {
+  // cli-table3 needs one character of padding on each side plus a border per
+  // column. This is an intentionally conservative estimate.
+  return headers.reduce((total, header) => {
+    const widest = Math.max(header.length, ...rows.map((row) => cell(row[header]).length));
+    return total + widest + 3;
+  }, 1);
+}
+
+function renderArrayCards(headers: string[], rows: Array<Record<string, unknown>>, cell: (v: unknown) => string): string {
+  return rows
+    .map((row, index) => {
+      const table = new Table({ head: ['field', 'value'] });
+      for (const header of headers) table.push([header, cell(row[header])]);
+      return `${rows.length > 1 ? `#${index + 1}\n` : ''}${table.toString()}`;
+    })
+    .join('\n\n');
+}
+
+function renderArrayTable(rows: unknown[], truncate = true): string {
   if (rows.length === 0) return '(empty)';
   // Use first row's keys as the column ordering. Implementer commands that
   // need stable columns should normalize their output before calling render.
@@ -105,7 +142,27 @@ function renderArrayTable(rows: unknown[], truncate = false): string {
   if (!isPlainObject(first)) {
     return rows.map((r) => cell(r)).join('\n');
   }
-  const headers = Object.keys(first);
+  const objectRows = rows.filter(isPlainObject);
+  let headers = Object.keys(first);
+  const terminalWidth = process.stdout.columns ?? 120;
+  const hidden: string[] = [];
+
+  // Metadata such as a 65-byte signature is useful in JSON but destroys a
+  // human table. Drop it only when needed to fit the current terminal.
+  while (estimatedTableWidth(headers, objectRows, cell) > terminalWidth) {
+    const index = headers.findIndex((header) => EXPENDABLE_TABLE_COLUMNS.has(header));
+    if (index === -1) break;
+    hidden.push(headers[index]!);
+    headers = headers.filter((_, i) => i !== index);
+  }
+
+  if (estimatedTableWidth(headers, objectRows, cell) > terminalWidth && objectRows.length <= 5) {
+    const cards = renderArrayCards(headers, objectRows, cell);
+    return hidden.length > 0
+      ? `${cards}\n(table view omitted: ${hidden.join(', ')}; use --output json for full values)`
+      : cards;
+  }
+
   const table = new Table({ head: headers });
   for (const row of rows) {
     if (isPlainObject(row)) {
@@ -114,13 +171,34 @@ function renderArrayTable(rows: unknown[], truncate = false): string {
       table.push([cell(row)]);
     }
   }
-  return table.toString();
+  const note = hidden.length > 0
+    ? `\n(table view omitted: ${hidden.join(', ')}; use --output json for full values)`
+    : '';
+  return table.toString() + note;
 }
 
-function renderObjectTable(obj: Record<string, unknown>, truncate = false): string {
-  const table = new Table({ head: ['key', 'value'] });
+function renderObjectTable(obj: Record<string, unknown>, truncate = true): string {
   const cell = truncate ? toCellStringTruncated : toCellString;
-  for (const [k, v] of Object.entries(obj)) {
+  const entries = Object.entries(obj);
+
+  // A key/value table has no column competition, so wrap the value column to
+  // the terminal instead of letting a single long cell push the table far past
+  // the viewport. Wrapping keeps the value intact and selectable; truncating
+  // would break copy/paste of addresses and next-step commands.
+  const terminalWidth = process.stdout.columns ?? 120;
+  const keyWidth = Math.min(
+    32,
+    entries.reduce((widest, [k]) => Math.max(widest, k.length), 3) + 2
+  );
+  const valueWidth = Math.max(24, terminalWidth - keyWidth - 4);
+
+  const table = new Table({
+    head: ['key', 'value'],
+    colWidths: [keyWidth, valueWidth],
+    wordWrap: true,
+    wrapOnWordBoundary: false,
+  });
+  for (const [k, v] of entries) {
     table.push([k, cell(v)]);
   }
   return table.toString();
@@ -214,7 +292,7 @@ export function render(data: unknown, opts: RenderOptions = {}): void {
     process.stdout.write('\n');
     return;
   }
-  const truncate = Boolean(opts.truncate);
+  const truncate = opts.truncate ?? true;
   if (Array.isArray(data)) {
     process.stdout.write(renderArrayTable(data, truncate) + '\n');
     return;

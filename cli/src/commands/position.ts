@@ -13,6 +13,7 @@ import { getClient, requireSigner } from '../client.js';
 import { render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
 import { extractQuotationIdFromReceipt } from './rfq.js';
+import { refreshRfqOfferDeadline } from '../rfqImplementation.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -556,6 +557,22 @@ function deriveIsCall(pos: Position): boolean {
   // structures encode call/put in bit 0 as well in r12.
   const ot = Number(pos.option?.optionType ?? 0);
   return (ot & 1) === 0;
+}
+
+/** Human-readable position structure for list output. */
+function positionStructureLabel(pos: Position): string {
+  const implementationName = pos.implementationName?.trim();
+  if (implementationName) return implementationName;
+
+  const strikeCount = pos.option.strikes.length;
+  const side = deriveIsCall(pos) ? 'CALL' : 'PUT';
+  switch (strikeCount) {
+    case 1: return side;
+    case 2: return `${side}_SPREAD`;
+    case 3: return `${side}_FLY`;
+    case 4: return '4_LEG'; // Cannot distinguish condor vs iron condor without implementation metadata.
+    default: return `${strikeCount}_LEG`;
+  }
 }
 
 /** Pricing return shape used by the buyer/seller PnL calculators. */
@@ -1125,6 +1142,7 @@ function registerReads(grp: Command): void {
               optionAddress: p.optionAddress,
               source: p.sources.join('+'),
               side: p.side,
+              structure: positionStructureLabel(p),
               createdAt: createdTs,
               expiry: fmtExpiryDate(p.option.expiry),
               contracts: client.utils.fromBigInt(p.amount, dec),
@@ -1491,15 +1509,13 @@ function registerReads(grp: Command): void {
 function registerWrites(grp: Command): void {
   grp
     .command('payout')
-    .description('Claim post-expiry payout for an option')
+    .description('Inspect the automatic post-expiry payout for an option')
     .requiredOption('--address <addr>', 'option contract address')
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts<{ address: string }>();
       try {
-        const res = getClient(opts);
-        requireSigner(res);
-        const { client } = res;
+        const { client } = getClient(opts);
 
         // Pre-check expiry before reading TWAP — pre-expiry the contract reverts
         // with "TWAP calculation failed", which surfaces as a wall of ethers
@@ -1511,13 +1527,15 @@ function registerWrites(grp: Command): void {
           const expiryIso = new Date(Number(expiry) * 1000).toISOString();
           const err = new Error(
             `Option ${local.address} has not expired yet. Payout is settled from the post-expiry TWAP, ` +
-              `which becomes available after ${expiry} (${expiryIso}). Re-run after expiry to claim.`
+              `which becomes available after ${expiry} (${expiryIso}). Settlement is automatic; ` +
+              're-run after expiry to inspect it.'
           );
           (err as Error & { exitCode?: number }).exitCode = 4;
           throw err;
         }
 
-        // Preview the simulated payout at TWAP so the user sees what they'll claim.
+        // Preview the simulated payout at TWAP so the user can verify what the
+        // automatic factory settlement should deliver.
         // `getStrikes()` and `getNumContracts()` return ethers v6 Result proxies —
         // these are frozen array-likes that throw "Cannot assign to read only
         // property '0'" when ethers tries to re-encode them as ABI input on
@@ -1547,13 +1565,12 @@ function registerWrites(grp: Command): void {
           renderOpts(opts)
         );
 
-        // Guard zero-payout: the option contract reverts (without a reason)
-        // when payout() is called on an expired-OTM position because there's
-        // nothing to transfer
+        // Guard zero-payout: an expired-OTM position has nothing for the
+        // automatic settlement callback to transfer to the buyer.
         if (simulated === 0n) {
           const err = new Error(
             `Option ${local.address} expired with zero payout. ` +
-              `The strike was not breached at settlement so there's nothing to claim. ` +
+              `The strike was not breached at settlement so there is no buyer payout. ` +
               `Premium paid at entry is the realized loss; no on-chain transaction is needed.`
           );
           (err as Error & { exitCode?: number }).exitCode = 0;
@@ -1563,7 +1580,14 @@ function registerWrites(grp: Command): void {
         }
 
         if (opts.dryRun) {
-          render({ dryRun: true, action: 'payout', optionAddress: local.address }, renderOpts(opts));
+          render(
+            {
+              dryRun: true,
+              action: 'inspect-automatic-payout',
+              optionAddress: local.address,
+            },
+            renderOpts(opts)
+          );
           process.exit(0);
         }
 
@@ -1575,13 +1599,14 @@ function registerWrites(grp: Command): void {
           'position payout: settlement is automatic on r12 — no on-chain payout() call is needed.\n' +
             '  Buyer payout (if any) is delivered to your address by the factory once ' +
             'the option settles. To verify status, run:\n' +
-            `    thetanuts-cli position info ${local.address}\n` +
+            `    thetanuts position info --address ${local.address}\n` +
             '  (see TNU-AUDIT-0046 in SECURITY_AUDIT_BETA.md)\n'
         );
         process.exit(0);
       } catch (err) {
         renderError(err, renderOpts(opts));
-        process.exit(1);
+        const exit = (err as Error & { exitCode?: number }).exitCode ?? 1;
+        process.exit(exit);
       }
     });
 
@@ -1597,7 +1622,7 @@ function registerWrites(grp: Command): void {
     .requiredOption('--address <addr>', 'option contract address to close (copy from `position list`)')
     .option(
       '--reserve-price <n>',
-      'override the MM-derived closing price per contract (in USDC per contract). Required when the MM has no live quote.'
+      'override the MM-derived closing price per contract, denominated in the position\'s own collateral (USDC for cash structures, WETH for inverse calls). Required when the MM has no live quote.'
     )
     .option('--deadline-minutes <n>', 'offer-window length in minutes (default 1 = 60 s)', '1')
     .option('--fill-or-kill', 'reject partial fills — only accept a full-size match')
@@ -1669,16 +1694,12 @@ function registerWrites(grp: Command): void {
 
         const collateralMeta = getCollateralMeta(client, pos.option.collateral);
 
-        // v0.1.0 enforces USDC-only on the CLI surface for both build and close
-        if (collateralMeta.symbol !== 'USDC') {
-          const err = new Error(
-            `v0.1.0 supports closing USDC-collateralized RFQ positions only. ` +
-              `Position ${local.address} is collateralized in ${collateralMeta.symbol}. ` +
-              `Non-USDC close will be enabled in v0.1.1 once Decimal.js arithmetic is wired in.`
-          );
-          (err as Error & { exitCode?: number }).exitCode = 4;
-          throw err;
-        }
+        // Both USDC (6-dec) and WETH (18-dec) closes are supported. The reserve
+        // math below is exact bigint arithmetic, so 18-decimal raw amounts —
+        // which exceed Number.MAX_SAFE_INTEGER — never round-trip through a
+        // float. MM quotes come back in collateral terms via
+        // `byCollateral[collateralMeta.asset]`, so an INVERSE_CALL is priced in
+        // ETH, not USD.
 
         // Derive closingPricePerContract: MM-driven by default, override via --reserve-price.
         let closingPricePerContract: number;
@@ -1694,7 +1715,7 @@ function registerWrites(grp: Command): void {
           if (!pricing) {
             const err = new Error(
               `MM has no live quote for ${pos.optionAddress} right now (typical 1–3 h pre-expiry). ` +
-                `Pass --reserve-price <USDC-per-contract> explicitly. ` +
+                `Pass --reserve-price <${collateralMeta.symbol}-per-contract> explicitly. ` +
                 `Tip: closing buyer side wants the MM bid (floor), seller side wants the ask (ceiling).`
             );
             (err as Error & { exitCode?: number }).exitCode = 4;
@@ -1708,7 +1729,7 @@ function registerWrites(grp: Command): void {
             const err = new Error(
               `MM closing quote was non-positive (${closingPricePerContract}). ` +
                 `The option may be too deep ITM/OTM or near expiry. ` +
-                `Pass --reserve-price <USDC-per-contract> to force a closing RFQ at your own price.`
+                `Pass --reserve-price <${collateralMeta.symbol}-per-contract> to force a closing RFQ at your own price.`
             );
             (err as Error & { exitCode?: number }).exitCode = 4;
             throw err;
@@ -1722,10 +1743,21 @@ function registerWrites(grp: Command): void {
         if (numContractsRaw <= 0n) {
           throw new Error(`Position ${local.address} has numContracts=0 — nothing to close.`);
         }
-        const rawReserveFloat = Number(numContractsRaw) * closingPricePerContract;
+        // Scale the human price to 18 decimals and multiply in bigint space.
+        // `Number(numContractsRaw) * price` loses low digits once the raw
+        // amount passes 2^53, which every 18-decimal WETH position does.
+        const RESERVE_PRICE_PRECISION = 18;
+        const reserveDenom = 10n ** BigInt(RESERVE_PRICE_PRECISION);
+        const priceScaled = client.utils.toBigInt(
+          closingPricePerContract,
+          RESERVE_PRICE_PRECISION
+        );
+        const reserveProduct = numContractsRaw * priceScaled;
         const reservePriceBn =
           closingPricePerContract > 0
-            ? BigInt(isClosingLong ? Math.ceil(rawReserveFloat) : Math.floor(rawReserveFloat))
+            ? isClosingLong
+              ? (reserveProduct + reserveDenom - 1n) / reserveDenom // ceil on BUY
+              : reserveProduct / reserveDenom // floor on SELL
             : 0n;
 
         // Build the request (matches dApp shape exactly).
@@ -1734,7 +1766,30 @@ function registerWrites(grp: Command): void {
         if (!Number.isFinite(deadlineMinutes) || deadlineMinutes <= 0) {
           throw new Error(`--deadline-minutes must be > 0 (got "${local.deadlineMinutes}")`);
         }
+        // Guard here, not at the broadcast restamp: a sub-second window rounds
+        // to 0 and would otherwise throw only after an approval tx was mined.
+        if (Math.round(deadlineMinutes * 60) < 1) {
+          const err = new Error(
+            `--deadline-minutes must be at least one whole second (got "${local.deadlineMinutes}")`
+          );
+          (err as Error & { exitCode?: number }).exitCode = 4;
+          throw err;
+        }
         const offerEndSec = Math.floor(Date.now() / 1000) + Math.round(deadlineMinutes * 60);
+        // Catch the common doomed-close case before the approval tx below.
+        // This narrows but does NOT close the window: the restamp at broadcast
+        // uses a later `submittedAt`, so an option expiring within
+        // (window + approval/confirm time) still fails there — with exit 4 and
+        // a clear message, but after an approval has been mined. `rfq request`
+        // carries the same residual gap by construction.
+        if (BigInt(pos.option.expiry) <= BigInt(offerEndSec)) {
+          const err = new Error(
+            `Option ${pos.optionAddress} expires at ${pos.option.expiry}, which is at or before the ` +
+              `${Math.round(deadlineMinutes * 60)}s offer deadline. Lower --deadline-minutes or let it settle.`
+          );
+          (err as Error & { exitCode?: number }).exitCode = 4;
+          throw err;
+        }
         const request: RFQRequest = {
           params: {
             requester: signerAddress,
@@ -1757,8 +1812,8 @@ function registerWrites(grp: Command): void {
           requesterPublicKey: keyPair.compressedPublicKey,
         };
 
-        const contractsHuman = Number(numContractsRaw) / 10 ** collateralMeta.decimals;
-        const reserveHuman = Number(reservePriceBn) / 10 ** collateralMeta.decimals;
+        const contractsHuman = client.utils.fromBigInt(numContractsRaw, collateralMeta.decimals);
+        const reserveHuman = client.utils.fromBigInt(reservePriceBn, collateralMeta.decimals);
         const closeDirection = isClosingLong ? 'buy' : 'sell';
 
         // Compute a display ticker if we can; falls back to the option address.
@@ -1810,7 +1865,7 @@ function registerWrites(grp: Command): void {
           closingPricePerContract,
           priceSource,
           reservePrice: reservePriceBn.toString(),
-          reservePriceHuman: `${reserveHuman.toFixed(6)} ${collateralMeta.asset}`,
+          reservePriceHuman: `${reserveHuman} ${collateralMeta.symbol}`,
           deadlineSeconds: Math.round(deadlineMinutes * 60),
           fillOrKill: Boolean(local.fillOrKill),
         };
@@ -1848,7 +1903,7 @@ function registerWrites(grp: Command): void {
             local.approveAmount === 'max'
               ? MaxUint256
               : local.approveAmount !== undefined
-                ? BigInt(Math.round(Number.parseFloat(local.approveAmount) * 10 ** collateralMeta.decimals))
+                ? client.utils.toBigInt(local.approveAmount, collateralMeta.decimals)
                 : reservePriceBn;
           if (local.approveAmount === 'max') {
             process.stderr.write(
@@ -1873,13 +1928,22 @@ function registerWrites(grp: Command): void {
         }
 
         const ok = await confirm(
-          `Submit closing RFQ (${closeDirection.toUpperCase()} ${contractsHuman} contracts of ${displayTicker}, reserve ${reserveHuman.toFixed(6)} ${collateralMeta.asset}, ${Math.round(deadlineMinutes * 60)}s deadline)?`,
+          `Submit closing RFQ (${closeDirection.toUpperCase()} ${contractsHuman} contracts of ${displayTicker}, reserve ${reserveHuman} ${collateralMeta.symbol}, ${Math.round(deadlineMinutes * 60)}s deadline)?`,
           { yes: opts.yes, dryRun: opts.dryRun }
         );
         if (!ok) process.exit(3);
 
+        // The ERC-20 approval above and the confirm prompt can consume most or
+        // all of the offer window (default 60s), which would mine an RFQ that is
+        // already expired. Restamp the deadline at the final broadcast boundary
+        // so makers receive the full requested window — same fix as `rfq request`.
         const submittedAt = Math.floor(Date.now() / 1000);
-        const receipt = await client.optionFactory.requestForQuotation(request);
+        const requestToSubmit = refreshRfqOfferDeadline(
+          request,
+          submittedAt,
+          Math.round(deadlineMinutes * 60)
+        );
+        const receipt = await client.optionFactory.requestForQuotation(requestToSubmit);
         const quotationId = extractQuotationIdFromReceipt(
           receipt.logs,
           client.optionFactory.contractAddress
@@ -1910,7 +1974,8 @@ function registerWrites(grp: Command): void {
         }
       } catch (err) {
         renderError(err, renderOpts(opts));
-        process.exit(1);
+        const exit = (err as Error & { exitCode?: number }).exitCode ?? 1;
+        process.exit(exit);
       }
     });
 }
