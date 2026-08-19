@@ -1,6 +1,9 @@
 import type { Command } from 'commander';
-import { MaxUint256 } from 'ethers';
-import type { OrderWithSignature } from '@thetanuts-finance/thetanuts-client';
+import { Interface, MaxUint256 } from 'ethers';
+import {
+  OPTION_BOOK_ABI,
+  type OrderWithSignature,
+} from '@thetanuts-finance/thetanuts-client';
 import { getGlobalOpts } from '../options.js';
 import { getClient, requireSigner, type GetClientResult } from '../client.js';
 import { render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
@@ -19,6 +22,15 @@ import {
   tokenSymbolByAddress,
   underlyingSymbolByPriceFeed,
 } from '../format.js';
+import {
+  ORDER_PRICE_DECIMALS,
+  bookOrderIneligibility,
+  cashSettledImplementationSet,
+  isEligibleBookOrder,
+  type BookEligibilityPolicy,
+} from '../bookEligibility.js';
+import { bookPremiumCeiling, withActualBookPremium } from '../bookPreview.js';
+import { findSignedOrder } from '../bookOrderIdentity.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — kept module-local; do not export
@@ -38,6 +50,55 @@ function renderOpts(opts: Globals): RenderOpts {
     noColor: !opts.color,
     jsonErrors: Boolean(opts.jsonErrors),
   };
+}
+
+function eligibilityPolicy(
+  client: GetClientResult['client'],
+  direction: 'buy' | 'sell' = 'buy'
+): BookEligibilityPolicy {
+  const usdc = client.chainConfig.tokens.USDC;
+  if (!usdc) throw new Error('USDC is missing from the active chain configuration.');
+  return {
+    usdcAddress: usdc.address,
+    cashSettledImplementations: cashSettledImplementationSet(
+      client.chainConfig.implementations
+    ),
+    now: Math.floor(Date.now() / 1000),
+    direction,
+  };
+}
+
+function eligibleOrders(
+  orders: OrderWithSignature[],
+  client: GetClientResult['client'],
+  direction: 'buy' | 'sell' = 'buy'
+): OrderWithSignature[] {
+  const policy = eligibilityPolicy(client, direction);
+  return orders.filter((order) => isEligibleBookOrder(order, policy));
+}
+
+function assertEligibleOrder(
+  order: OrderWithSignature,
+  client: GetClientResult['client'],
+  direction: 'buy' | 'sell' = 'buy'
+): void {
+  const reason = bookOrderIneligibility(order, eligibilityPolicy(client, direction));
+  if (reason) {
+    throw new Error(
+      `Order is not eligible for a cash-settled USDC ${direction}: ${reason}. ` +
+        'Run `thetanuts book orders` and select one of the displayed orders.'
+    );
+  }
+}
+
+function previewBookFill(
+  client: GetClientResult['client'],
+  order: OrderWithSignature,
+  collateralAmount?: bigint
+) {
+  return withActualBookPremium(
+    client.optionBook.previewFillOrder(order, collateralAmount)
+  );
 }
 
 /**
@@ -67,21 +128,54 @@ async function fetchOrdersFresh(
   return fresh;
 }
 
-/**
- * Canonical EIP-712 identity for a signed order: (maker, nonce) is unique by
- * construction — the maker signs each order with a monotonically distinct
- * nonce, and the OptionBook contract uses it for replay protection. Indices
- * are NOT stable (they shift as orders fill/cancel) so this is what we match
- * on when re-resolving an order against a fresh book.
- */
-function findOrderByIdentity(
-  orders: OrderWithSignature[],
-  ref: OrderWithSignature
-): OrderWithSignature | undefined {
-  const refMaker = ref.order.maker.toLowerCase();
-  const refNonce = ref.order.nonce;
-  return orders.find(
-    (o) => o.order.maker.toLowerCase() === refMaker && o.order.nonce === refNonce
+interface ReceiptLogLike {
+  address: string;
+  topics: readonly string[];
+  data: string;
+}
+
+/** Extract the option created by OptionBook.fillOrder from the mined receipt. */
+function extractOrderFilledEvent(
+  receipt: { logs: readonly ReceiptLogLike[] },
+  optionBookAddress: string
+): Record<string, unknown> | null {
+  const iface = new Interface(OPTION_BOOK_ABI);
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== optionBookAddress.toLowerCase()) continue;
+    try {
+      const parsed = iface.parseLog({ topics: [...log.topics], data: log.data });
+      if (!parsed || parsed.name !== 'OrderFilled') continue;
+      return {
+        optionAddress: String(parsed.args['optionAddress']),
+        buyer: String(parsed.args['buyer']),
+        seller: String(parsed.args['seller']),
+        premiumAmountRaw: BigInt(parsed.args['premiumAmount']).toString(),
+        feeCollectedRaw: BigInt(parsed.args['feeCollected']).toString(),
+        sellerWasMaker: Boolean(parsed.args['sellerWasMaker']),
+      };
+    } catch {
+      // Ignore unrelated/malformed logs; receipt success must still render.
+    }
+  }
+  return null;
+}
+
+function tickerForOrder(
+  order: OrderWithSignature,
+  client: GetClientResult['client']
+): string | undefined {
+  const raw = order.rawApiData;
+  if (!raw || raw.strikes.length === 0) return undefined;
+  const underlying = underlyingSymbolByPriceFeed(
+    raw.priceFeed,
+    client.chainConfig.priceFeeds
+  );
+  if (!underlying) return undefined;
+  return formatTicker(
+    underlying,
+    Number(order.order.expiry),
+    raw.strikes.map((strike) => Number(strike) / 1e8),
+    raw.isCall ? 'CALL' : 'PUT'
   );
 }
 
@@ -155,26 +249,6 @@ function collateralDecimalsFromOrder(
 }
 
 /**
- * Currently only USDC-collateralized fills are supported
- * TODO: WETH and cbBTC fill support will roll out in a future release
- * 
- */
-function assertUsdcCollateral(
-  order: OrderWithSignature,
-  client: GetClientResult['client']
-): void {
-  const orderCollateral = order.rawApiData?.collateral?.toLowerCase();
-  const usdc = client.chainConfig.tokens.USDC!;
-  if (orderCollateral !== usdc.address.toLowerCase()) {
-    throw new Error(
-      `Only USDC-collateralized fills are supported in this version ` +
-        `This order uses ${order.rawApiData?.collateral ?? '<unknown>'} as collateral. ` +
-        `WETH and cbBTC fill support will roll out in a future release.`
-    );
-  }
-}
-
-/**
  * Map (strikeCount, isCall) to a CLI structure label.
  *
  * Mirrors `getStructureType` in commands/rfq.ts but for the book side — books
@@ -207,9 +281,8 @@ function deriveStructureType(strikeCount: number, isCall: boolean): StructureTyp
 
 /**
  * Map collateral token address → CollateralToken symbol the payout helper
- * understands. Anything that isn't WETH falls back to 'USDC' (the only other
- * collateral OptionBook fills currently support is USDC; book fills enforce
- * USDC-only via `assertUsdcCollateral` anyway).
+ * understands. Anything that isn't WETH falls back to 'USDC'; eligible book
+ * orders are cash-settled and USDC-only before this helper is reached.
  */
 function collateralTokenSymbol(
   collateralAddress: string,
@@ -250,14 +323,18 @@ function buildPayoutArgsFromPreview(
 } | null {
   if (preview.strikes.length === 0 || preview.numContracts === 0n) return null;
   const collTokenSym = collateralTokenSymbol(preview.collateralToken, client);
-  const collDec = collateralDecimalsFromOrder(order, client);
+  const contractDecimals = collateralDecimalsFromOrder(order, client);
 
   // Strikes from the OptionBook ABI are 8-decimal scaled bigints.
   const strikesHuman = preview.strikes.map((s) => Number(s) / 1e8);
-  // numContracts: 8-decimal scaled bigint per OdetteRawOrderData / SDK.
-  const contractsHuman = Number(preview.numContracts) / 1e8;
-  // pricePerContract is in collateral-token decimals (USDC = 6).
-  const reservePriceHuman = Number(preview.pricePerContract) / 10 ** collDec;
+  // OptionBook contract quantities use collateral decimals (6 for the CLI's
+  // supported USDC orders), not PRICE_DECIMALS.
+  const contractsHuman =
+    Number(preview.numContracts) / 10 ** contractDecimals;
+  // OptionBook prices always use PRICE_DECIMALS (8), independently of the
+  // collateral token's ERC-20 decimals.
+  const reservePriceHuman =
+    Number(preview.pricePerContract) / 10 ** ORDER_PRICE_DECIMALS;
 
   return {
     structureType: deriveStructureType(preview.strikes.length, preview.isCall),
@@ -284,6 +361,8 @@ function summarizeOrder(
     expiry: order.order.expiry.toString(),
     availableAmount: order.availableAmount.toString(),
     collateral: order.rawApiData?.collateral,
+    implementation: order.rawApiData?.implementation,
+    settlement: 'cash',
     orderExpiryTimestamp: order.rawApiData?.orderExpiryTimestamp,
   };
 }
@@ -314,12 +393,16 @@ function summarizeOrderHuman(
   // the order's collateral token so the table matches what `book check` and
   // `humanizePreview` show pre-broadcast.
   const collDec = collateralDecimalsFromOrder(order, client);
-  const priceScale = 10 ** 8;
+  const priceScale = 10 ** ORDER_PRICE_DECIMALS;
   const collScale = 10 ** collDec;
   const premiumHuman = Number(order.order.price) / priceScale;
   const availableHuman = Number(order.availableAmount) / collScale;
   const collSym =
     tokenSymbolByAddress(order.rawApiData?.collateral, client.chainConfig.tokens) ?? 'UNKNOWN';
+  const implAddress = order.rawApiData?.implementation?.toLowerCase();
+  const implementation = implAddress
+    ? client.chainConfig.optionImplementations[implAddress]?.name ?? implAddress
+    : 'UNKNOWN';
 
   return {
     ...(index !== undefined ? { index } : {}),
@@ -330,6 +413,8 @@ function summarizeOrderHuman(
     expiry: formatExpiry(expiry),
     available: formatUsd(availableHuman),
     collateralSymbol: collSym,
+    implementation,
+    settlement: 'cash',
   };
 }
 
@@ -363,11 +448,12 @@ function humanizePreview(
   const collDec = collateralDecimalsFromOrder(order, client);
   const collSym =
     tokenSymbolByAddress(preview.collateralToken, client.chainConfig.tokens) ?? 'UNKNOWN';
-  // numContracts / maxContracts are 8-dec scaled per the existing payout
-  // helper convention in this file (see buildPayoutArgsFromPreview).
-  const numContractsHuman = Number(preview.numContracts) / 1e8;
-  const maxContractsHuman = Number(preview.maxContracts) / 1e8;
-  const pricePerContractHuman = Number(preview.pricePerContract) / 10 ** collDec;
+  // Contract quantities use collateral decimals (USDC = 6); only strikes and
+  // prices use the protocol's fixed 8-decimal scale.
+  const numContractsHuman = Number(preview.numContracts) / 10 ** collDec;
+  const maxContractsHuman = Number(preview.maxContracts) / 10 ** collDec;
+  const pricePerContractHuman =
+    Number(preview.pricePerContract) / 10 ** ORDER_PRICE_DECIMALS;
   const totalCollateralHuman = Number(preview.totalCollateral) / 10 ** collDec;
 
   return {
@@ -672,13 +758,36 @@ function registerCheck(grp: Command): void {
 
       try {
         const { client } = getClient(opts);
-        const now = Math.floor(Date.now() / 1000);
 
-        // Fetch all orders
-        const orders = await client.api.fetchOrders();
+        // The CLI's OptionBook preview/fill path is intentionally buy-only.
+        // A sell would require taker collateral/allowance and payout semantics
+        // that this command does not implement safely; route it to RFQ instead
+        // of advertising an unusable `book preview` next step.
+        if (params.direction === 'sell') {
+          const result: CheckResult = {
+            recommendation: 'rfq',
+            reason:
+              'CLI orderbook execution currently supports buys only. Use RFQ to sell so collateral and settlement terms are validated correctly.',
+            params,
+            orderbookOrders: [],
+            bestPrice: null,
+            availableSize: null,
+            partialFillAvailable: false,
+            partialSize: null,
+            nearbyStrikes: [],
+            nextStep: `thetanuts rfq build --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --contracts <n> --direction sell`,
+          };
+          render(result, renderOpts(opts));
+          return;
+        }
 
-        // Extract order data helper
-        // numeric scaling (1e8 for strike/price/availableAmount) matches
+        // Canonical executable book: current cash-settled USDC maker asks.
+        const orders = eligibleOrders(await client.api.fetchOrders(), client, 'buy');
+        const wantPriceFeed = client.chainConfig.priceFeeds[params.underlying]?.toLowerCase();
+        const contractScale = 10 ** (client.chainConfig.tokens.USDC?.decimals ?? 6);
+
+        // Extract order data helper. Strikes/prices use 1e8; contract amounts
+        // use the USDC scale via calculateMaxContracts above.
         const extractOrderData = (o: OrderWithSignature, index: number): MatchingOrder | null => {
           const raw = o.rawApiData as Record<string, unknown> | undefined;
           const isCall = (raw?.isCall as boolean | undefined) ?? true;
@@ -687,15 +796,14 @@ function registerCheck(grp: Command): void {
           const firstStrike = rawStrikes[0];
           const strike = firstStrike ? Number(firstStrike) / 1e8 : 0;
           const expiry = o.order?.expiry ? Number(o.order.expiry) : 0;
-          const price = o.order?.price ? Number(o.order.price) / 1e8 : 0;
-          const availableAmount = o.availableAmount ? Number(o.availableAmount) / 1e8 : 0;
-          const isBuyer = o.order?.isBuyer ?? false;
-          const orderExpiry = (raw?.orderExpiryTimestamp as number | undefined) ?? 0;
-
-          // Skip expired orders
-          if (orderExpiry > 0 && orderExpiry < now) {
-            return null;
-          }
+          const price = o.order?.price
+            ? Number(o.order.price) / 10 ** ORDER_PRICE_DECIMALS
+            : 0;
+          // availableAmount is maker collateral, not a contract count. Use the
+          // SDK's structure-aware max-contract calculation, then humanize the
+          // returned 6-decimal contract quantity.
+          const availableContracts =
+            Number(client.optionBook.calculateMaxContracts(o)) / contractScale;
 
           const optionType: 'PUT' | 'CALL' = isCall ? 'CALL' : 'PUT';
 
@@ -709,9 +817,9 @@ function registerCheck(grp: Command): void {
             strike,
             expiry,
             expiryDate: new Date(expiry * 1000).toISOString(),
-            side: isBuyer ? 'BID' : 'ASK',
+            side: 'ASK',
             price,
-            availableContracts: availableAmount,
+            availableContracts,
             maker: o.makerAddress ?? '',
           };
         };
@@ -725,13 +833,8 @@ function registerCheck(grp: Command): void {
 
           if (orderData.type !== params.type) return;
           if (orderData.expiry !== params.expiry) return;
-
-          // Direction match: buy -> need ASK (sellers); sell -> need BID (buyers)
-          const matchesSide =
-            params.direction === 'buy'
-              ? orderData.side === 'ASK'
-              : orderData.side === 'BID';
-          if (!matchesSide) return;
+          const orderPriceFeed = o.rawApiData?.priceFeed?.toLowerCase();
+          if (!wantPriceFeed || orderPriceFeed !== wantPriceFeed) return;
 
           filteredOrders.push(orderData);
         });
@@ -856,7 +959,7 @@ function registerCheck(grp: Command): void {
 function registerReads(grp: Command): void {
   grp
     .command('orders')
-    .description('List open maker orders')
+    .description('List executable cash-settled USDC maker asks')
     .option('--underlying <asset>', 'filter by underlying (e.g. ETH, BTC)')
     .option('--type <type>', 'filter by option type (CALL|PUT)')
     .option('--min-expiry <ts>', 'filter by minimum expiry timestamp (unix seconds)')
@@ -871,6 +974,12 @@ function registerReads(grp: Command): void {
         // undefined); fetching once and filtering here keeps the CLI working
         // and preserves the per-invocation cache for downstream commands.
         const allOrders = await fetchOrdersOnce(client);
+        // Canonical CLI book: cash-settled USDC asks only. Assign indices
+        // before applying display filters so `--underlying` / `--type` never
+        // renumber a row relative to `book preview/fill --order-index`.
+        const indexedEligible = eligibleOrders(allOrders, client, 'buy').map(
+          (order, index) => ({ order, index })
+        );
 
         let wantType: 'CALL' | 'PUT' | null = null;
         if (local.type) {
@@ -899,7 +1008,7 @@ function registerReads(grp: Command): void {
           wantPriceFeed = feed.toLowerCase();
         }
 
-        const filtered = allOrders.filter((o) => {
+        const filtered = indexedEligible.filter(({ order: o }) => {
           if (wantType !== null) {
             const isCall = o.rawApiData?.isCall;
             if (isCall === undefined) return false;
@@ -922,8 +1031,8 @@ function registerReads(grp: Command): void {
         const ro = renderOpts(opts);
         const isTable = (ro.output ?? 'table') === 'table';
         const rows = isTable
-          ? filtered.map((o, i) => summarizeOrderHuman(o, client, i))
-          : filtered.map((o, i) => summarizeOrder(o, i));
+          ? filtered.map(({ order, index }) => summarizeOrderHuman(order, client, index))
+          : filtered.map(({ order, index }) => summarizeOrder(order, index));
         render(rows, ro);
       } catch (err) {
         renderError(err, renderOpts(opts));
@@ -961,10 +1070,10 @@ function registerReads(grp: Command): void {
       }>();
       try {
         const { client } = getClient(opts);
-        const orders = await fetchOrdersOnce(client);
+        const orders = eligibleOrders(await fetchOrdersOnce(client), client, 'buy');
         const order = resolveOrderBySelector(orders, client, local);
         const collateralAmount = computeCollateralAmount(order, client, local);
-        const preview = client.optionBook.previewFillOrder(order, collateralAmount);
+        const preview = previewBookFill(client, order, collateralAmount);
 
         // Enrich with the same payout block `rfq build` emits. Book fills are
         // always BUY from the taker's perspective; the order's pricePerContract
@@ -1016,7 +1125,7 @@ function registerReads(grp: Command): void {
       }>();
       try {
         const { client } = getClient(opts);
-        const orders = await fetchOrdersOnce(client);
+        const orders = eligibleOrders(await fetchOrdersOnce(client), client, 'buy');
         const order = resolveOrderBySelector(orders, client, local);
         const maxContracts = client.optionBook.calculateMaxContracts(order);
         render({ maxContracts: maxContracts.toString() }, renderOpts(opts));
@@ -1067,19 +1176,29 @@ function registerWrites(grp: Command): void {
         scenarios?: boolean;
       }>();
       try {
+        if (!opts.dryRun && local.orderIndex !== undefined && local.orderIndex !== '') {
+          const err = new Error(
+            'Live book fills require the stable selector flags ' +
+              '(--underlying, --type, --strike/--strikes, --expiry). ' +
+              '--order-index is volatile and is allowed only with --dry-run.'
+          );
+          (err as Error & { exitCode?: number }).exitCode = 2;
+          throw err;
+        }
+
         const res = getClient(opts);
         requireSigner(res);
         const { client } = res;
 
-        const orders = await fetchOrdersOnce(client);
+        const orders = eligibleOrders(await fetchOrdersOnce(client), client, 'buy');
         const order = resolveOrderBySelector(orders, client, local);
-        assertUsdcCollateral(order, client);
+        assertEligibleOrder(order, client, 'buy');
         const collateralAmount = computeCollateralAmount(order, client, local);
 
         // 1+2+3: build preview, render it. Enrich with the same payout block
         // emitted by `book preview` (and `rfq build`) so dry-runs surface
         // max-loss / max-gain alongside the calldata.
-        const preview = client.optionBook.previewFillOrder(order, collateralAmount);
+        const preview = previewBookFill(client, order, collateralAmount);
         const payoutArgs = buildPayoutArgsFromPreview(preview, order, client);
         const ro = renderOpts(opts);
         const isTable = (ro.output ?? 'table') === 'table';
@@ -1094,7 +1213,9 @@ function registerWrites(grp: Command): void {
 
         const collateralAddr = preview.collateralToken;
         const spender = client.optionBook.contractAddress;
-        const required = preview.totalCollateral;
+        // Approve the ceiling, not the floored display premium: one unit of
+        // slack costs 1e-6 USDC and survives either contract rounding rule.
+        const required = bookPremiumCeiling(preview);
 
         // Resolve how much to approve, IF approval ends up being needed.
         //   undefined → exact (required collateral)
@@ -1201,25 +1322,23 @@ function registerWrites(grp: Command): void {
         // Refetch the live book RIGHT before broadcast to close the staleness
         // window: the user may have paused on the confirm prompt, during which
         // someone else could have filled/cancelled the order. Match by the
-        // canonical (maker, nonce) identity — indices shift, so we cannot
-        // re-use the original --order-index here. This safety check runs even
-        // under --yes; only --dry-run skips it (handled above).
+        // exact EIP-712 signature — indices shift and Odette reuses nonces
+        // across batches, so neither index nor (maker, nonce) is unique. This
+        // safety check runs even under --yes; only --dry-run skips it above.
         const freshOrders = await fetchOrdersFresh(client);
-        const freshOrder = findOrderByIdentity(freshOrders, order);
+        const freshOrder = findSignedOrder(freshOrders, order);
         if (!freshOrder) {
           process.stderr.write(
             'Order no longer in the live book — fully filled or cancelled. Aborting.\n'
           );
           process.exit(1);
         }
+        assertEligibleOrder(freshOrder, client, 'buy');
         // Recompute the preview against the fresh order. The signed order is
         // immutable, so numContracts/totalCollateral should match exactly when
         // `availableAmount` is still sufficient; any drift is a defensive
         // signal (e.g. partial fill) and we abort rather than risk a revert.
-        const freshPreview = client.optionBook.previewFillOrder(
-          freshOrder,
-          collateralAmount
-        );
+        const freshPreview = previewBookFill(client, freshOrder, collateralAmount);
         if (freshOrder.availableAmount < freshPreview.numContracts) {
           process.stderr.write(
             `Order has been partially filled since preview. ` +
@@ -1247,7 +1366,42 @@ function registerWrites(grp: Command): void {
         // Best-effort spot fetch for USD-equivalent gas cost. Never blocks
         // success rendering — `fetchEthUsdSafe` swallows API failures.
         const ethUsd = await fetchEthUsdSafe(client.api);
-        render(buildTxReceiptPayload(receipt, ethUsd), renderOpts(opts));
+        const fillEvent = extractOrderFilledEvent(
+          receipt,
+          client.optionBook.contractAddress
+        );
+        const optionAddress = fillEvent?.['optionAddress'];
+        const usdcDecimals = client.chainConfig.tokens.USDC?.decimals ?? 6;
+        const premiumAmountRaw = fillEvent?.['premiumAmountRaw'];
+        const feeCollectedRaw = fillEvent?.['feeCollectedRaw'];
+        const extra: Record<string, unknown> = {
+          ticker: tickerForOrder(freshOrder, client),
+          ...(fillEvent ?? {}),
+          ...(typeof premiumAmountRaw === 'string'
+            ? {
+                premiumPaid: `${formatUsd(
+                  Number(premiumAmountRaw) / 10 ** usdcDecimals,
+                  6
+                )} USDC`,
+              }
+            : {}),
+          ...(typeof feeCollectedRaw === 'string'
+            ? {
+                protocolFee: `${formatUsd(
+                  Number(feeCollectedRaw) / 10 ** usdcDecimals,
+                  6
+                )} USDC`,
+              }
+            : {}),
+          ...(typeof optionAddress === 'string'
+            ? {
+                inspectPosition: `thetanuts position info --address ${optionAddress}`,
+              }
+            : {}),
+          indexingNote:
+            'The position indexer is eventually consistent; if `position list` is briefly missing this fill, inspect the option address above or retry in a few seconds.',
+        };
+        render(buildTxReceiptPayload(receipt, ethUsd, extra), renderOpts(opts));
       } catch (err) {
         renderError(err, renderOpts(opts));
         const exit = (err as { exitCode?: number }).exitCode ?? 1;
