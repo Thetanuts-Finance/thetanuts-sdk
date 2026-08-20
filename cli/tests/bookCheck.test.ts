@@ -146,16 +146,23 @@ assert.equal(legOnly.structureMatches.length, 2);
 assert.equal(legOnly.structureMatches[0]!.structurePrice, 12);
 assert.deepEqual(legOnly.structureMatches[0]!.strikes, [2100, 2200, 2300, 2400]);
 assert.equal(legOnly.structureMatches[0]!.legIndex, 2);
-assert.equal(legOnly.nextStep.includes('--strikes 2100,2200,2300,2400'), true);
+// The per-match command is the runnable multi-leg form...
 assert.equal(
-  legOnly.nextStep.includes('--strike 2300 '),
+  legOnly.structureMatches[0]!.nextStep.includes('--strikes 2100,2200,2300,2400'),
+  true
+);
+assert.equal(legOnly.structureMatches[0]!.nextStepIsCommand, true);
+assert.equal(
+  legOnly.structureMatches[0]!.nextStep.includes('--strike 2300 '),
   false,
   'must not emit the single-strike form that cannot resolve'
 );
+// ...but the TOP-LEVEL step is not a command: see BUG-002 below.
+assert.equal(legOnly.nextStepIsCommand, false);
 // The ticker must not read as a vanilla call.
 assert.equal(legOnly.structureMatches[0]!.ticker, 'ETH-20AUG26-2100/2200/2300/2400-RANGER');
 assert.equal(
-  legOnly.reason.includes('payoff differs'),
+  legOnly.reason.includes('different payoffs'),
   true,
   'caller must be told the structure is not the vanilla they asked for'
 );
@@ -209,7 +216,15 @@ const sell = computeCheckResult(BOOK, params({ direction: 'sell' }), sellCtx);
 assert.equal(sell.cliExecutable, false);
 assert.equal(sell.recommendation, 'orderbook', 'a matching bid is still reported as book liquidity');
 assert.equal(sell.reason.includes('cannot execute sells'), true);
-assert.equal(sell.nextStep.includes('rfq build'), true, 'but the runnable step is RFQ');
+// BUG-003: an orderbook recommendation must never hand back an RFQ command.
+assert.equal(
+  sell.nextStep.includes('rfq build'),
+  false,
+  'live book liquidity must never be routed off-book by the next step'
+);
+assert.equal(sell.nextStepIsCommand, false);
+assert.equal(sell.nextStep.includes('app.thetanuts.finance'), true);
+assert.equal(sell.nextStepMaxSize, null);
 
 const sellEmpty = computeCheckResult([], params({ direction: 'sell' }), sellCtx);
 assert.equal(sellEmpty.recommendation, 'rfq');
@@ -247,5 +262,138 @@ const phantom = computeCheckResult(BOOK, params({ strike: 4321, expiry: EXP_NEXT
 assert.equal(phantom.recommendation, 'rfq');
 assert.equal(phantom.orderbookOrders.length, 0);
 assert.equal(phantom.structureMatches.length, 0);
+
+
+// --- 8. BUG-001: aggregate availability vs what ONE fill can take ----------
+// Two makers at the same instrument, different prices, requested size larger
+// than either but smaller than their sum. `check` used to call this "fully
+// available" while the command it recommended resolved to the cheapest maker
+// alone.
+const cheapAsk = order({ strikesUsd: [2200], implementation: VANILLA_PUT, price: 100_000_000n });
+const pricyAsk = order({ strikesUsd: [2200], implementation: VANILLA_PUT, price: 200_000_000n });
+const sizeByOrder = new Map<OrderWithSignature, bigint>([
+  [cheapAsk, 5_000_000n],
+  [pricyAsk, 5_000_000n],
+]);
+const ladderCtx: CheckContext = { ...ctx, maxContracts: (o) => sizeByOrder.get(o) ?? 0n };
+// Deliberately unsorted input: the pricier maker comes first on the wire.
+const ladder = computeCheckResult([pricyAsk, cheapAsk], params({ size: 8 }), ladderCtx);
+assert.equal(ladder.recommendation, 'orderbook');
+assert.equal(ladder.availableSize, 10, 'the aggregate is still reported');
+assert.equal(ladder.bestPrice, 1);
+assert.equal(
+  ladder.orderbookOrders[0]!.price,
+  1,
+  'best price leads, matching what resolveOrderBySelector picks'
+);
+assert.deepEqual(ladder.priceLevels, [
+  { price: 1, availableContracts: 5, orders: 1 },
+  { price: 2, availableContracts: 5, orders: 1 },
+]);
+assert.equal(ladder.nextStepMaxSize, 5, 'one fill resolves one order');
+assert.equal(
+  ladder.partialFillAvailable,
+  true,
+  'requested size exceeds what the recommended command can fill in one go'
+);
+assert.equal(ladder.partialSize, 5);
+assert.equal(ladder.reason.includes('priceLevels'), true);
+
+// A size the top level covers on its own is not a partial fill.
+const ladderSmall = computeCheckResult([pricyAsk, cheapAsk], params({ size: 4 }), ladderCtx);
+assert.equal(ladderSmall.partialFillAvailable, false);
+assert.equal(ladderSmall.nextStepMaxSize, 5);
+
+// --- 9. BUG-002/004: structure matches are alternatives, never a winner ----
+const PUT_FLY = '0x3ba26e1d2b1f6c37b0d8a6c4a2a1e30bd1a4a111';
+const IMPLS_FLY: Record<string, StructureMeta | undefined> = {
+  ...IMPLS,
+  [PUT_FLY]: { name: 'PUT_FLY', type: 'FLY' },
+};
+// 2200 is the LONG leg of the spread and the SHORT (middle) leg of the fly.
+// Ranking these by whole-structure premium is meaningless — and following the
+// "cheapest" could hand the caller the opposite exposure.
+const fly = order({
+  strikesUsd: [2300, 2200, 2100],
+  implementation: PUT_FLY,
+  price: 1_790_000_000n,
+});
+const structCtx: CheckContext = {
+  ...ctx,
+  implementations: IMPLS_FLY,
+  maxContracts: () => 3_000_000n, // 3 contracts
+};
+const structOnly = computeCheckResult([spread, fly], params({ strike: 2200 }), structCtx);
+assert.equal(structOnly.recommendation, 'orderbook');
+assert.equal(structOnly.orderbookOrders.length, 0);
+assert.equal(structOnly.structureMatches.length, 2);
+assert.equal(
+  structOnly.nextStepIsCommand,
+  false,
+  'no top-level command may auto-select between incomparable payoffs'
+);
+assert.equal(structOnly.nextStep.includes('book preview'), false);
+assert.equal(structOnly.nextStep.includes('rfq build'), false);
+assert.equal(structOnly.reason.includes('not comparable'), true);
+assert.equal(structOnly.reason.includes('short or middle leg'), true);
+assert.equal(structOnly.nextStepMaxSize, null);
+// Each alternative still carries its own runnable command and leg position.
+const flyMatch = structOnly.structureMatches.find((m) => m.structure === 'PUT_FLY')!;
+assert.equal(flyMatch.legIndex, 1, '2200 is the middle leg of 2300/2200/2100');
+assert.equal(flyMatch.legCount, 3);
+assert.equal(flyMatch.nextStepIsCommand, true);
+assert.equal(flyMatch.nextStep.includes('--strikes 2300,2200,2100'), true);
+
+// BUG-004: --size is evaluated per structure instead of silently ignored.
+const structSized = computeCheckResult(
+  [spread, fly],
+  params({ strike: 2200, size: 8 }),
+  structCtx
+);
+assert.equal(
+  structSized.structureMatches.every((m) => m.meetsRequestedSize === false),
+  true,
+  'a 3-contract structure cannot cover an 8-contract request'
+);
+assert.equal(structSized.reason.includes('0 of 2 can cover'), true);
+assert.equal(
+  structOnly.structureMatches.every((m) => m.meetsRequestedSize === null),
+  true,
+  'no --size means no sufficiency claim'
+);
+
+// --- 10. BUG-003: sell-side structure matches emit no buy-only command -----
+const structSell = computeCheckResult(
+  [spread, fly],
+  params({ strike: 2200, direction: 'sell' }),
+  { ...structCtx, cliExecutable: false }
+);
+assert.equal(structSell.recommendation, 'orderbook');
+assert.equal(
+  structSell.structureMatches.every((m) => !m.nextStepIsCommand),
+  true
+);
+assert.equal(
+  structSell.structureMatches.every((m) => !m.nextStep.includes('book preview')),
+  true,
+  '`book preview` filters to asks — it cannot preview the bid that matched'
+);
+assert.equal(structSell.nextStep.includes('rfq build'), false);
+
+// --- 11. BUG-005: a one-off --referrer survives into every emitted command --
+const REFERRER = '0x1111111111111111111111111111111111111111';
+const refCtx: CheckContext = { ...ctx, referrer: REFERRER };
+const withRef = computeCheckResult(BOOK, params(), refCtx);
+assert.equal(withRef.referrer, REFERRER);
+assert.equal(withRef.nextStep.startsWith(`thetanuts --referrer ${REFERRER} book preview`), true);
+assert.equal(
+  withRef.structureMatches.every((m) =>
+    m.nextStep.startsWith(`thetanuts --referrer ${REFERRER} book preview`)
+  ),
+  true
+);
+const noRef = computeCheckResult(BOOK, params(), ctx);
+assert.equal(noRef.referrer, null);
+assert.equal(noRef.nextStep.startsWith('thetanuts book preview'), true);
 
 console.log('book check ladder + invariant tests passed');

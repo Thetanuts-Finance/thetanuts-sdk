@@ -733,7 +733,11 @@ function registerCheck(grp: Command): void {
       };
 
       try {
-        const { client } = getClient(opts);
+        // `referrer` comes along so every command `check` emits carries the
+        // one resolved for THIS process. A one-off `--referrer` configures the
+        // current invocation only — without this the copied workflow silently
+        // falls back to the zero address and the fill earns no credit.
+        const { client, referrer } = getClient(opts);
 
         const feedResult = resolvePriceFeed(underlying, client.chainConfig.priceFeeds);
         if ('error' in feedResult) {
@@ -756,6 +760,7 @@ function registerCheck(grp: Command): void {
           maxContracts: (o) => client.optionBook.calculateMaxContracts(o),
           contractScale: 10 ** (client.chainConfig.tokens.USDC?.decimals ?? 6),
           cliExecutable: params.direction === 'buy',
+          ...(referrer !== undefined ? { referrer } : {}),
         });
 
         render(core, renderOpts(opts));

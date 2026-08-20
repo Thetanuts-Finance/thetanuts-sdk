@@ -878,11 +878,24 @@ credit — and lists the structures in `structureMatches`:
 | Field | Meaning |
 | ----- | ------- |
 | `recommendation` | `orderbook` when the book can fill (exact instrument **or** a structure carrying your strike), else `rfq`. |
-| `orderbookOrders` | Exact standalone matches only. `bestPrice` / `availableSize` describe these. |
-| `structureMatches` | Live multi-leg orders carrying your strike, cheapest first. `structurePrice` is the premium for the **whole structure** — not comparable to a vanilla ask. Each carries a runnable `nextStep`. |
-| `cliExecutable` | `false` for `--direction sell`: the book may have bids, but the CLI executes buys only. |
+| `orderbookOrders` | Exact standalone matches only, best price first. `bestPrice` describes the top of that list. |
+| `availableSize` | Contracts summed across **every** matching maker. One `book fill` resolves one order — see `priceLevels` / `nextStepMaxSize` for what a single command can take. |
+| `priceLevels` | The exact-instrument ladder (`price`, `availableContracts`, `orders`), best price first. Sweeping past the first level means repeating the fill against the next one. |
+| `partialFillAvailable` / `partialSize` | True when your `--size` exceeds what the recommended command fills in one invocation; `partialSize` is that amount. |
+| `structureMatches` | Live multi-leg orders carrying your strike, listed by premium for stable ordering — **not** ranked. `structurePrice` is the premium for the whole structure: not comparable to a vanilla ask, and not comparable to another structure either. `legIndex` / `legCount` tell you whether your strike is a long, short or middle leg; `meetsRequestedSize` answers `--size` per structure. |
+| `nextStep` / `nextStepIsCommand` | When `nextStepIsCommand` is `true`, `nextStep` is a runnable command (with your `--referrer` already baked in). When it is `false`, it is prose describing a manual action — a structure-only result, where you must pick the payoff yourself, or a sell, which the CLI cannot execute. |
+| `nextStepMaxSize` | Contracts `nextStep` can fill in one invocation; `null` when `nextStep` is not a fill command. |
+| `referrer` | The referrer resolved for this invocation and embedded in every emitted command; `null` when none is configured. |
+| `cliExecutable` | `false` for `--direction sell`: the book may have bids, but the CLI executes buys only. `nextStep` then points at the dApp — never at RFQ, which would take a fillable trade off-book. |
 | `liveExpiries` | Every expiry with liquidity for this underlying/type, with vanilla and structure counts. |
 | `didYouMean` | Listed expiries falling on the same UTC date as the one you passed. Never auto-applied — the book carries e.g. both an 03:00Z and an 08:00Z expiry on some dates. |
+
+`check` never picks a structure for you. A spread, fly, condor and ranger that
+share one strike are different products — their whole-structure premiums are
+not rankable against each other, and your strike may sit on a short or middle
+leg, so the "cheapest" one can carry exposure opposite to the vanilla you asked
+about. When your strike exists only inside structures, the top-level `nextStep`
+is prose and each match carries its own runnable command.
 
 Tickers are structure-honest: a 4-strike ranger renders as
 `ETH-28AUG26-2150/2200/2250/2300-RANGER`, never as a vanilla `…-2150-C`.

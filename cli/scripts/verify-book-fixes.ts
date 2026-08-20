@@ -121,6 +121,47 @@ async function main(): Promise<void> {
   }
   check('strikes the book lacks are NOT claimed as fillable', phantomClaimed === 0, `${phantomClaimed} false positives`);
 
+  // Sell side: the book carries bids, the CLI executes buys only. An
+  // "orderbook" recommendation must never hand back an RFQ command — that is
+  // the off-book route this branch exists to avoid — and no per-structure step
+  // may be a `book preview` command, since preview filters to asks.
+  const sellOrders = (all as any[]).filter((o) =>
+    isEligibleBookOrder(o, { ...policy, direction: 'sell' as const })
+  );
+  let sellProbes = 0;
+  let sellRfqSteps = 0;
+  let sellBuyOnlySteps = 0;
+  for (const o of sellOrders) {
+    const feed = o.rawApiData.priceFeed.toLowerCase();
+    const underlying = symbolOf[feed];
+    if (!underlying) continue;
+    const type: 'PUT' | 'CALL' = o.rawApiData.isCall ? 'CALL' : 'PUT';
+    const expiry = Number(o.order.expiry);
+    for (const raw of orderStrikesRaw(o)) {
+      const r = computeCheckResult(
+        sellOrders,
+        { underlying, type, strike: Number(raw) / 1e8, expiry, direction: 'sell' },
+        { ...ctxFor(feed), cliExecutable: false }
+      );
+      if (r.recommendation !== 'orderbook') continue;
+      sellProbes += 1;
+      if (r.nextStep.includes('rfq build')) sellRfqSteps += 1;
+      if (r.structureMatches.some((m) => m.nextStep.includes('book preview'))) {
+        sellBuyOnlySteps += 1;
+      }
+    }
+  }
+  check(
+    'sell-side book liquidity never produces an RFQ next step',
+    sellRfqSteps === 0,
+    `${sellProbes} sell-side orderbook results; ${sellRfqSteps} routed to RFQ`
+  );
+  check(
+    'sell-side results emit no buy-only preview commands',
+    sellBuyOnlySteps === 0,
+    `${sellBuyOnlySteps} buy-only steps on sell results`
+  );
+
   // Round-trip: whatever `check` tells you to run next must actually run.
   const structureOrder = orders.find(
     (o) => orderStrikesUsd(o).length > 1 && symbolOf[o.rawApiData.priceFeed.toLowerCase()]
@@ -148,16 +189,34 @@ async function main(): Promise<void> {
       res.structureMatches.length === 0 || !/-[CP]$/.test(res.structureMatches[0].ticker),
       res.structureMatches[0]?.ticker ?? 'n/a'
     );
-    const step: string = res.nextStep;
-    const args = step.replace(/^thetanuts\s+/, '').replace('<amount>', '1').split(/\s+/);
+    // Structure-only results deliberately emit no top-level command: several
+    // structures can share a strike and their payoffs are not rankable by
+    // premium, so the caller picks. The runnable command then lives on the
+    // chosen match. Whichever path applies, the command must execute.
+    const step: string | undefined = res.nextStepIsCommand
+      ? res.nextStep
+      : res.structureMatches.find((m: { nextStepIsCommand: boolean }) => m.nextStepIsCommand)
+          ?.nextStep;
+    check(
+      'a structure-only result emits no auto-selected top-level command',
+      res.orderbookOrders.length > 0 || res.nextStepIsCommand === false,
+      `nextStepIsCommand=${res.nextStepIsCommand}`
+    );
     let ran = false;
-    try {
-      const out = cliJson(args);
-      ran = typeof out.pricePerContract === 'string';
-    } catch {
-      ran = false;
+    if (step !== undefined) {
+      const args = step.replace(/^thetanuts\s+/, '').replace('<amount>', '1').split(/\s+/);
+      try {
+        const out = cliJson(args);
+        ran = typeof out.pricePerContract === 'string';
+      } catch {
+        ran = false;
+      }
     }
-    check("check's own nextStep actually executes", ran, ran ? step : `FAILED: ${step}`);
+    check(
+      "check's own next step actually executes",
+      ran,
+      ran ? step! : `FAILED: ${step ?? 'no runnable command emitted'}`
+    );
   }
 
   // Strike order must not matter (19 live orders store strikes descending).

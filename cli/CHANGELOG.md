@@ -40,6 +40,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents** (preview, then calldata), which no JSON parser accepts. Machine
   output is now a single object with the preview nested under `preview`. Table
   output is unchanged.
+- **`book check` claimed an aggregate size was available that its own
+  recommended command could not fill.** `availableSize` summed every matching
+  maker, but `book preview` / `book fill` resolve exactly one order (the
+  cheapest). With 5 contracts at $1 and 5 at $2, `--size 8` reported "fully
+  available" and then filled 5. The ladder is now reported as `priceLevels`,
+  `nextStepMaxSize` states what one invocation can take, and
+  `partialFillAvailable` is keyed off that instead of the aggregate.
+- **`book check` auto-selected between structures whose payoffs are not
+  comparable.** Every structure carrying the requested strike was sorted by
+  whole-structure premium, the first was labelled "cheapest", and its command
+  became the top-level `nextStep` — but a spread, fly, condor and ranger
+  sharing one strike are different products, and the requested strike can be a
+  long, short or middle leg, so following that command could open exposure
+  opposite to the vanilla the caller asked about. Structure matches are now
+  reported as unranked alternatives with `legIndex` / `legCount`, and the
+  top-level `nextStep` is prose (`nextStepIsCommand: false`) telling the caller
+  to pick one.
+- **`book check --direction sell` recommended the orderbook and then handed
+  back an `rfq build` command** — the exact off-book route the orderbook
+  recommendation exists to prevent. Sell-side matches now return a dApp action
+  and never an RFQ command. Per-structure steps on a sell result no longer emit
+  `book preview` commands either: `preview` filters to asks, so it could not
+  preview the bid that matched.
+- **`book check` ignored `--size` for structure-only results**, reporting
+  `recommendation: orderbook` alongside `availableSize: null`. Each structure
+  match now carries `meetsRequestedSize`.
+- **A one-off `--referrer` was dropped from the workflow `book check`
+  generated.** The flag configures only the current process, so copying the
+  recommended preview/fill command silently fell back to address zero. The
+  resolved referrer is now reported as `referrer` and baked into every emitted
+  command. Global flags also appear under a **Global Options** heading in
+  subcommand help (`book fill --help`), instead of only on `thetanuts --help`.
 
 ### Added
 

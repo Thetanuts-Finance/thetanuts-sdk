@@ -25,6 +25,11 @@ program
   .description('Thetanuts Finance V4 command-line interface')
   .version(pkg.version);
 
+// Global flags live on the root command, so `thetanuts book fill --help`
+// would not list `--referrer` / `--dry-run` / `--output` at all — making a
+// present flag look missing from the help path people actually use.
+program.configureHelp({ showGlobalOptions: true });
+
 addGlobalOptions(program);
 registerCommands(program);
 
