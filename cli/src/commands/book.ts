@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { Interface, MaxUint256 } from 'ethers';
+import { Interface, MaxUint256, ZeroAddress } from 'ethers';
 import {
   OPTION_BOOK_ABI,
   type OrderWithSignature,
@@ -31,6 +31,12 @@ import {
 } from '../bookEligibility.js';
 import { bookPremiumCeiling, withActualBookPremium } from '../bookPreview.js';
 import { findSignedOrder } from '../bookOrderIdentity.js';
+import { findMatchingOrders, resolvePriceFeed } from '../bookMatch.js';
+import {
+  computeCheckResult,
+  type CheckParams,
+  type CheckResultCore,
+} from '../bookCheck.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — kept module-local; do not export
@@ -151,6 +157,10 @@ function extractOrderFilledEvent(
         seller: String(parsed.args['seller']),
         premiumAmountRaw: BigInt(parsed.args['premiumAmount']).toString(),
         feeCollectedRaw: BigInt(parsed.args['feeCollected']).toString(),
+        // Surfaced so a fill can be audited for referral attribution without
+        // decoding the receipt on a block explorer.
+        referrer: String(parsed.args['referrer']),
+        referralFeePaidRaw: BigInt(parsed.args['referralFeePaid']).toString(),
         sellerWasMaker: Boolean(parsed.args['sellerWasMaker']),
       };
     } catch {
@@ -577,27 +587,21 @@ function resolveOrderBySelector(
   }
 
   // Resolve underlying -> price feed for matching.
-  const wantPriceFeed = client.chainConfig.priceFeeds[underlying]?.toLowerCase();
-  if (!wantPriceFeed) {
-    const known = Object.keys(client.chainConfig.priceFeeds).join(', ');
-    const err = new Error(`Unknown --underlying "${flags.underlying}". Known: ${known}.`);
+  const feedResult = resolvePriceFeed(underlying, client.chainConfig.priceFeeds);
+  if ('error' in feedResult) {
+    const err = new Error(feedResult.error.replace('underlying', '--underlying'));
     (err as { exitCode?: number }).exitCode = 2;
     throw err;
   }
+  const wantPriceFeed = feedResult.feed;
 
-  const matches = orders.filter((o) => {
-    const raw = o.rawApiData;
-    if (!raw) return false;
-    const orderType: 'PUT' | 'CALL' = raw.isCall ? 'CALL' : 'PUT';
-    if (orderType !== type) return false;
-    if (raw.priceFeed?.toLowerCase() !== wantPriceFeed) return false;
-    if (Number(o.order.expiry) !== wantExpiry) return false;
-    const orderStrikes = raw.strikes ?? [];
-    if (orderStrikes.length !== wantStrikesRaw.length) return false;
-    for (let i = 0; i < orderStrikes.length; i++) {
-      if (BigInt(orderStrikes[i]!) !== wantStrikesRaw[i]) return false;
-    }
-    return true;
+  // Shared predicate — `book check` uses the same one, so the two commands
+  // cannot disagree about what the book holds.
+  const matches = findMatchingOrders(orders, {
+    priceFeed: wantPriceFeed,
+    type,
+    strikesRaw: wantStrikesRaw,
+    expiry: wantExpiry,
   });
 
   if (matches.length === 0) {
@@ -612,6 +616,27 @@ function resolveOrderBySelector(
 
   if (matches.length === 1) {
     return matches[0]!;
+  }
+
+  // Two implementations can share a strike count, type and expiry (e.g.
+  // CALL_CONDOR vs IRON_CONDOR, both 4 strikes). Their payoffs differ, so
+  // silently picking the cheaper one would hand the caller a different product
+  // than they priced. Make them disambiguate.
+  const matchedStructures = new Set(
+    matches.map(
+      (o) =>
+        client.chainConfig.optionImplementations[
+          o.rawApiData?.implementation?.toLowerCase() ?? ''
+        ]?.name ?? 'UNKNOWN'
+    )
+  );
+  if (matchedStructures.size > 1) {
+    const err = new Error(
+      `Selector matches more than one structure: ${[...matchedStructures].sort().join(', ')}. ` +
+        'These have different payoffs — pass --order-index to pick one explicitly.'
+    );
+    (err as { exitCode?: number }).exitCode = 4;
+    throw err;
   }
 
   // Multi-match. --strict: hard error. Default: cheapest BUY (lowest price).
@@ -649,63 +674,14 @@ export function register(program: Command): void {
 // Pre-trade liquidity check
 // ---------------------------------------------------------------------------
 
-interface CheckParams {
-  underlying: 'ETH' | 'BTC';
-  type: 'PUT' | 'CALL';
-  strike: number;
-  expiry: number;
-  direction: 'buy' | 'sell';
-  size?: number;
-}
-
-interface MatchingOrder {
-  index: number;
-  ticker: string;
-  type: 'PUT' | 'CALL';
-  strike: number;
-  expiry: number;
-  expiryDate: string;
-  side: 'BID' | 'ASK';
-  price: number;
-  availableContracts: number;
-  maker: string;
-}
-
-interface NearbyStrike {
-  strike: number;
-  priceDiff: string;
-  bestPrice: number;
-  availableContracts: number;
-  orderIndex: number;
-}
-
-interface CheckResult {
-  recommendation: 'orderbook' | 'rfq';
-  reason: string;
-  params: CheckParams;
-  orderbookOrders: MatchingOrder[];
-  bestPrice: number | null;
-  availableSize: number | null;
-  partialFillAvailable: boolean;
-  partialSize: number | null;
-  nearbyStrikes: NearbyStrike[];
-  nextStep: string;
-}
-
-function formatCheckTicker(underlying: string, expiry: number, strike: number, type: string): string {
-  const expiryDate = new Date(expiry * 1000);
-  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-  const day = expiryDate.getUTCDate();
-  const month = months[expiryDate.getUTCMonth()];
-  const year = expiryDate.getUTCFullYear().toString().slice(-2);
-  return `${underlying}-${day}${month}${year}-${strike}-${type === 'PUT' ? 'P' : 'C'}`;
-}
-
 function registerCheck(grp: Command): void {
   grp
     .command('check')
-    .description('Pre-trade liquidity check: scan orderbook for matching strike/expiry/type and recommend orderbook vs RFQ')
-    .requiredOption('--underlying <asset>', 'underlying asset (ETH|BTC)')
+    .description(
+      'Pre-trade liquidity check: scan the orderbook for a matching strike/expiry/type ' +
+        '(including strikes that sit on a structure leg) and recommend orderbook vs RFQ'
+    )
+    .requiredOption('--underlying <asset>', 'underlying asset (e.g. ETH, BTC, SOL)')
     .requiredOption('--type <type>', 'option type (PUT|CALL)')
     .requiredOption('--strike <price>', 'target strike price in USD')
     .requiredOption('--expiry <ts>', 'expiry unix timestamp')
@@ -722,8 +698,6 @@ function registerCheck(grp: Command): void {
         size?: string;
       }>();
 
-      // Validate params upfront
-      // CLI surfaces the same errors as the script it ports
       const underlying = local.underlying.toUpperCase();
       const type = local.type.toUpperCase();
       const direction = local.direction.toLowerCase();
@@ -731,22 +705,15 @@ function registerCheck(grp: Command): void {
       const expiry = parseInt(local.expiry, 10);
       const size = local.size !== undefined ? parseFloat(local.size) : undefined;
 
+      // Underlying is validated against chain config after the client exists —
+      // the old hardcoded ETH|BTC gate made every SOL/DOGE/XRP/BNB/AVAX order
+      // on the book unreachable from this command.
       const missing: string[] = [];
-      if (!['ETH', 'BTC'].includes(underlying)) missing.push('--underlying (ETH|BTC)');
       if (!['PUT', 'CALL'].includes(type)) missing.push('--type (PUT|CALL)');
       if (!strike || Number.isNaN(strike)) missing.push('--strike (price)');
       if (!expiry || Number.isNaN(expiry)) missing.push('--expiry (unix timestamp)');
       if (!['buy', 'sell'].includes(direction)) missing.push('--direction (buy|sell)');
       if (size !== undefined && Number.isNaN(size)) missing.push('--size (number)');
-
-      const params: CheckParams = {
-        underlying: underlying as 'ETH' | 'BTC',
-        type: type as 'PUT' | 'CALL',
-        strike,
-        expiry,
-        direction: direction as 'buy' | 'sell',
-        ...(size !== undefined ? { size } : {}),
-      };
 
       if (missing.length > 0) {
         renderError(
@@ -756,195 +723,47 @@ function registerCheck(grp: Command): void {
         process.exit(1);
       }
 
-      try {
-        const { client } = getClient(opts);
+      const params: CheckParams = {
+        underlying,
+        type: type as 'PUT' | 'CALL',
+        strike,
+        expiry,
+        direction: direction as 'buy' | 'sell',
+        ...(size !== undefined ? { size } : {}),
+      };
 
-        // The CLI's OptionBook preview/fill path is intentionally buy-only.
-        // A sell would require taker collateral/allowance and payout semantics
-        // that this command does not implement safely; route it to RFQ instead
-        // of advertising an unusable `book preview` next step.
-        if (params.direction === 'sell') {
-          const result: CheckResult = {
-            recommendation: 'rfq',
-            reason:
-              'CLI orderbook execution currently supports buys only. Use RFQ to sell so collateral and settlement terms are validated correctly.',
-            params,
-            orderbookOrders: [],
-            bestPrice: null,
-            availableSize: null,
-            partialFillAvailable: false,
-            partialSize: null,
-            nearbyStrikes: [],
-            nextStep: `thetanuts rfq build --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --contracts <n> --direction sell`,
-          };
-          render(result, renderOpts(opts));
+      try {
+        // `referrer` comes along so every command `check` emits carries the
+        // one resolved for THIS process. A one-off `--referrer` configures the
+        // current invocation only — without this the copied workflow silently
+        // falls back to the zero address and the fill earns no credit.
+        const { client, referrer } = getClient(opts);
+
+        const feedResult = resolvePriceFeed(underlying, client.chainConfig.priceFeeds);
+        if ('error' in feedResult) {
+          renderError(new Error(feedResult.error), renderOpts(opts));
+          process.exit(1);
           return;
         }
 
-        // Canonical executable book: current cash-settled USDC maker asks.
-        const orders = eligibleOrders(await client.api.fetchOrders(), client, 'buy');
-        const wantPriceFeed = client.chainConfig.priceFeeds[params.underlying]?.toLowerCase();
-        const contractScale = 10 ** (client.chainConfig.tokens.USDC?.decimals ?? 6);
-
-        // Extract order data helper. Strikes/prices use 1e8; contract amounts
-        // use the USDC scale via calculateMaxContracts above.
-        const extractOrderData = (o: OrderWithSignature, index: number): MatchingOrder | null => {
-          const raw = o.rawApiData as Record<string, unknown> | undefined;
-          const isCall = (raw?.isCall as boolean | undefined) ?? true;
-          // Use strikes[0] (SDK deprecated `strikePrice` for multi-leg correctness)
-          const rawStrikes = (raw?.strikes as unknown[] | undefined) ?? [];
-          const firstStrike = rawStrikes[0];
-          const strike = firstStrike ? Number(firstStrike) / 1e8 : 0;
-          const expiry = o.order?.expiry ? Number(o.order.expiry) : 0;
-          const price = o.order?.price
-            ? Number(o.order.price) / 10 ** ORDER_PRICE_DECIMALS
-            : 0;
-          // availableAmount is maker collateral, not a contract count. Use the
-          // SDK's structure-aware max-contract calculation, then humanize the
-          // returned 6-decimal contract quantity.
-          const availableContracts =
-            Number(client.optionBook.calculateMaxContracts(o)) / contractScale;
-
-          const optionType: 'PUT' | 'CALL' = isCall ? 'CALL' : 'PUT';
-
-          return {
-            index,
-            // Thread the actual underlying through — BTC orders were rendered
-            // with an `ETH-…` ticker prefix and misled traders selecting rows
-            // by ticker (TNU-AUDIT-0068).
-            ticker: formatCheckTicker(params.underlying, expiry, strike, optionType),
-            type: optionType,
-            strike,
-            expiry,
-            expiryDate: new Date(expiry * 1000).toISOString(),
-            side: 'ASK',
-            price,
-            availableContracts,
-            maker: o.makerAddress ?? '',
-          };
-        };
-
-        // Filter orders by type and expiry
-        const filteredOrders: MatchingOrder[] = [];
-
-        orders.forEach((o, index) => {
-          const orderData = extractOrderData(o, index);
-          if (!orderData) return;
-
-          if (orderData.type !== params.type) return;
-          if (orderData.expiry !== params.expiry) return;
-          const orderPriceFeed = o.rawApiData?.priceFeed?.toLowerCase();
-          if (!wantPriceFeed || orderPriceFeed !== wantPriceFeed) return;
-
-          filteredOrders.push(orderData);
-        });
-
-        // Exact strike matches
-        const exactMatches = filteredOrders.filter((o) => o.strike === params.strike);
-
-        // Nearby strikes (within 5%)
-        const strikeTolerance = params.strike * 0.05;
-        const nearbyMatches = filteredOrders.filter(
-          (o) =>
-            o.strike !== params.strike &&
-            Math.abs(o.strike - params.strike) <= strikeTolerance
+        // Scan the side the caller actually wants. Sells are reported but not
+        // executable from the CLI, so `cliExecutable` tells a bot not to try.
+        const orders = eligibleOrders(
+          await fetchOrdersOnce(client),
+          client,
+          params.direction
         );
 
-        // Aggregate nearby strikes
-        const nearbyStrikes: NearbyStrike[] = [];
-        const strikeMap = new Map<number, MatchingOrder[]>();
-        nearbyMatches.forEach((o) => {
-          if (!strikeMap.has(o.strike)) strikeMap.set(o.strike, []);
-          strikeMap.get(o.strike)!.push(o);
+        const core = computeCheckResult(orders, params, {
+          priceFeed: feedResult.feed,
+          implementations: client.chainConfig.optionImplementations,
+          maxContracts: (o) => client.optionBook.calculateMaxContracts(o),
+          contractScale: 10 ** (client.chainConfig.tokens.USDC?.decimals ?? 6),
+          cliExecutable: params.direction === 'buy',
+          ...(referrer !== undefined ? { referrer } : {}),
         });
-        strikeMap.forEach((ordersAtStrike, strikeKey) => {
-          const bestOrder = ordersAtStrike.reduce(
-            (best, curr) =>
-              params.direction === 'buy'
-                ? curr.price < best.price
-                  ? curr
-                  : best
-                : curr.price > best.price
-                  ? curr
-                  : best,
-            ordersAtStrike[0]
-          );
-          const totalContracts = ordersAtStrike.reduce(
-            (sum, o) => sum + o.availableContracts,
-            0
-          );
-          const priceDiff = (((strikeKey - params.strike) / params.strike) * 100).toFixed(1);
-          nearbyStrikes.push({
-            strike: strikeKey,
-            priceDiff: `${parseFloat(priceDiff) >= 0 ? '+' : ''}${priceDiff}%`,
-            bestPrice: bestOrder.price,
-            availableContracts: totalContracts,
-            orderIndex: bestOrder.index,
-          });
-        });
-        nearbyStrikes.sort(
-          (a, b) =>
-            Math.abs(a.strike - params.strike) - Math.abs(b.strike - params.strike)
-        );
 
-        // Totals + best price for exact matches
-        const totalAvailable = exactMatches.reduce(
-          (sum, o) => sum + o.availableContracts,
-          0
-        );
-        const bestPrice =
-          exactMatches.length > 0
-            ? params.direction === 'buy'
-              ? Math.min(...exactMatches.map((o) => o.price))
-              : Math.max(...exactMatches.map((o) => o.price))
-            : null;
-
-        // Recommendation logic — lifted from OpenClaw
-        let recommendation: 'orderbook' | 'rfq';
-        let reason: string;
-        let nextStep: string;
-        let partialFillAvailable = false;
-        let partialSize: number | null = null;
-
-        if (exactMatches.length > 0) {
-          if (params.size && params.size > totalAvailable) {
-            partialFillAvailable = true;
-            partialSize = totalAvailable;
-            recommendation = 'orderbook';
-            reason = `Found ${totalAvailable.toFixed(4)} contracts at strike $${params.strike} (you requested ${params.size}). Partial fill available via orderbook, or use RFQ for full amount.`;
-            nextStep = `Preview fill: thetanuts book preview --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --collateral <amount>`;
-          } else {
-            recommendation = 'orderbook';
-            reason = `Found orderbook liquidity at strike $${params.strike}. Best ${params.direction === 'buy' ? 'ask' : 'bid'} price: $${bestPrice?.toFixed(2)}. Available: ${totalAvailable.toFixed(4)} contracts. This will execute instantly.`;
-            nextStep = `Preview fill: thetanuts book preview --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --collateral <amount>`;
-          }
-        } else if (nearbyStrikes.length > 0) {
-          recommendation = 'rfq';
-          reason = `No orderbook liquidity at exact strike $${params.strike}. Nearby strikes available: ${nearbyStrikes
-            .slice(0, 3)
-            .map((s) => `$${s.strike} (${s.priceDiff})`)
-            .join(', ')}. Use RFQ for your exact strike, or consider nearby strikes.`;
-          nextStep = `thetanuts rfq build --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --contracts <n> --direction ${params.direction}`;
-        } else {
-          recommendation = 'rfq';
-          reason = `No orderbook liquidity at strike $${params.strike} or nearby. Submit an RFQ — market makers respond within 45 seconds (default deadline).`;
-          nextStep = `thetanuts rfq build --underlying ${params.underlying} --type ${params.type} --strike ${params.strike} --expiry ${params.expiry} --contracts <n> --direction ${params.direction}`;
-        }
-
-        const result: CheckResult = {
-          recommendation,
-          reason,
-          params,
-          orderbookOrders: exactMatches.slice(0, 10),
-          bestPrice,
-          availableSize: totalAvailable > 0 ? totalAvailable : null,
-          partialFillAvailable,
-          partialSize,
-          nearbyStrikes: nearbyStrikes.slice(0, 5),
-          nextStep,
-        };
-
-        render(result, renderOpts(opts));
+        render(core, renderOpts(opts));
       } catch (err) {
         renderError(err, renderOpts(opts));
         process.exit(1);
@@ -1190,6 +1009,17 @@ function registerWrites(grp: Command): void {
         requireSigner(res);
         const { client } = res;
 
+        // No referrer resolved (the SDK then falls back to the zero address),
+        // or one explicitly resolved to the zero address — either way the fill
+        // earns no referral credit. Warn on stderr so `--output json` stays
+        // machine-parseable.
+        if (res.referrer === undefined || res.referrer === ZeroAddress) {
+          process.stderr.write(
+            'Warning: no referrer configured — this fill accrues no referral credit. ' +
+              'Set one with `thetanuts config set referrer 0x...` or --referrer.\n'
+          );
+        }
+
         const orders = eligibleOrders(await fetchOrdersOnce(client), client, 'buy');
         const order = resolveOrderBySelector(orders, client, local);
         assertEligibleOrder(order, client, 'buy');
@@ -1209,7 +1039,12 @@ function registerWrites(grp: Command): void {
           payoutArgs !== null
             ? { ...previewHeader, payout: computePayoutSummary(payoutArgs) }
             : previewHeader;
-        render(previewWithPayout, ro);
+        // In table mode the preview is its own block. For machine output we
+        // hold it back and fold it into the single dry-run object below —
+        // emitting two top-level JSON documents on stdout made `book fill
+        // --dry-run -o json` unparseable by `jq`/`JSON.parse`.
+        const deferPreview = !isTable && opts.dryRun;
+        if (!deferPreview) render(previewWithPayout, ro);
 
         const collateralAddr = preview.collateralToken;
         const spender = client.optionBook.contractAddress;
@@ -1266,6 +1101,7 @@ function registerWrites(grp: Command): void {
           render(
             {
               dryRun: true,
+              ...(deferPreview ? { preview: previewWithPayout } : {}),
               approve: approveCell,
               fill: fillEncoded,
             },
