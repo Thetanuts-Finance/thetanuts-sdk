@@ -4,7 +4,7 @@ TypeScript CLI for [Thetanuts Finance V4](https://thetanuts.finance) options on 
 
 > **Warning:** This is early, experimental software. Use at your own risk and do not use with large amounts of funds. APIs, commands, and behavior may change without notice. Always run `--dry-run` first, start with a dedicated wallet (not your main funds wallet), and verify transactions before confirming.
 
-> **v0.2.0 — cash-settled USDC book buys only.** `book orders`, `book preview`, and `book fill` exclude physical implementations, maker bids, and non-USDC collateral. RFQ covers the wider direction/structure workflow documented below, including WETH `INVERSE_CALL` for vanilla ETH calls. See [CHANGELOG.md](./CHANGELOG.md) — 0.2.0 corrects OptionBook premium/contract scaling and restricts `book fill --order-index` to `--dry-run`.
+> **v0.3.1 — cash-settled USDC book buys only.** `book orders`, `book preview`, and `book fill` exclude physical implementations, maker bids, and non-USDC collateral. `book check` now recognizes live multi-leg structure liquidity and preserves referrer attribution in its generated workflow. RFQ covers the wider direction/structure workflow documented below, including WETH `INVERSE_CALL` for vanilla ETH calls. See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 
 ## Install
 
