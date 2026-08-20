@@ -119,3 +119,31 @@ export function underlyingSymbolByPriceFeed(
   }
   return undefined;
 }
+
+/**
+ * Ticker for a structure (spread / fly / condor / ranger). Multi-leg orders
+ * must never render with a bare `-C` / `-P` suffix: `book check` used to label
+ * a 4-strike RANGER `ETH-28AUG26-2150-C`, which reads as a vanilla call and
+ * misled callers into pricing it as one.
+ *
+ * Falls back to `formatTicker` for single-leg orders, or when the structure
+ * name is unknown (an implementation address absent from chain config).
+ * Strikes are rendered in the order the order stores them — that same order is
+ * what `book preview --strikes` expects back.
+ */
+export function formatStructureTicker(
+  underlying: string,
+  expirySec: number,
+  strikesUsd: number[],
+  type: 'PUT' | 'CALL',
+  structureName?: string
+): string {
+  if (strikesUsd.length <= 1 || !structureName) {
+    return formatTicker(underlying, expirySec, strikesUsd, type);
+  }
+  const d = new Date(expirySec * 1000);
+  const day = d.getUTCDate();
+  const month = MONTHS[d.getUTCMonth()];
+  const year = d.getUTCFullYear().toString().slice(-2);
+  return `${underlying}-${day}${month}${year}-${strikesUsd.join('/')}-${structureName}`;
+}
