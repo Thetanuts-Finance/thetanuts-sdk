@@ -15,6 +15,7 @@ export interface Config {
   rpcUrl: string;
   privateKey?: string;
   rfqKeysDir?: string;
+  referrer?: string;
 }
 
 export function defaultConfigPath(): string {

@@ -73,8 +73,8 @@ thetanuts wallet approve --token USDC --for optionBook --amount 100
 
 The CLI needs a private key to sign approvals, fills, and RFQ submissions. Three ways to provide it (checked in this order):
 
-1. **CLI flag**: `--private-key 0xabc...` (and `--rpc-url`)
-2. **Environment variable**: `THETANUTS_PRIVATE_KEY` (and `THETANUTS_RPC_URL`)
+1. **CLI flag**: `--private-key 0xabc...` (and `--rpc-url`, `--referrer`)
+2. **Environment variable**: `THETANUTS_PRIVATE_KEY` (and `THETANUTS_RPC_URL`, `THETANUTS_REFERRER`)
 3. **Config file**: `~/.config/thetanuts/config.json`
 
 ```bash
@@ -92,11 +92,28 @@ The config file (`~/.config/thetanuts/config.json`):
   "chainId": 8453,
   "rpcUrl": "https://mainnet.base.org",
   "privateKey": "0x...",
-  "rfqKeysDir": "~/.config/thetanuts/rfq-keys"
+  "rfqKeysDir": "~/.config/thetanuts/rfq-keys",
+  "referrer": "0x..."
 }
 ```
 
 File permissions are set automatically: `chmod 700` on the directory, `chmod 600` on the file.
+
+### Referral attribution
+
+OptionBook fills carry a referrer **address**. When set, the OptionBook credits it a share of the
+protocol fee (`referrerFeeSplitBps` on-chain); when unset the CLI fills with the zero address and the
+trade earns no referral credit — `book fill` prints a stderr warning in that case. Resolution follows
+the usual order: `--referrer 0x...`, then `THETANUTS_REFERRER`, then the config file's `referrer`.
+
+```bash
+thetanuts config set referrer 0xYourReferrerAddress   # persist it
+thetanuts --referrer 0xYourReferrerAddress book fill ...   # one-off
+```
+
+RFQ is a separate mechanism: `rfq build --referral-id <n>` is a numeric tracking ID carried in the
+request, not an address, and it does not participate in OptionBook fee sharing. The two are unrelated
+— setting one has no effect on the other.
 
 ### What Needs a Wallet
 
@@ -826,7 +843,7 @@ thetanuts book preview --underlying ETH --type PUT --strike 2100 --expiry 177917
 thetanuts book preview --underlying ETH --type PUT --strike 2100 --expiry 1779177600 --collateral 1 --scenarios
 thetanuts book max-contracts --underlying ETH --type PUT --strike 2100 --expiry 1779177600
 
-# Pre-trade liquidity check
+# Pre-trade liquidity check (any configured underlying, not just ETH/BTC)
 thetanuts book check --underlying ETH --type PUT --strike 2200 \
                      --expiry 1778832000 --direction buy
 
@@ -845,10 +862,61 @@ thetanuts book fill --order-index 0 --collateral 1 --dry-run
 | `--underlying <ETH\|BTC>` + `--type <PUT\|CALL>` + `--strike <usd>` + `--expiry <ts>` | Preferred: select by structure identity. Stable across calls. For multi-leg, pass `--strikes <csv>` instead of `--strike`. |
 | `--strict` | When the selector matches multiple orders, error instead of picking the cheapest. |
 | `--order-index <n>` | Legacy read-only path. Allowed with `--dry-run`; live fills require stable selector flags. |
+
+#### `book check` output
+
+`book check` scans the **same** eligible-order set and uses the **same** matcher
+as `book preview` / `book fill`, so the two commands cannot disagree about what
+the book holds. It recommends `rfq` only when that shared matcher finds nothing
+at the requested expiry.
+
+Roughly half the live book is multi-leg (spreads, flies, rangers). When your
+strike exists only as a *leg* of a live structure, `check` still reports
+`recommendation: "orderbook"` — you can stay on the book and keep orderbook
+credit — and lists the structures in `structureMatches`:
+
+| Field | Meaning |
+| ----- | ------- |
+| `recommendation` | `orderbook` when the book can fill (exact instrument **or** a structure carrying your strike), else `rfq`. |
+| `orderbookOrders` | Exact standalone matches only, best price first. `bestPrice` describes the top of that list. |
+| `availableSize` | Contracts summed across **every** matching maker. One `book fill` resolves one order — see `priceLevels` / `nextStepMaxSize` for what a single command can take. |
+| `priceLevels` | The exact-instrument ladder (`price`, `availableContracts`, `orders`), best price first. Sweeping past the first level means repeating the fill against the next one. |
+| `partialFillAvailable` / `partialSize` | True when your `--size` exceeds what the recommended command fills in one invocation; `partialSize` is that amount. |
+| `structureMatches` | Live multi-leg orders carrying your strike, listed by premium for stable ordering — **not** ranked. `structurePrice` is the premium for the whole structure: not comparable to a vanilla ask, and not comparable to another structure either. `legIndex` / `legCount` tell you whether your strike is a long, short or middle leg; `meetsRequestedSize` answers `--size` per structure. |
+| `nextStep` / `nextStepIsCommand` | When `nextStepIsCommand` is `true`, `nextStep` is a runnable command (with your `--referrer` already baked in). When it is `false`, it is prose describing a manual action — a structure-only result, where you must pick the payoff yourself, or a sell, which the CLI cannot execute. |
+| `nextStepMaxSize` | Contracts `nextStep` can fill in one invocation; `null` when `nextStep` is not a fill command. |
+| `referrer` | The referrer resolved for this invocation and embedded in every emitted command; `null` when none is configured. |
+| `cliExecutable` | `false` for `--direction sell`: the book may have bids, but the CLI executes buys only. `nextStep` then points at the dApp — never at RFQ, which would take a fillable trade off-book. |
+| `liveExpiries` | Every expiry with liquidity for this underlying/type, with vanilla and structure counts. |
+| `didYouMean` | Listed expiries falling on the same UTC date as the one you passed. Never auto-applied — the book carries e.g. both an 03:00Z and an 08:00Z expiry on some dates. |
+
+`check` never picks a structure for you. A spread, fly, condor and ranger that
+share one strike are different products — their whole-structure premiums are
+not rankable against each other, and your strike may sit on a short or middle
+leg, so the "cheapest" one can carry exposure opposite to the vanilla you asked
+about. When your strike exists only inside structures, the top-level `nextStep`
+is prose and each match carries its own runnable command.
+
+Tickers are structure-honest: a 4-strike ranger renders as
+`ETH-28AUG26-2150/2200/2250/2300-RANGER`, never as a vanilla `…-2150-C`.
+
+Multi-leg strike order does not matter — `--strikes 2150,2200` and
+`--strikes 2200,2150` resolve to the same order.
+
+> **Seeing a CLI fill in the Odette web UI.** The UI only renders positions
+> whose `referrer` matches Odette's own address, so pass `--referrer` (or set it
+> in config) or the trade will not show. The UI also reads a different indexer
+> than the SDK, refreshed on a 60-minute cron — the browser pokes it after its
+> own trades, the CLI does not. After a CLI fill, run
+> `curl https://odette.fi/api/update` and reload, or wait for the cron.
+> `thetanuts position list` reads the SDK's indexer and reflects a fill
+> immediately.
+
 | `--collateral <n>` | USDC amount to spend. CLI derives contracts from the order's price. Omit to fill the max available. |
 | `--approve-amount <val>` | If allowance is short. Default: exact. `max` approves MaxUint256 (WARNING printed). |
 | `--yes` | Skip both prompts (approval + fill) |
 | `--dry-run` | Emit `{ approve, fill }` calldata; do not broadcast |
+| `--referrer <address>` | Global flag. Referrer credited a share of the fee. Also `THETANUTS_REFERRER` / config `referrer`. Unset → zero address + stderr warning. |
 
 ### Position
 
@@ -977,6 +1045,8 @@ thetanuts rfq status --ticker ETH-29MAY26-2000-P --since 1779000000   # 0 = fill
 thetanuts config show               # private key masked
 thetanuts config path
 thetanuts config set chainId 8453
+thetanuts config set referrer 0xYourReferrerAddress   # OptionBook fee attribution
+thetanuts config unset referrer
 thetanuts config validate           # checks RPC + key still work
 ```
 

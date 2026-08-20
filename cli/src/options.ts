@@ -17,6 +17,10 @@ export function addGlobalOptions(program: Command): void {
     .option('--chain <name>', 'chain to target (base only — chainId 8453)')
     .option('--rpc-url <url>', 'override the RPC endpoint for the active chain')
     .option(
+      '--referrer <address>',
+      'OptionBook referrer address for fee attribution; also THETANUTS_REFERRER env or config `referrer`'
+    )
+    .option(
       '--private-key <key>',
       'hex private key for signing. WARNING: argv lands in shell history and ps aux — ' +
         'prefer THETANUTS_PRIVATE_KEY env var, or `thetanuts wallet import` to store in the config.'

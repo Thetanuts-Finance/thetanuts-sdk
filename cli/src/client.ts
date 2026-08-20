@@ -8,8 +8,8 @@ import { CliFileKeyStorage } from './rfqKeyStorage.js';
 
 /**
  * Resolution order for any setting (descending priority):
- *   1. CLI global flag (e.g. --rpc-url, --private-key, --chain)
- *   2. Environment variable (THETANUTS_RPC_URL, THETANUTS_PRIVATE_KEY)
+ *   1. CLI global flag (e.g. --rpc-url, --private-key, --chain, --referrer)
+ *   2. Environment variable (THETANUTS_RPC_URL, THETANUTS_PRIVATE_KEY, THETANUTS_REFERRER)
  *   3. Config file at --config or ~/.config/thetanuts/config.json
  *   4. Hardcoded default (see defaults.ts — Base mainnet by default)
  *
@@ -28,6 +28,12 @@ export interface GetClientResult {
   rfqKeysDir: string;
   /** Filesystem-backed storage provider used for RFQ ECDH keys. */
   rfqKeyStorage: CliFileKeyStorage;
+  /**
+   * Resolved OptionBook referrer address, or undefined when none is
+   * configured (the SDK then falls back to the zero address). Commands report
+   * or warn on this instead of reaching into SDK internals.
+   */
+  referrer?: string;
 }
 
 function resolveChainId(opts: OptionValues, cfg: Config | null): number {
@@ -139,6 +145,42 @@ function resolvePrivateKey(opts: OptionValues, cfg: Config | null): string | und
 }
 
 /**
+ * Resolve the OptionBook referrer address that fills are attributed to.
+ * Returns undefined when none is configured; the SDK then uses the zero
+ * address (no referral credit).
+ *
+ * Exported (unlike the other resolvers) so tests can exercise the precedence
+ * chain directly.
+ */
+export function resolveReferrer(opts: OptionValues, cfg: Config | null): string | undefined {
+  let referrer: string | undefined;
+  let source: string | undefined;
+  const fromFlag = opts.referrer as string | undefined;
+  if (fromFlag) {
+    referrer = fromFlag;
+    source = '--referrer flag';
+  } else {
+    const fromEnv = process.env.THETANUTS_REFERRER;
+    if (fromEnv) {
+      referrer = fromEnv;
+      source = 'THETANUTS_REFERRER env var';
+    } else if (cfg?.referrer) {
+      referrer = cfg.referrer;
+      source = 'config file';
+    }
+  }
+  if (referrer === undefined) return undefined;
+  // The SDK re-validates, but fail early so the error names the source the
+  // bad value came from.
+  if (!ethers.isAddress(referrer)) {
+    throw new Error(
+      `Invalid referrer address from ${source}: "${referrer}". Expected a 0x-prefixed 40-char hex address.`
+    );
+  }
+  return referrer;
+}
+
+/**
  * Resolve the directory the RFQ key manager should persist into.
  * Precedence:
  *   1. cfg.rfqKeysDir  (explicit override in config.json)
@@ -166,6 +208,7 @@ export function getClient(opts: OptionValues): GetClientResult {
   const chainId = resolveChainId(opts, cfg);
   const rpcUrl = resolveRpcUrl(opts, cfg, chainId);
   const privateKey = resolvePrivateKey(opts, cfg);
+  const referrer = resolveReferrer(opts, cfg);
   const rfqKeysDir = resolveRfqKeysDir(opts, cfg);
   const rfqKeyStorage = new CliFileKeyStorage(rfqKeysDir);
 
@@ -176,6 +219,7 @@ export function getClient(opts: OptionValues): GetClientResult {
     chainId: chainId as 8453,
     provider,
     signer,
+    referrer,
     keyStorageProvider: rfqKeyStorage,
   });
 
@@ -186,6 +230,7 @@ export function getClient(opts: OptionValues): GetClientResult {
     rpcUrl,
     rfqKeysDir,
     rfqKeyStorage,
+    referrer,
   };
 }
 

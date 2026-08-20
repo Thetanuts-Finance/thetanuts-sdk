@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`book check` recommended RFQ for strikes that were live and fillable on the
+  orderbook.** It matched only `strikes[0]`, so any strike sitting on a
+  structure's second/third/fourth leg was invisible to it — roughly half the
+  live book is multi-leg (spreads, flies, rangers). Following its advice routed
+  traders off the book and forfeited orderbook credit. The inverse also
+  happened: a 4-strike RANGER whose first leg matched was reported as a
+  fillable vanilla, with a vanilla ticker and the structure's premium quoted as
+  a vanilla ask, and the `nextStep` it printed then failed to resolve.
+
+  `check` now shares one matcher with `book preview` / `book fill`
+  (`src/bookMatch.ts`), so the commands cannot disagree about what the book
+  holds. Measured against a live 220-order book: 206 of 384 strike positions
+  were previously unreachable.
+- **`book preview` / `book fill` missed orders whose strikes are stored
+  descending.** Makers do not use a canonical strike order — 19 of 310 live
+  orders store them high-to-low. Matching was element-wise, so
+  `--strikes 64500,65000` reported "No live order matches" while
+  `--strikes 65000,64500` filled the same order. Strike vectors are now
+  compared as multisets; the caller's argument order never reaches the
+  contract, which encodes the signed order's own vector.
+- **`book check --underlying` rejected everything except ETH and BTC**, leaving
+  live SOL/DOGE/XRP/BNB/AVAX orders unreachable. It now resolves any feed
+  configured in `chainConfig.priceFeeds`, matching `book orders` and
+  `book preview`.
+- **`book check --direction sell` returned RFQ unconditionally** without
+  consulting the book. It now scans the sell side and reports what exists,
+  flagging `cliExecutable: false` because the CLI executes buys only.
+- **`book fill --dry-run --output json` emitted two concatenated JSON
+  documents** (preview, then calldata), which no JSON parser accepts. Machine
+  output is now a single object with the preview nested under `preview`. Table
+  output is unchanged.
+- **`book check` claimed an aggregate size was available that its own
+  recommended command could not fill.** `availableSize` summed every matching
+  maker, but `book preview` / `book fill` resolve exactly one order (the
+  cheapest). With 5 contracts at $1 and 5 at $2, `--size 8` reported "fully
+  available" and then filled 5. The ladder is now reported as `priceLevels`,
+  `nextStepMaxSize` states what one invocation can take, and
+  `partialFillAvailable` is keyed off that instead of the aggregate.
+- **`book check` auto-selected between structures whose payoffs are not
+  comparable.** Every structure carrying the requested strike was sorted by
+  whole-structure premium, the first was labelled "cheapest", and its command
+  became the top-level `nextStep` — but a spread, fly, condor and ranger
+  sharing one strike are different products, and the requested strike can be a
+  long, short or middle leg, so following that command could open exposure
+  opposite to the vanilla the caller asked about. Structure matches are now
+  reported as unranked alternatives with `legIndex` / `legCount`, and the
+  top-level `nextStep` is prose (`nextStepIsCommand: false`) telling the caller
+  to pick one.
+- **`book check --direction sell` recommended the orderbook and then handed
+  back an `rfq build` command** — the exact off-book route the orderbook
+  recommendation exists to prevent. Sell-side matches now return a dApp action
+  and never an RFQ command. Per-structure steps on a sell result no longer emit
+  `book preview` commands either: `preview` filters to asks, so it could not
+  preview the bid that matched.
+- **`book check` ignored `--size` for structure-only results**, reporting
+  `recommendation: orderbook` alongside `availableSize: null`. Each structure
+  match now carries `meetsRequestedSize`.
+- **A one-off `--referrer` was dropped from the workflow `book check`
+  generated.** The flag configures only the current process, so copying the
+  recommended preview/fill command silently fell back to address zero. The
+  resolved referrer is now reported as `referrer` and baked into every emitted
+  command. Global flags also appear under a **Global Options** heading in
+  subcommand help (`book fill --help`), instead of only on `thetanuts --help`.
+
+### Added
+
+- **`--referrer <address>` global flag** for OptionBook referral attribution.
+  Previously no flag existed anywhere, so every CLI fill went on-chain with the
+  zero address. Resolution order matches the other settings: `--referrer`, then
+  `THETANUTS_REFERRER`, then `referrer` in the config file. Settable with
+  `thetanuts config set referrer 0x...` and via `thetanuts setup`.
+  `book fill` warns on stderr when no referrer resolves, so the loss is not
+  silent. Unrelated to RFQ's numeric `--referral-id`.
+- **`book check` reports structure liquidity.** New fields: `structureMatches`
+  (live multi-leg orders carrying the requested strike, cheapest first, each
+  with a runnable `nextStep`), `liveExpiries`, `didYouMean` (listed expiries on
+  the same UTC date — never auto-applied, since the book carries both 03:00Z
+  and 08:00Z expiries on some dates), and `cliExecutable`. `recommendation`
+  keeps its existing `orderbook` / `rfq` values, so existing consumers are
+  unaffected.
+- **`book fill` receipts surface `referrer` and `referralFeePaid`** from the
+  `OrderFilled` event, so a fill's attribution can be audited without decoding
+  the receipt on a block explorer.
+- **`scripts/verify-book-fixes.ts`** — end-to-end verifier for the above,
+  deriving every strike and expiry from the live book at run time. All fills
+  run `--dry-run`.
+
+### Changed
+
+- Multi-leg tickers now name the structure:
+  `BTC-28AUG26-67000/68000/69000/70000-RANGER` instead of a bare `-C`/`-P`
+  suffix. Single-leg tickers are unchanged.
+
 ## [0.2.0] — 2026-08-19
 
 Correctness release for the OptionBook and RFQ paths. Several fixes change
