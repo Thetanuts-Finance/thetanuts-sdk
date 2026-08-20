@@ -40,13 +40,15 @@ type AllowedKey =
   | 'chainId'
   | 'rpcUrl'
   | 'privateKey'
-  | 'rfqKeysDir';
+  | 'rfqKeysDir'
+  | 'referrer';
 
 const ALLOWED_KEYS: ReadonlyArray<AllowedKey> = [
   'chainId',
   'rpcUrl',
   'privateKey',
   'rfqKeysDir',
+  'referrer',
 ];
 
 const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
@@ -83,6 +85,12 @@ function parseValue(key: AllowedKey, value: string): Config[AllowedKey] {
     }
     return value;
   }
+  if (key === 'referrer') {
+    if (!ethers.isAddress(value)) {
+      throw new Error(`referrer must be a valid 0x-prefixed Ethereum address`);
+    }
+    return value;
+  }
   // rpcUrl, rfqKeysDir — plain strings
   return value;
 }
@@ -110,6 +118,7 @@ export function register(program: Command): void {
           rpcUrl: cfg.rpcUrl,
           privateKey: maskPrivateKey(cfg.privateKey),
           rfqKeysDir: cfg.rfqKeysDir ?? '<not set>',
+          referrer: cfg.referrer ?? '<not set>',
           path,
         };
         render(masked, { output: opts.output, noColor: !opts.color });
@@ -136,7 +145,7 @@ export function register(program: Command): void {
   grp
     .command('set <key> <value>')
     .description(
-      'Set one config field (chainId, rpcUrl, privateKey, rfqKeysDir). ' +
+      'Set one config field (chainId, rpcUrl, privateKey, rfqKeysDir, referrer). ' +
         'For privateKey, only `-` (read from stdin) is accepted — argv would leak the key via shell history.'
     )
     .action(async (key: string, value: string, _localOpts: unknown, cmd: Command) => {

@@ -72,10 +72,36 @@ async function promptAndValidateRpc(
   }
 }
 
+/**
+ * Optional OptionBook referrer. Empty input leaves it unset; `initial`
+ * pre-fills any existing value so pressing Enter keeps it.
+ */
+async function promptReferrer(initial: string = ''): Promise<string | undefined> {
+  while (true) {
+    const response = await prompts({
+      type: 'text',
+      name: 'referrer',
+      message: 'Referrer address for OptionBook fills (optional, Enter to skip)',
+      initial,
+    });
+    const referrer = response.referrer as string | undefined;
+    if (referrer === undefined) {
+      throw new Error('Setup aborted');
+    }
+    const trimmed = referrer.trim();
+    if (trimmed === '') return undefined;
+    if (!ethers.isAddress(trimmed)) {
+      process.stderr.write('Invalid referrer. Expect a 0x-prefixed 40-char hex address.\n');
+      continue;
+    }
+    return trimmed;
+  }
+}
+
 export function register(program: Command): void {
   program
     .command('setup')
-    .description('Interactive first-run setup: wallet, Base RPC URL')
+    .description('Interactive first-run setup: wallet, Base RPC URL, referrer')
     .action(async (_localOpts: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       try {
@@ -160,6 +186,7 @@ export function register(program: Command): void {
         const chainId = 8453 as const;
         const defaultRpc = existing?.rpcUrl ?? DEFAULT_RPC_URL;
         const rpcUrl = await promptAndValidateRpc(defaultRpc, chainId);
+        const referrer = await promptReferrer(existing?.referrer ?? '');
 
         // Persist. Preserve unrelated fields from any prior config.
         const newCfg: Config = {
@@ -168,6 +195,7 @@ export function register(program: Command): void {
           rpcUrl,
           privateKey: privateKey ?? existing?.privateKey,
           rfqKeysDir: existing?.rfqKeysDir,
+          referrer,
         };
         saveConfig(newCfg, cfgPath);
         process.stdout.write(`Saved to ${cfgPath}\n`);
