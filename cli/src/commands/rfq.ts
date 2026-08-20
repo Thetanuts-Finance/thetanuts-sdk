@@ -15,13 +15,20 @@ import { getClient, requireSigner, type GetClientResult } from '../client.js';
 import { jsonReplacer, render, renderError, buildTxReceiptPayload, fetchEthUsdSafe } from '../output.js';
 import { confirm } from '../confirm.js';
 import { computePayoutSummary, computeScenarios } from '../payout.js';
-import { underlyingSymbolByPriceFeed } from '../format.js';
+import { underlyingSymbolByPriceFeed, tokenSymbolByAddress } from '../format.js';
 import {
   refreshRfqOfferDeadline,
   routeLoadedCliRfqRequest,
   routeCliRfqRequest,
   type CliRfqStructure,
 } from '../rfqImplementation.js';
+import {
+  planPayWith,
+  buildPayWithTransaction,
+  payWithPreview,
+  payWithHint,
+  type PayWithFlags,
+} from '../payWith.js';
 
 // ----------------------------------------------------------------------------
 // RFQ Constants
@@ -605,7 +612,9 @@ async function buildFromFlags(
     if (local.collateralToken === undefined || collateralToken !== 'WETH') {
       const err = new Error(
         'Vanilla CALL RFQs use INVERSE_CALL and require explicit --collateral-token WETH. ' +
-        '--collateral-amount is denominated in WETH, not USDC.'
+        '--collateral-amount is denominated in WETH, not USDC.\n' +
+        "Don't hold WETH? On a BUY request, add --pay-with eth (wraps 1:1, no approval) or " +
+        '--pay-with usdc --pay-amount <n> to fund it in the same transaction.'
       );
       (err as Error & { exitCode?: number }).exitCode = 4;
       throw err;
@@ -619,7 +628,10 @@ async function buildFromFlags(
     }
   } else if (collateralToken !== 'USDC') {
     const err = new Error(
-      'WETH collateral is supported only for a one-strike ETH CALL (INVERSE_CALL); use USDC for this structure'
+      'WETH collateral is supported only for a one-strike ETH CALL (INVERSE_CALL); ' +
+      'use USDC for this structure.\n' +
+      "Holding WETH rather than USDC? On a BUY request, keep the USDC collateral and add " +
+      '--pay-with weth --pay-amount <n> to swap into it in the same transaction.'
     );
     (err as Error & { exitCode?: number }).exitCode = 4;
     throw err;
@@ -842,7 +854,8 @@ function attachBuildFlags(cmd: Command, { allFlagsOptional = false }: { allFlags
 
     .option(
       '--collateral-token <USDC|WETH>',
-      'collateral token (default USDC; explicit WETH required for vanilla ETH CALL / INVERSE_CALL)'
+      'collateral token (default USDC; explicit WETH required for vanilla ETH CALL / INVERSE_CALL). ' +
+        "Fixed by structure, not a free choice. Don't hold it? See --pay-with."
     )
     .option(
       '--deadline-minutes <n>',
@@ -1455,13 +1468,25 @@ async function ensureRequesterPublicKey(result: GetClientResult, req: RFQRequest
   return { ...req, requesterPublicKey: kp.compressedPublicKey };
 }
 
-function previewRequest(req: RFQRequest, ticker?: string, structureType?: StructureType): Record<string, unknown> {
+function previewRequest(
+  req: RFQRequest,
+  ticker?: string,
+  structureType?: StructureType,
+  tokens?: Record<string, { address: string }>
+): Record<string, unknown> {
+  // Collateral is dictated by the structure, so this row is the only place a
+  // user learns which token they need. A bare hex address does not tell them.
+  const collateralSymbol = tokens
+    ? tokenSymbolByAddress(req.params.collateral, tokens)
+    : undefined;
   return {
     action: 'requestForQuotation',
     ...(ticker ? { ticker } : {}),
     ...(structureType ? { structureType } : {}),
     requester: req.params.requester,
-    collateral: req.params.collateral,
+    collateral: collateralSymbol
+      ? `${collateralSymbol} (${req.params.collateral})`
+      : req.params.collateral,
     implementation: req.params.implementation,
     strikes: req.params.strikes.map((s) => s.toString()),
     numContracts: req.params.numContracts.toString(),
@@ -1609,10 +1634,59 @@ function registerRequest(grp: Command): void {
       '--approve-amount <max|n>',
       'amount to ensure-allowance to (default: max = MaxUint256; or a decimal token amount). Only used with --ensure-allowance.'
     )
+    .option(
+      '--pay-with <eth|symbol|addr>',
+      'BUY requests only: fund the collateral from another asset in the same transaction via ' +
+        'OptionFactory.swapAndCall. ' +
+        'Collateral is fixed by structure: single-strike ETH CALL takes WETH, everything else USDC. ' +
+        'For WETH products pay with eth (wraps 1:1, no approval) or usdc; for USDC products pay with ' +
+        'weth, cbbtc, cbdoge, cbxrp, or any routable Base ERC-20 — but NOT eth, which can only ' +
+        'become WETH. Excess is refunded by the contract.'
+    )
+    .option(
+      '--pay-amount <n>',
+      'how much of the --pay-with token to spend (decimal). Required for ERC-20; ' +
+        'auto-sized for "eth" since the wrap is 1:1.'
+    )
+    .option('--slippage-bps <n>', 'swap slippage tolerance in bps (default 100 = 1%)')
+    .option(
+      '--max-price-impact-bps <n>',
+      'refuse to broadcast above this aggregator price impact (default 200 = 2%)'
+    )
+    .option('--force-slippage', 'accept a price impact or slippage above the safety caps')
+    .addHelpText(
+      'after',
+      `
+--pay-with applies to BUY (--direction BUY) requests only. A SELL request
+escrows nothing when it is submitted — the factory pulls collateral at
+settlement — so there is nothing to fund up front.
+
+Collateral is fixed by the structure, not chosen:
+  single-strike ETH CALL  -> WETH   (INVERSE_CALL; --collateral-token WETH required)
+  everything else         -> USDC   (puts, spreads, butterflies, condors)
+
+Examples:
+  # hold USDC, want an ETH call (WETH collateral) — swaps in the same tx
+  $ thetanuts rfq request --underlying ETH --type CALL --strike 4000 --expiry <unix-ts> \\
+      --collateral-token WETH --direction BUY --contracts 0.1 \\
+      --pay-with usdc --pay-amount 500
+
+  # hold native ETH, same product — wraps 1:1, no approval, no aggregator
+  $ thetanuts rfq request ... --collateral-token WETH --pay-with eth
+
+  # hold WETH, want a USDC-collateral put spread
+  $ thetanuts rfq request ... --pay-with weth --pay-amount 0.2
+
+Native ETH can only become WETH. For a USDC-collateral product, wrap to WETH
+first and use --pay-with weth. Add --dry-run to any of these to see the quote,
+the approval target, and the calldata without broadcasting.
+`
+    )
     .action(async (_local: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts() as Record<string, string | undefined> & {
         ensureAllowance?: boolean;
+        forceSlippage?: boolean;
       };
       try {
         const result = getClient(opts);
@@ -1631,22 +1705,103 @@ function registerRequest(grp: Command): void {
         checkOfferDeadlineFuture(requestWithPk);
 
         render(
-          previewRequest(requestWithPk, loaded.ticker, loaded.structureType),
+          previewRequest(
+            requestWithPk,
+            loaded.ticker,
+            loaded.structureType,
+            result.client.chainConfig.tokens
+          ),
           { output: opts.output, noColor: !opts.color }
         );
 
-        // Sell-side allowance advisory / explicit approval
-        await maybeEnsureCollateralAllowance(result, requestWithPk, {
-          ensureAllowance: Boolean(local.ensureAllowance),
-          approveAmount: local.approveAmount,
-          yes: Boolean(opts.yes),
-          dryRun: Boolean(opts.dryRun),
-        });
+        // --pay-with routes the whole request through OptionFactory.swapAndCall,
+        // which funds the collateral from another asset atomically. It replaces
+        // the direct-collateral allowance flow rather than layering on it: the
+        // approval target is the pay-with token, not the collateral.
+        const payWithFlags: PayWithFlags = {
+          payWith: local.payWith,
+          payAmount: local.payAmount,
+          slippageBps: local.slippageBps,
+          maxPriceImpactBps: local.maxPriceImpactBps,
+          forceSlippage: Boolean(local.forceSlippage),
+        };
+        // --pay-with moves the approval target from the collateral token to the
+        // pay-with token, so --ensure-allowance would approve the wrong asset.
+        // Reject the combination instead of silently dropping one of them.
+        if (local.payWith && local.ensureAllowance) {
+          throw new Error(
+            '--ensure-allowance cannot be combined with --pay-with. --ensure-allowance approves ' +
+              `the collateral token, but with --pay-with you spend ${local.payWith} instead — the ` +
+              'CLI handles that approval itself, and native ETH needs none.'
+          );
+        }
+        const payPlan = local.payWith
+          ? await planPayWith(result.client, requestWithPk, payWithFlags)
+          : null;
+
+        if (payPlan) {
+          // Under --dry-run the payload below carries the same preview, so
+          // printing it here too would just duplicate it.
+          if (!opts.dryRun) {
+            render(
+              { payWith: payWithPreview(payPlan) },
+              { output: opts.output, noColor: !opts.color }
+            );
+          }
+        } else {
+          // Nudge, not a gate: the collateral token is dictated by the
+          // structure, so a user short on it has no way to discover that
+          // --pay-with exists unless we say so here.
+          const hint = await payWithHint(result.client, requestWithPk);
+          if (hint) process.stderr.write(`${hint}\n`);
+          // Sell-side allowance advisory / explicit approval
+          await maybeEnsureCollateralAllowance(result, requestWithPk, {
+            ensureAllowance: Boolean(local.ensureAllowance),
+            approveAmount: local.approveAmount,
+            yes: Boolean(opts.yes),
+            dryRun: Boolean(opts.dryRun),
+          });
+        }
 
         if (opts.dryRun) {
-          const encoded = result.client.optionFactory.encodeRequestForQuotation(requestWithPk);
           // Truncate the hex calldata in table mode — see book fill --dry-run
           // for the rationale. JSON consumers still receive the full payload.
+          if (payPlan) {
+            const factory = result.client.optionFactory.contractAddress;
+            const signerAddr = await result.client.getSignerAddress();
+            const built = await buildPayWithTransaction(result.client, requestWithPk, payPlan);
+            const approval =
+              payPlan.token.kind === 'erc20'
+                ? {
+                    token: payPlan.token.address,
+                    spender: factory,
+                    amount: payPlan.payAmount.toString(),
+                    current: (
+                      await result.client.erc20.getAllowance(
+                        payPlan.token.address,
+                        signerAddr,
+                        factory
+                      )
+                    ).toString(),
+                  }
+                : null;
+            render(
+              {
+                dryRun: true,
+                payWith: payWithPreview(payPlan),
+                approval,
+                request: {
+                  to: built.to,
+                  data: built.data,
+                  value: built.value.toString(),
+                  minAmountOut: built.minAmountOut?.toString() ?? null,
+                },
+              },
+              { output: opts.output, noColor: !opts.color, truncate: true }
+            );
+            return;
+          }
+          const encoded = result.client.optionFactory.encodeRequestForQuotation(requestWithPk);
           render(
             { dryRun: true, request: { to: encoded.to, data: encoded.data, value: '0' } },
             { output: opts.output, noColor: !opts.color, truncate: true }
@@ -1660,6 +1815,35 @@ function registerRequest(grp: Command): void {
         });
         if (!ok) process.exit(3);
 
+        // --pay-with signs and sends its transaction directly rather than
+        // through an SDK write method, so the network assertion every other
+        // write path inherits has to be explicit here. `ensureAllowance` below
+        // does not cover it either — it only asserts when it actually submits
+        // an approval, and returns early when the allowance already suffices.
+        // The native path is where this bites hardest: it makes no on-chain
+        // read at all, and WETH shares one canonical address across several
+        // OP-stack chains, so a misconfigured RPC could send ETH to a codeless
+        // address on the wrong chain and strand it.
+        if (payPlan) await result.client.assertNetwork();
+
+        // The pay-with approval is a mined transaction, so it must happen
+        // before the deadline is stamped — otherwise the window it promises is
+        // already partly spent by the time the RFQ lands. The factory pulls the
+        // pay-with token itself, so the approval target is the OptionFactory;
+        // approving the router would do nothing.
+        if (payPlan && payPlan.token.kind === 'erc20') {
+          const approveReceipt = await result.client.erc20.ensureAllowance(
+            payPlan.token.address,
+            result.client.optionFactory.contractAddress,
+            payPlan.payAmount
+          );
+          if (approveReceipt) {
+            process.stderr.write(
+              `Approved ${payPlan.token.symbol} → OptionFactory (${approveReceipt.hash}).\n`
+            );
+          }
+        }
+
         // ERC-20 approval + human confirmations can consume most or all of the
         // original 45-second window. Refresh again at the final broadcast
         // boundary so the mined RFQ gives makers the full requested window.
@@ -1669,7 +1853,23 @@ function registerRequest(grp: Command): void {
           submittedAt,
           loaded.deadlineSeconds
         );
-        const receipt = await result.client.optionFactory.requestForQuotation(requestToSubmit);
+        let receipt;
+        if (payPlan) {
+          // Quote fresh here, after the prompt: a route fetched before the
+          // confirmation would carry a stale price and a spent deadline.
+          const built = await buildPayWithTransaction(result.client, requestToSubmit, payPlan);
+          const signer = result.client.requireSigner();
+          const tx = await signer.sendTransaction({
+            to: built.to,
+            data: built.data,
+            value: built.value,
+          });
+          const mined = await tx.wait();
+          if (!mined) throw new Error('swapAndCall transaction produced no receipt.');
+          receipt = mined;
+        } else {
+          receipt = await result.client.optionFactory.requestForQuotation(requestToSubmit);
+        }
         const quotationId = extractQuotationIdFromReceipt(
           receipt.logs,
           result.client.optionFactory.contractAddress
