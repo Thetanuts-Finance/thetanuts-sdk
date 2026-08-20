@@ -40,6 +40,23 @@ Thumbs.db
 # MCP configuration (contains local paths)
 .mcp.json
 
+# CLI PRD (working doc, not for commit)
+cli/PRD.md
+
+# CLI dev scaffold (not shipped)
+cli/templates/
+
+# Agent/tooling working directories
+.claude/
+.superstack/
+
+# Local working notes and agent handoffs — never commit.
+# fable_5_fix.md is a security-triage log referencing unfixed vulnerabilities.
+/fable_5_fix.md
+/IRON_CONDOR_PRICING_FIX.md
+/cli/rfq_design.md
+/codex_bugs.md
+
 # Package manager locks (uncomment the one you're not using)
 # yarn.lock
 # pnpm-lock.yaml
