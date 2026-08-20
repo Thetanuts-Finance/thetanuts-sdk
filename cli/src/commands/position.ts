@@ -1138,7 +1138,9 @@ function registerReads(grp: Command): void {
                 ? new Date(Number(p.entryTimestamp) * 1000).toISOString().slice(0, 19) + 'Z'
                 : '—';
             return {
-              id: p.id,
+              // `id` is optionAddress + "-" + side, so printing both blows the
+              // table past terminal width and wraps pnl under the first column.
+              // JSON output below still carries `id` for script stability.
               optionAddress: p.optionAddress,
               source: p.sources.join('+'),
               side: p.side,

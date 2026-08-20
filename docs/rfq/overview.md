@@ -123,16 +123,31 @@ await client.optionFactory.swapAndCall({
   swapDstToken,      // token expected as collateral / escrow
   swapSrcAmount,     // amount of source token to swap
   swapCallData,      // encoded swap calldata from the aggregator
-  call,              // encoded call to OptionFactory (e.g. requestForQuotation)
+  selfCallData,      // encoded call to OptionFactory (e.g. requestForQuotation)
 });
 ```
 
 The aggregator's calldata must be quoted client-side; the SDK passes it through unchanged.
+The CLI wraps this whole flow behind `rfq request --pay-with` — see
+[Paying with a Different Token](pay-with.md).
+
+Two constraints are easy to miss:
+
+- **The factory executes the swap, not the caller.** Approve the `OptionFactory`
+  (not the router) for `swapSrcToken`, and build the aggregator route with
+  `sender` and `recipient` both set to the factory. A route built for the user's
+  wallet delivers the output to the wrong address and reverts.
+- **Native ETH only reaches WETH.** Pass `swapRouter: ZeroAddress` with the ETH
+  in `msg.value` and the factory wraps it 1:1 — `swapSrcAmount` is not read on
+  that path. There is no native-ETH swap: supplying `msg.value` alongside a
+  router reverts `NativeTokenNotAllowedForSwap`. To fund non-WETH collateral
+  from ETH, wrap to WETH first and swap from there.
 
 ---
 
 ## See Also
 
 - [Create an RFQ](create-rfq.md) — Step-by-step guide to submitting your first RFQ
+- [Paying with a Different Token](pay-with.md) — Fund collateral from an asset you already hold
 - [RFQ Lifecycle](lifecycle.md) — Detailed phases, collateral handling, and settlement paths
 - [Multi-Leg Structures](multi-leg-structures.md) — Spreads, butterflies, and condors with examples
