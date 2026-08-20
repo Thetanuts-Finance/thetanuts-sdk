@@ -9,6 +9,9 @@ RFQ uses the same cash-settled implementation contracts as OptionBook (PUT, INVE
 - Install the SDK: `npm install @thetanuts-finance/thetanuts-client`
 - A funded wallet on Base mainnet (chain ID 8453)
 - For **SELL positions**: USDC (or WETH/cbBTC) approved for the OptionFactory
+- For **BUY positions**: enough of the collateral token to cover the escrowed
+  `reservePrice` — or, in the CLI, fund it from another asset in the same
+  transaction with [`--pay-with`](pay-with.md)
 
 ---
 

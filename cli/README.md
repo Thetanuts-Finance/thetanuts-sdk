@@ -2,7 +2,7 @@
 
 TypeScript CLI for [Thetanuts Finance V4](https://thetanuts.finance) options on Base. Browse the orderbook, request quotes, fill orders, manage positions, and run on-chain operations — from a terminal or as a JSON API for scripts and agents.
 
-> **Warning:** This is early, experimental software. Use at your own risk and do not use with large amounts of funds. APIs, commands, and behavior may change without notice. Always run `--dry-run` first, start with a dedicated wallet (not your main funds wallet), and verify transactions before confirming.
+> **Disclaimer:** This software interacts with live contracts and real funds on Base mainnet. Use it at your own risk. Run `--dry-run` first and verify transactions before confirming.
 
 > **v0.2.0 — cash-settled USDC book buys only.** `book orders`, `book preview`, and `book fill` exclude physical implementations, maker bids, and non-USDC collateral. RFQ covers the wider direction/structure workflow documented below, including WETH `INVERSE_CALL` for vanilla ETH calls. See [CHANGELOG.md](./CHANGELOG.md) — 0.2.0 corrects OptionBook premium/contract scaling and restricts `book fill --order-index` to `--dry-run`.
 
@@ -482,6 +482,10 @@ Vanilla ETH calls use `INVERSE_CALL`, so they require WETH instead:
 thetanuts wallet approve --token WETH --for optionFactory --amount 0.001
 ```
 
+**Don't hold the collateral token?** Skip this step and use `--pay-with` on
+`rfq request` — it funds the collateral from an asset you already hold, in the
+same transaction. See [Paying with a different token](#paying-with-a-different-token).
+
 ### Step 3 — Discover what's tradeable
 
 ```bash
@@ -908,6 +912,11 @@ Full requester lifecycle in 9 subcommands: `quote` → `build` → `request` →
 | `rfq build` | No | Construct + validate the RFQ off-chain. Inspect calldata, payout, structure. Save with `--out`. |
 | `rfq request` | **Yes — gas + escrow** | Broadcasts on-chain. Returns a `quotationId`. |
 
+**Collateral is fixed by structure.** Single-strike ETH CALL takes WETH
+(`INVERSE_CALL`, explicit `--collateral-token WETH` required); every other
+structure takes USDC. If you don't hold it, see
+[Paying with a different token](#paying-with-a-different-token).
+
 **Multi-leg examples:**
 
 ```bash
@@ -979,6 +988,65 @@ thetanuts config path
 thetanuts config set chainId 8453
 thetanuts config validate           # checks RPC + key still work
 ```
+
+## Paying with a different token
+
+Which collateral an RFQ takes is decided by the structure, not by you:
+
+| Structure | Collateral |
+| --- | --- |
+| Single-strike ETH CALL (`INVERSE_CALL`) | **WETH** — `--collateral-token WETH` required |
+| Puts, spreads, butterflies, condors | **USDC** |
+
+If you don't hold that token, `--pay-with` funds it atomically via
+`OptionFactory.swapAndCall`. It applies to **BUY requests only** — a `--direction
+SELL` request escrows nothing when submitted (the factory pulls collateral at
+settlement), so there is nothing to fund up front:
+
+| Collateral | Pay with | Not |
+| --- | --- | --- |
+| **WETH** | `eth` (wraps 1:1, no approval), `usdc`, `cbbtc`, `cbdoge`, `cbxrp` | `weth` (already the collateral) |
+| **USDC** | `weth`, `cbbtc`, `cbdoge`, `cbxrp` | `eth`, `usdc` |
+
+```bash
+# Hold USDC, want an ETH call (WETH collateral)
+thetanuts rfq request \
+  --underlying ETH --type CALL --strike 4000 --expiry 1787904000 \
+  --collateral-token WETH --direction BUY --contracts 0.1 \
+  --pay-with usdc --pay-amount 500 --dry-run
+
+# Hold native ETH, same product — 1:1 wrap, no approval, no aggregator
+thetanuts rfq request ... --collateral-token WETH --pay-with eth
+
+# Hold WETH, want a USDC-collateral put spread
+thetanuts rfq request ... --pay-with weth --pay-amount 0.2
+```
+
+**Native ETH can only become WETH.** There is no ETH → USDC path: the wrap path
+only reaches a token with a payable `receive()`, and sending ETH alongside a
+router reverts `NativeTokenNotAllowedForSwap`. Wrap to WETH first, then use
+`--pay-with weth`.
+
+Notes:
+
+- `--pay-amount` is required for ERC-20, optional for `eth` (the 1:1 wrap sizes
+  itself). Excess is refunded by the contract.
+- The approval goes to the **OptionFactory**, not the swap router — the factory
+  is what calls the router. The CLI handles it and `--dry-run` prints the target.
+- Rails: `--slippage-bps` (default 100), `--max-price-impact-bps` (default 200),
+  `--force-slippage` to override. All of them, plus your wallet balance, are
+  checked before any approval is broadcast, so a rejected route costs no gas.
+  The router is verified against `authorizedRouters` on-chain before you sign,
+  and the route is re-quoted at broadcast.
+- The `minReceived` you approve is the minimum that is enforced: the re-quote at
+  broadcast can raise it but never lower it, and the aggregator's calldata is
+  decoded and checked against the quoted trade — tokens, amount, recipient, and
+  the minimum the router itself enforces — before anything is signed.
+- Cannot be combined with `--ensure-allowance`, which targets the collateral
+  token rather than what you actually spend here.
+- Base only. `book fill` does not support this yet.
+
+Full reference: [docs/rfq/pay-with.md](../docs/rfq/pay-with.md).
 
 ## Common Workflows
 

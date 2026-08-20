@@ -22,6 +22,7 @@
 
 * [Overview](rfq/overview.md)
 * [Create an RFQ](rfq/create-rfq.md)
+* [Paying with a Different Token](rfq/pay-with.md)
 * [Multi-Leg Structures](rfq/multi-leg-structures.md)
 * [RFQ Lifecycle](rfq/lifecycle.md)
 * [Early Settlement](rfq/early-settlement.md)
