@@ -4,7 +4,7 @@ TypeScript CLI for [Thetanuts Finance V4](https://thetanuts.finance) options on 
 
 > **Disclaimer:** This software interacts with live contracts and real funds on Base mainnet. Use it at your own risk. Run `--dry-run` first and verify transactions before confirming.
 
-> **v0.3.1 — cash-settled USDC book buys only.** `book orders`, `book preview`, and `book fill` exclude physical implementations, maker bids, and non-USDC collateral. `book check` now recognizes live multi-leg structure liquidity and preserves referrer attribution in its generated workflow. RFQ covers the wider direction/structure workflow documented below, including WETH `INVERSE_CALL` for vanilla ETH calls. See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
+> **v0.4.0 — cash-settled USDC book buys only.** `book orders`, `book preview`, and `book fill` exclude physical implementations, maker bids, and non-USDC collateral. `book check` now recognizes live multi-leg structure liquidity and preserves referrer attribution in its generated workflow. RFQ covers the wider direction/structure workflow documented below, including WETH `INVERSE_CALL` for vanilla ETH calls, and `rfq request --pay-with` now funds that collateral from any token you already hold in the same transaction. See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 
 ## Install
 

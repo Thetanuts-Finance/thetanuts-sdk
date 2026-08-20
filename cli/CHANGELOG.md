@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-21
+
+### Added
+
+- **`rfq request --pay-with`** — fund an RFQ's collateral from an asset you
+  already hold, in the same transaction, via `OptionFactory.swapAndCall`.
+  - `--pay-with eth` wraps native ETH to WETH 1:1 inside the factory. No
+    approval, no aggregator. **WETH is the only destination native ETH can
+    reach** — the wrap path can only fund a token with a payable `receive()`,
+    and the swap path reverts `NativeTokenNotAllowedForSwap` as soon as
+    `msg.value > 0`. So there is no ETH -> USDC route through `swapAndCall`; the
+    CLI rejects it up front and points at `--pay-with weth` instead of letting
+    the revert surface.
+  - `--pay-with <symbol|address> --pay-amount <n>` swaps through KyberSwap.
+    The approval target is the **OptionFactory**, not the router — the factory
+    is what calls the router — and `--dry-run` prints that explicitly.
+  - **BUY requests only.** A long request escrows `reservePrice` when it is
+    submitted, and that escrow is what the swap funds. A SELL request escrows
+    nothing at request time — the factory pulls collateral from the seller at
+    settlement — so there is nothing to fund up front, and the CLI refuses the
+    combination rather than paying swap fees for a round-trip.
+  - Sizing: the required deposit is the request's `reservePrice`, not a
+    recomputation — the request's own `collateralAmount` is always 0. A quote
+    that cannot cover it is refused before signing, with a suggested
+    `--pay-amount`. Excess is refunded by the contract.
+  - Rails: `--slippage-bps` (default 100, capped at 500 without an override),
+    `--max-price-impact-bps` (default 200), `--force-slippage` to override both.
+    Every rail — plus the wallet's balance of the pay-with token — is evaluated
+    while the plan is built, before any approval is broadcast, so a rejected
+    route costs no gas. The router is checked against `authorizedRouters`
+    on-chain before anything is signed. A route the
+    aggregator returns without USD pricing is refused rather than treated as
+    zero impact — that is the case the rail exists for. Both the price-impact
+    and min-output gates re-run against the refreshed quote at broadcast.
+  - `--ensure-allowance` is rejected alongside `--pay-with`: the approval target
+    moves to the pay-with token, so the flag would approve the wrong asset.
+  - The route is quoted fresh at the broadcast boundary, never carried through
+    the confirmation prompt, and re-checked against the required deposit in
+    case the price moved while the prompt was open. Covering the deposit is not
+    on its own treated as consent to the rate: the minimum shown at the prompt
+    is carried across the re-quote and enforced, so a refreshed route that
+    guarantees less is refused rather than broadcast. That figure includes a
+    0.5% re-quote allowance, so ordinary price movement does not abort the run.
+  - The aggregator's executable calldata is decoded and bound to the quoted
+    trade before it is signed — source and destination token, amount,
+    destination receiver, and the `minReturnAmount` the router actually
+    enforces. The decoded minimum, not the response's plaintext `amountOut`, is
+    what the floor above is measured against, so an aggregator response cannot
+    report one price and encode another. Routes carrying a router-level fee, or
+    using an entrypoint the CLI cannot decode, are refused.
+  - The configured chain is asserted against the RPC before the approval and
+    the swap are broadcast. `--pay-with` signs its transaction directly rather
+    than through an SDK write method, which is where that check normally lives.
+  - Entirely CLI-side: it builds calldata with the SDK's existing
+    `encodeSwapAndCall` and sends it with the wallet's own signer, so no SDK
+    change is required. The contract rules, the aggregator client, the router
+    calldata decoder, and the Kyber router address all live in
+    `cli/src/swapAndCall.ts`.
+
+### Known limitations
+
+- `--pay-with` is BUY-side only, for the reason above: a short RFQ has no
+  request-time deposit for a swap to fund.
+- `--pay-with` covers `rfq request` only, by design. `book fill` premiums are
+  USDC-only in this CLI, so the friction is far smaller than on RFQ, where the
+  collateral token is dictated by the structure (every single-strike ETH CALL is
+  a WETH-collateralized `INVERSE_CALL`). `OptionBook.swapAndFillOrder` is also
+  `nonpayable`, so it cannot accept native ETH at all — the user who would
+  benefit most is the one it cannot serve. Revisit if the book ever lists
+  non-USDC orders.
+- Should that happen, note that `swapAndFillOrder` is **not** a reuse of this
+  code. Verified against the deployed OptionBook source: it performs no
+  destination-side balance check and pulls the premium from the taker's wallet,
+  so its route needs `recipient = taker` while this one needs
+  `recipient = factory`. Getting that backwards strands the swap output in the
+  book without reverting. Details in the `cli/src/swapAndCall.ts` header.
+- `swapAndCall` also accepts `settleQuotationEarly` /
+  `settleQuotationEarlyByOrderBook` as its self-call, so `rfq accept` could
+  fund a top-up the same way. Not implemented: the contract requires the
+  requester to be long, with no current winner, and a deposit already short of
+  the target, which means quoting for a computed delta rather than a
+  user-supplied amount.
+
+## [0.3.1] — 2026-08-20
+
+### Docs
+
+- README version banner updated to describe the 0.3.0 `book check` and referrer
+  behaviour. No runtime change.
+
+## [0.3.0] — 2026-08-20
+
 ### Fixed
 
 - **`book check` recommended RFQ for strikes that were live and fillable on the
