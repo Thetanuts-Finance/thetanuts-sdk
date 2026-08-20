@@ -227,9 +227,21 @@ export async function planPayWith(
   const requiredDeposit = await requiredRequesterDeposit(client, req);
 
   if (requiredDeposit <= 0n) {
+    // Do not suggest dropping --pay-with here. A BUY with reservePrice 0 escrows
+    // nothing, so it is not a request that would succeed without the flag — it
+    // is a request with no price, which no maker can fill. The fix is to give it
+    // one, and the reason it has none is almost always the sizing path: the MM
+    // ask is only fetched for --collateral-amount, never for --contracts.
     throw new Error(
-      'This request has a zero requester deposit, so there is nothing to fund. ' +
-        'Drop --pay-with and submit it directly.'
+      'This request has a reserve price of 0, so the factory would escrow nothing when it is ' +
+        'submitted and --pay-with has nothing to fund.\n' +
+        'A BUY request escrows reservePrice (= contracts x premium per contract) as the maximum ' +
+        'total premium it will pay. The CLI only fetches the market maker\'s ask to fill that in ' +
+        'when you size with --collateral-amount; sizing with --contracts leaves it at 0 unless ' +
+        'you set it yourself.\n' +
+        'Either pass --reserve-price <premium per contract, in collateral units>, or size with ' +
+        '--collateral-amount <n> and let the CLI price it. Submitting at 0 without --pay-with ' +
+        'would not help: a zero-reserve request cannot be filled.'
     );
   }
 

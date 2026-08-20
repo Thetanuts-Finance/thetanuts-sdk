@@ -88,7 +88,24 @@ calldata without broadcasting.
 The required deposit is the request's `reservePrice` — the maximum total the
 factory escrows from a buyer. If the quote cannot cover it after slippage, the
 CLI refuses before you sign and suggests a larger `--pay-amount` rather than
-letting the transaction revert on-chain.
+letting the transaction revert on-chain. Take that suggestion rather than
+computing an amount yourself; excess is refunded either way.
+
+### "Reserve price of 0"
+
+`reservePrice` is `contracts x premium per contract`, and `--pay-with` refuses a
+request whose reserve is 0 — there is no escrow for a swap to fund.
+
+This catches people out because of **how the trade was sized**, not because of
+anything to do with `--pay-with`:
+
+- `--collateral-amount <n>` fetches the market maker's live ask and fills the
+  reserve in for you.
+- `--contracts <n>` does **not**. It leaves `reservePrice` at 0 unless you also
+  pass `--reserve-price <premium per contract>`.
+
+Submitting without `--pay-with` is not the workaround: a zero-reserve request
+offers makers nothing and will not be filled.
 
 ## Safety rails
 
