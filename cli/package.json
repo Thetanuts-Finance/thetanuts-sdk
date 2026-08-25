@@ -1,6 +1,6 @@
 {
   "name": "@thetanuts-finance/cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Thetanuts Finance V4 command-line interface",
   "type": "module",
   "main": "dist/index.js",

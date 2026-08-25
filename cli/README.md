@@ -794,7 +794,7 @@ thetanuts wallet transfer --token USDC --to 0xRecipient --amount 5.50
 | `--token <sym>` | Token symbol (USDC for trading) |
 | `--spender <addr>` | Explicit spender address |
 | `--for <name>` | Alternative: `optionBook` or `optionFactory` |
-| `--amount <max\|n>` | `max` approves MaxUint256 (WARNING printed). Otherwise a decimal. |
+| `--amount <max\|n>` | **Required.** A decimal amount, or `max` for MaxUint256 (WARNING printed). No default — as of 0.5.0 omitting it is an error rather than a silent unlimited approval. |
 | `--yes` | Skip confirmation prompt |
 | `--dry-run` | Emit calldata, do not broadcast |
 
@@ -1162,7 +1162,9 @@ fi
 - **Fill identity.** A successful book fill also renders the created option address, ticker, buyer/seller, and an on-chain `position info` command; `position list` may lag briefly while the indexer catches up.
 - **`--yes` skips prompts.** Use it in CI / automation only.
 - **Approvals are never bundled silently with fills** — they require their own confirmation.
-- **`max` approvals require explicit opt-in.** `--approve-amount max` (or `wallet approve --amount max`) prints a stderr WARNING and cannot be combined with key-disclosure flags.
+- **`max` approvals require explicit opt-in.** `--approve-amount max` (or `wallet approve --amount max`) prints a stderr WARNING and cannot be combined with key-disclosure flags. `wallet approve --amount` has no default, and `rfq request --ensure-allowance` approves exactly the escrowed `reservePrice` on a BUY. A SHORT RFQ still defaults to `max`: the settle-time collateral draw is not knowable at request time, and under-approving it reverts at settlement after a maker has committed.
+- **`--yes` is not consent to destroy a key.** `wallet create` and `wallet import` refuse `--yes` when the config already holds a private key (exit 2) — the old key is unrecoverable and the new wallet's mnemonic is not persisted. Use `wallet create --force` to overwrite deliberately, or confirm interactively. Same rule as `--reveal-key`, which also refuses `--yes`.
+- **The private key is stored unencrypted**, protected only by `0600` file permissions. That stops other users on the machine; it does not stop another process running as you. Config writes are atomic (temp file + rename), so an interrupted write cannot truncate the file that holds it.
 - **`keys export`/`import` refuse stdin/stdout** to prevent private-key material from landing in shell history or pipe targets.
 - **HTTPS-only RPC.** The CLI rejects non-HTTPS RPC URLs unless they point at localhost.
 

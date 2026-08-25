@@ -33,6 +33,45 @@ program.configureHelp({ showGlobalOptions: true });
 addGlobalOptions(program);
 registerCommands(program);
 
+// Commander exits 1 for every parse failure, but the CLI documents exit 2 as
+// "usage error (bad flags, missing required arg)" and reserves 1 for generic
+// runtime failures — network, RPC, contract revert. Without this mapping,
+// automation cannot tell a typo'd flag apart from a reverted transaction.
+//
+// The set is Commander's own error codes for input the user got wrong. Anything
+// unrecognised keeps Commander's exit code rather than being coerced, so a new
+// error code in a future Commander release fails visibly instead of silently
+// reporting itself as a usage error.
+const USAGE_ERROR_CODES = new Set([
+  'commander.missingArgument',
+  'commander.missingMandatoryOptionValue',
+  'commander.optionMissingArgument',
+  'commander.unknownOption',
+  'commander.unknownCommand',
+  'commander.invalidArgument',
+  'commander.excessArguments',
+  'commander.conflictingOption',
+  // A group command invoked with no subcommand (`thetanuts wallet`, or bare
+  // `thetanuts`) prints help via help({ error: true }), which throws
+  // `commander.help` with exitCode 1. That is an incomplete command — a usage
+  // error by the README's own definition — not a runtime failure. Safe to map
+  // here because successful `--help` uses the distinct `commander.helpDisplayed`
+  // code with exitCode 0, which the guard below returns on before reaching this.
+  'commander.help',
+]);
+
+// exitOverride is per-Command and is NOT inherited by subcommands, so walk the
+// whole tree — `thetanuts wallet approve` is a grandchild of the root command.
+function mapUsageExitCodes(cmd: Command): void {
+  cmd.exitOverride((err) => {
+    // --help and --version are successful terminations, not failures.
+    if (err.exitCode === 0) process.exit(0);
+    process.exit(USAGE_ERROR_CODES.has(err.code) ? 2 : err.exitCode);
+  });
+  for (const sub of cmd.commands) mapUsageExitCodes(sub as Command);
+}
+mapUsageExitCodes(program);
+
 program.parseAsync(process.argv).catch((err) => {
   // Try to use the structured error renderer if we can detect --json-errors,
   // otherwise print just the message — never the stack
