@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-25
+
+Wallet-security release. Three changes are **breaking** — they turn silent,
+irreversible defaults into explicit choices. See *Migration* below.
+
+### Security
+
+- **Config writes are now atomic.** `saveConfig` writes to a temp file in the
+  same directory and `rename(2)`s it into place, matching the pattern already
+  used by the RFQ key storage. Previously an in-place `writeFileSync` could be
+  interrupted by a crash, `SIGINT`, or `ENOSPC` and leave a truncated
+  `config.json`. Because `wallet create` discards the BIP-39 mnemonic and
+  declares the config file the user's only copy of the key, a torn write there
+  permanently destroyed funds. A reader now always sees either the complete old
+  file or the complete new one.
+  - Side effect, intentional: a symlink at the config path is now **replaced**
+    rather than written through. This closes the write-side gap left by
+    `loadConfig`'s `O_NOFOLLOW` read. Users who symlink their config from a
+    dotfiles repo will find the link severed after the next write — the config
+    becomes a regular file and the dotfile copy goes stale.
+  - Not covered: there is no `fsync` before the rename. Process-level crashes
+    are fully handled; a kernel panic or power loss during the write is not.
+
+- **`wallet approve` no longer defaults to an unlimited allowance.**
+  `--amount` is now required. It previously defaulted to `max`, so
+  `thetanuts wallet approve --token USDC --for optionBook --yes` granted
+  `MaxUint256` to the spender with no interactive gate — the warning went to
+  stderr and `--yes` auto-passed the confirm. `--amount max` still works and
+  still warns.
+
+- **`rfq request --ensure-allowance` approves the exact escrow on BUY.**
+  Omitting `--approve-amount` on a BUY now approves exactly `reservePrice`,
+  the amount the OptionFactory escrows at request time, matching `book fill`
+  and `position close`. SHORT deliberately still defaults to `MaxUint256`: the
+  settle-time collateral draw is a structure-dependent max-loss figure that is
+  not carried on the request (`params.collateralAmount` is hardcoded to 0 by
+  every SDK builder, and the send path rejects any nonzero value), so there is
+  no exact amount to approve. Under-approving a SHORT reverts at settlement
+  *after* a maker has committed, which is worse than a broad allowance.
+  `--approve-amount <n>` remains available to cap it.
+
+- **`--yes` is no longer consent to destroy an existing private key.**
+  `wallet create` and `wallet import` now exit 2 when the config already holds
+  a key and `--yes` is passed, instead of overwriting it. The old key has no
+  other copy on disk and the replacement wallet's mnemonic is not persisted, so
+  a habitual `--yes` in a script silently burned funds with only a stderr line
+  to show for it. `wallet create --force` overwrites deliberately;
+  `wallet import` is interactive by nature and has no `--force`. This matches
+  the existing rule that `--reveal-key` refuses `--yes`.
+
+### Added
+
+- `cli/tests/approvalDefaults.test.ts` — regression coverage for the
+  `--ensure-allowance` target defaults and for `saveConfig` atomicity,
+  permissions, and symlink replacement. No existing test touched these paths.
+
+### Migration
+
+- `thetanuts wallet approve --token X --for Y` → add an explicit
+  `--amount <n>`, or `--amount max` to keep the previous behavior.
+- `thetanuts wallet create --yes` / `wallet import --yes` over an existing key
+  → use `wallet create --force`, or drop `--yes` and confirm interactively.
+- Scripts that relied on the leftover unlimited allowance from a BUY
+  `rfq request --ensure-allowance` for a **subsequent** transaction must now
+  pass `--approve-amount max` explicitly.
+
+### Known gaps
+
+- The private key is still stored **unencrypted** in `config.json`, protected
+  only by `0600` permissions. That stops other users on the machine; it does
+  not stop another process running as you (for example a malicious postinstall
+  script in an unrelated project). An encrypted keystore or OS-keychain option
+  is not yet implemented.
+- `config set privateKey` and `config unset privateKey` still overwrite or
+  delete the stored key with no confirmation.
+
 ## [0.4.0] — 2026-08-21
 
 ### Added

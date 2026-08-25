@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 /**
  * Persisted CLI configuration. Stored at `~/.config/thetanuts/config.json` by
@@ -80,15 +81,38 @@ export function saveConfig(cfg: Config, configPath?: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
-  // `mode: 0o600` on writeFileSync is honored only on file creation. Force
-  // tight perms unconditionally so we tighten any pre-existing loose mode.
-  // Same applies to the parent directory
+
+  // Write atomically: temp file in the same directory, then rename(2).
+  //
+  // `wallet create` discards the BIP-39 mnemonic and tells the user this file
+  // is now the ONLY copy of their key. A crash, SIGINT, or ENOSPC partway
+  // through an in-place writeFileSync would leave a truncated config and
+  // permanently destroy that key. rename(2) within a filesystem is atomic, so
+  // a reader sees either the old file or the new one — never a partial write.
+  //
+  // Writing to a fresh temp path also means we never follow a symlink planted
+  // at `p`: rename replaces the link itself rather than writing through it,
+  // which closes the write-side gap left by the O_NOFOLLOW read in loadConfig.
+  const tempPath = `${p}.${randomBytes(8).toString('hex')}.tmp`;
   try {
-    fs.chmodSync(p, 0o600);
-  } catch {
-    // ignore (Windows / unsupported FS)
+    fs.writeFileSync(tempPath, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+    // `mode` on writeFileSync is honored only at creation and is masked by
+    // umask. Force it before the rename so the key is never briefly readable.
+    try {
+      fs.chmodSync(tempPath, 0o600);
+    } catch {
+      // ignore (Windows / unsupported FS)
+    }
+    fs.renameSync(tempPath, p);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // ignore cleanup errors — the original file is still intact
+    }
+    throw err;
   }
+
   try {
     fs.chmodSync(dir, 0o700);
   } catch {

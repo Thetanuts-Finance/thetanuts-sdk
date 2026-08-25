@@ -320,7 +320,7 @@ export function register(program: Command): void {
         'The private key is NEVER printed unless --reveal-key is passed (with confirmation). ' +
         'For a one-time backup, use --reveal-key or copy the config file to a secure location.'
     )
-    .option('--force', 'overwrite an existing private key without prompting', false)
+    .option('--force', 'overwrite an existing private key (required when one exists; --yes is not accepted as consent)', false)
     .option(
       '--reveal-key',
       'after saving, display the private key and BIP-39 mnemonic on stdout. Will appear in scrollback — pipe to a secure destination.',
@@ -343,10 +343,26 @@ export function register(program: Command): void {
         const path = (opts.config as string | undefined) ?? defaultConfigPath();
         const existing = loadConfig(path);
         if (existing?.privateKey && !local.force) {
+          // Deliberately NOT passing `yes: opts.yes`. Overwriting destroys the
+          // only copy of an existing key (the mnemonic was never persisted),
+          // and the replacement wallet's own mnemonic is discarded too — so a
+          // habitual `--yes` in a script silently burned the user's funds with
+          // nothing but a stderr line to show for it. Key destruction now
+          // requires the dedicated `--force` flag, the same way `--reveal-key`
+          // refuses to accept `--yes` as consent for disclosure.
+          if (opts.yes) {
+            process.stderr.write(
+              `Config at ${path} already has a private key (${maskPrivateKey(existing.privateKey)}).\n` +
+                '`--yes` does not authorize overwriting an existing key: the old key is unrecoverable ' +
+                'and the new wallet\'s mnemonic is not persisted. Re-run with `--force` to overwrite ' +
+                'deliberately, or point --config at a different path.\n'
+            );
+            process.exit(2);
+          }
           const ok = await confirm(
             `Config at ${path} already has a private key (${maskPrivateKey(existing.privateKey)}). Overwrite with a NEW random wallet? ` +
               `The existing key cannot be recovered after overwrite.`,
-            { yes: Boolean(opts.yes), dryRun: Boolean(opts.dryRun) }
+            { yes: false, dryRun: Boolean(opts.dryRun) }
           );
           if (!ok) process.exit(3);
         } else if (existing?.privateKey && local.force) {
@@ -491,9 +507,23 @@ export function register(program: Command): void {
         const path = (opts.config as string | undefined) ?? defaultConfigPath();
         const existing = loadConfig(path);
         if (existing?.privateKey) {
+          // Same rule as `wallet create`: `--yes` is not consent to destroy an
+          // existing key. The old key has no other copy on disk, so a scripted
+          // import that blanket-answers prompts must not be able to silently
+          // discard it. There is no `--force` on import (the flow is inherently
+          // interactive — it prompts for the key), so this is a hard refusal.
+          if (opts.yes) {
+            process.stderr.write(
+              `Config at ${path} already has a private key (${maskPrivateKey(existing.privateKey)}).\n` +
+                '`--yes` does not authorize overwriting an existing key — it is unrecoverable once replaced. ' +
+                'Re-run without `--yes` to confirm interactively, or point --config at a different path.\n'
+            );
+            process.exit(2);
+          }
           const ok = await confirm(
-            `Config at ${path} already has a private key (${maskPrivateKey(existing.privateKey)}). Overwrite?`,
-            { yes: Boolean(opts.yes), dryRun: Boolean(opts.dryRun) }
+            `Config at ${path} already has a private key (${maskPrivateKey(existing.privateKey)}). Overwrite? ` +
+              'The existing key cannot be recovered after overwrite.',
+            { yes: false, dryRun: Boolean(opts.dryRun) }
           );
           if (!ok) process.exit(3);
         }
@@ -554,7 +584,14 @@ export function register(program: Command): void {
     .requiredOption('--token <symbol>', 'token symbol or address')
     .option('--spender <addr>', 'spender address')
     .option('--for <name>', 'preset spender: optionBook | optionFactory')
-    .option('--amount <amount>', 'amount or "max"', 'max')
+    // No default. This previously defaulted to "max", so a bare
+    // `wallet approve --token USDC --for optionBook --yes` silently granted an
+    // unlimited (MaxUint256) allowance with no interactive gate. Every other
+    // approval path in the CLI (`book fill`, `position close`, `rfq request
+    // --ensure-allowance`) defaults to the exact amount required; this command
+    // has no trade context to derive an exact amount from, so it now forces the
+    // caller to state one. `--amount max` still works, and still warns.
+    .requiredOption('--amount <amount>', 'decimal amount to approve, or "max" for unlimited (MaxUint256)')
     .action(async (_localOpts: unknown, cmd: Command) => {
       const opts = getGlobalOpts(cmd);
       const local = cmd.opts<{

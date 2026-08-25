@@ -1523,8 +1523,38 @@ function checkOfferDeadlineFuture(req: RFQRequest): void {
  *          path stays a soft stderr advisory and proceeds with the request.
  *
  * With `--ensure-allowance`, confirm prompt for the approval, then
- * `ensureAllowance(MaxUint256)` (or the user's `--approve-amount`).
+ * `ensureAllowance()`. BUY defaults to the exact `reservePrice` the contract
+ * escrows at request time; SHORT defaults to MaxUint256 because the settle-time
+ * collateral draw is not knowable from the request. `--approve-amount`
+ * overrides either with a decimal amount or an explicit `max`.
  */
+/**
+ * Decide what allowance amount `--ensure-allowance` should target.
+ *
+ * Pure and exported so the direction-dependent default is unit-testable —
+ * a regression here is silent (an under-approval just reverts later, at
+ * settlement), so it must not depend on running a live RFQ to observe.
+ *
+ * @param approveAmount raw `--approve-amount` flag ('max' | decimal | undefined)
+ * @param isBuy         `params.isRequestingLongPosition`
+ * @param reservePrice  `req.reservePrice` — what the factory escrows for a BUY
+ * @param parseCustom   converts a decimal flag value to token units
+ */
+export function resolveApproveTarget(
+  approveAmount: string | undefined,
+  isBuy: boolean,
+  reservePrice: bigint,
+  parseCustom: (value: string) => bigint
+): { target: bigint; isMax: boolean } {
+  if (approveAmount === 'max') return { target: MaxUint256, isMax: true };
+  if (approveAmount !== undefined) return { target: parseCustom(approveAmount), isMax: false };
+  // Defaults. BUY escrows exactly reservePrice at request time, so approve
+  // exactly that. SHORT's settle-time draw is not derivable from the request
+  // (see maybeEnsureCollateralAllowance), so it stays unlimited rather than
+  // under-approving and reverting after a maker has already committed.
+  return isBuy ? { target: reservePrice, isMax: false } : { target: MaxUint256, isMax: true };
+}
+
 async function maybeEnsureCollateralAllowance(
   result: GetClientResult,
   req: RFQRequest,
@@ -1540,20 +1570,36 @@ async function maybeEnsureCollateralAllowance(
   const minRequired = isBuy ? req.reservePrice : 0n;
   const directionLabel = isBuy ? 'BUY' : 'SHORT';
 
-  // Compute target allowance amount (what we approve TO, if --ensure-allowance is set)
-  let target: bigint;
-  let isMax = false;
-  if (flags.approveAmount === undefined || flags.approveAmount === 'max') {
-    target = MaxUint256;
-    isMax = true;
-  } else {
-    const decimals = Number(await client.erc20.getDecimals(req.params.collateral));
-    target = client.utils.toBigInt(flags.approveAmount, decimals);
-  }
+  // Compute target allowance amount (what we approve TO, if --ensure-allowance is set).
+  //
+  // Omitting --approve-amount used to mean MaxUint256 on BOTH directions, so a
+  // scripted `rfq request --ensure-allowance --yes` granted the factory an
+  // unlimited allowance non-interactively. BUY now defaults to the exact
+  // reservePrice the contract escrows at request time, matching `book fill`
+  // and `position close`.
+  //
+  // SHORT deliberately still defaults to MaxUint256. The collateral pulled at
+  // settle is a structure-dependent max-loss figure that is NOT carried on the
+  // request — `params.collateralAmount` is hardcoded to 0 by every SDK builder
+  // and the send path rejects any nonzero value ('collateral is pulled by the
+  // contract'), so there is no exact bigint to approve here. Under-approving a
+  // SHORT reverts at settlement AFTER a maker has committed, which is a worse
+  // outcome than a broad allowance; the MaxUint256 warning below still fires,
+  // and `--approve-amount <n>` remains available for users who want to cap it.
+  const decimals =
+    flags.approveAmount !== undefined && flags.approveAmount !== 'max'
+      ? Number(await client.erc20.getDecimals(req.params.collateral))
+      : 0;
+  const { target, isMax } = resolveApproveTarget(
+    flags.approveAmount,
+    isBuy,
+    req.reservePrice,
+    (value) => client.utils.toBigInt(value, decimals)
+  );
   if (target < minRequired) {
     throw new Error(
       `--approve-amount (${target.toString()}) is less than the contract's required ` +
-        `escrow at request time (${minRequired.toString()}). Increase --approve-amount or omit it (defaults to MaxUint256).`
+        `escrow at request time (${minRequired.toString()}). Increase --approve-amount, omit it to approve exactly what is required, or pass --approve-amount max.`
     );
   }
 
@@ -1578,7 +1624,7 @@ async function maybeEnsureCollateralAllowance(
       `BUY RFQ: current allowance on ${req.params.collateral} → OptionFactory (${spender}) ` +
         `is ${current.toString()}, but the contract will escrow ${minRequired.toString()} ` +
         `(your reserve-price total) at request time. Either:\n` +
-        `  • Pass --ensure-allowance to approve in-flow (uses MaxUint256 by default), or\n` +
+        `  • Pass --ensure-allowance to approve in-flow (approves exactly this reserve-price amount by default), or\n` +
         `  • Pre-approve manually: thetanuts wallet approve --token <SYM> --for optionFactory --amount 5`
     );
     (err as Error & { exitCode?: number }).exitCode = 4;
@@ -1632,7 +1678,7 @@ function registerRequest(grp: Command): void {
     )
     .option(
       '--approve-amount <max|n>',
-      'amount to ensure-allowance to (default: max = MaxUint256; or a decimal token amount). Only used with --ensure-allowance.'
+      'allowance amount when --ensure-allowance fires. Default: exact reservePrice for BUY, "max" for SHORT (settle-time collateral is not known at request time). Pass "max" for unlimited (MaxUint256), or a decimal token amount.'
     )
     .option(
       '--pay-with <eth|symbol|addr>',
