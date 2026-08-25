@@ -57,11 +57,37 @@ irreversible defaults into explicit choices. See *Migration* below.
   `wallet import` is interactive by nature and has no `--force`. This matches
   the existing rule that `--reveal-key` refuses `--yes`.
 
+### Fixed
+
+- **Usage errors exit `2` again.** Commander exits `1` for every parse failure,
+  but the documented contract reserves `1` for generic runtime errors (network,
+  RPC, contract revert) and `2` for usage errors. Making `wallet approve
+  --amount` required therefore produced a `1` where the README promised a `2`,
+  leaving automation unable to tell a mistyped flag from a reverted transaction.
+  Commander's usage-error codes are now mapped to `2` centrally across the whole
+  command tree; `--help` and `--version` continue to exit `0`, and any code the
+  map does not recognise keeps Commander's own exit code rather than being
+  silently coerced.
+  - This also covers a group command invoked with no subcommand — `thetanuts
+    wallet`, `thetanuts book`, or bare `thetanuts` — which Commander reports as
+    `commander.help` with exit `1`. That is an incomplete invocation, not a
+    runtime failure. Successful `--help` uses a separate code and still
+    exits `0`.
+
 ### Added
 
 - `cli/tests/approvalDefaults.test.ts` — regression coverage for the
   `--ensure-allowance` target defaults and for `saveConfig` atomicity,
   permissions, and symlink replacement. No existing test touched these paths.
+- `cli/tests/exitCodes.test.ts` — subprocess coverage for the documented exit
+  codes. Exit status is a process-level contract, so an in-process assertion
+  cannot observe it.
+- **CI now runs the CLI.** The workflow previously installed, built, and tested
+  only the root SDK, so every CLI test could fail without blocking a merge. A
+  `cli` job runs typecheck, tests, and build, and `all-checks` depends on it.
+  The job builds the root SDK first: the CLI resolves the SDK through `file:..`
+  and the SDK's entry points at a gitignored `dist/`, so a fresh checkout has
+  nothing for the CLI to compile against.
 
 ### Migration
 
@@ -82,6 +108,11 @@ irreversible defaults into explicit choices. See *Migration* below.
   is not yet implemented.
 - `config set privateKey` and `config unset privateKey` still overwrite or
   delete the stored key with no confirmation.
+- Excess positional arguments are still accepted and ignored rather than
+  rejected — Commander's `allowExcessArguments` defaults to true and is not
+  disabled, so `wallet approve extraarg --token USDC --amount 1 --for
+  optionBook` runs the approve flow instead of erroring. Pre-existing; the
+  exit-code mapping above does not change it.
 
 ## [0.4.0] — 2026-08-21
 

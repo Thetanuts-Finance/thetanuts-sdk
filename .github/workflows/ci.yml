@@ -117,10 +117,59 @@ jobs:
       - name: Run collar smoke tests
         run: ${{ steps.detect-pm.outputs.run }} test:collar
 
+  cli:
+    name: CLI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            cli/package-lock.json
+
+      # The CLI depends on the SDK via `file:..`, and the SDK's package entry
+      # points at ./dist, which is gitignored. A fresh checkout therefore has
+      # no SDK build for the CLI to typecheck or run against — build the root
+      # package first or every step below fails on unresolved types.
+      - name: Install root SDK dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build root SDK
+        run: npm run build
+        working-directory: .
+
+      - name: Install CLI dependencies
+        run: npm ci
+
+      - name: Run TypeScript check
+        run: npm run typecheck
+
+      # Offline only. Covers the wallet-security regressions (config write
+      # atomicity, approval-target defaults) and the documented exit-code
+      # contract — all of which are silent failures if they regress.
+      - name: Run CLI tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check build output exists
+        run: test -f dist/index.js
+
   all-checks:
     name: All Checks
     runs-on: ubuntu-latest
-    needs: [lint, build, collar-tests]
+    needs: [lint, build, collar-tests, cli]
     steps:
       - name: All checks passed
         run: echo "All checks passed!"
