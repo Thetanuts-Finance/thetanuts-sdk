@@ -275,10 +275,19 @@ export class OptionBookModule {
     // - LINEAR_CALL (quote collateral, e.g. USDC 6 dec): same formula as PUT
     //   maxContracts = (maxCollateral * 1e8) / strike
     if (isCall && strikes.length === 1) {
-      const collateralDecimals = this.getCollateralDecimals(orderWithSig.rawApiData.collateral);
-      if (collateralDecimals >= 18) {
-        // INVERSE_CALL: collateral is base token (WETH/cbBTC), 1 contract = 1 token
-        return maxCollateral / (10n ** BigInt(collateralDecimals - 6));
+      const collateralAddress = orderWithSig.rawApiData.collateral;
+      const collateralDecimals = this.getCollateralDecimals(collateralAddress);
+      // Quote-vs-base is a property of the token, not its decimal count: USDC is
+      // the only quote collateral; everything else (WETH, cbBTC) is base and sizes
+      // 1 contract per whole token
+      const usdcAddress = this.client.chainConfig.tokens.USDC?.address;
+      const isQuoteCollateral =
+        usdcAddress !== undefined &&
+        collateralAddress.toLowerCase() === usdcAddress.toLowerCase();
+      if (!isQuoteCollateral) {
+        // INVERSE_CALL: collateral is base token (WETH/cbBTC), 1 contract = 1 token.
+        // Scale native collateral (collateralDecimals) down to 6-dec numContracts
+        return (maxCollateral * 10n ** 6n) / 10n ** BigInt(collateralDecimals);
       }
       // LINEAR_CALL: collateral is quote token (USDC), same as PUT
       const strike = strikes[0]!;

@@ -171,11 +171,15 @@ export class UtilsModule {
       return value.toString();
     }
 
-    const str = value.toString().padStart(decimals + 1, '0');
+    const negative = value < 0n;
+    const abs = negative ? -value : value;
+
+    const str = abs.toString().padStart(decimals + 1, '0');
     const whole = str.slice(0, -decimals) || '0';
     const fraction = str.slice(-decimals);
     const trimmedFraction = fraction.replace(/0+$/, '');
-    return trimmedFraction ? `${whole}.${trimmedFraction}` : whole;
+    const result = trimmedFraction ? `${whole}.${trimmedFraction}` : whole;
+    return negative ? `-${result}` : result;
   }
 
   /**

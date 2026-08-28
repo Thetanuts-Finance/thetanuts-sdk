@@ -20,7 +20,7 @@ import type {
 import { COLLATERAL_APR, DEFAULT_CARRY_RATE, FEE_MULTIPLIER } from '../types/mmPricing.js';
 import { mapHttpError } from '../utils/errors.js';
 import { NotFoundError } from '../types/errors.js';
-import { floatToBigInt, FLOAT_SCALE } from '../utils/decimals.js';
+import { floatToBigInt, toBigInt, FLOAT_SCALE } from '../utils/decimals.js';
 
 /**
  * Month abbreviation to number mapping for ticker parsing
@@ -584,9 +584,12 @@ export class MMPricingModule {
       FLOAT_SCALE (1e12) gives 12 decimal places — sufficient for pricing
     */
     const numContractsBig = BigInt(params.numContracts);
-    const collateralPerContractScaled = floatToBigInt(collPricing.collateralAmount);
+    // USD-magnitude values (strike-sized collateral, spot price) go through the
+    // string-exact toBigInt path — floatToBigInt's guard rejects |value| >= ~9007
+    // at 1e12 scale (TNU-AUDIT-0056), which every BTC option would otherwise hit.
+    const collateralPerContractScaled = toBigInt(collPricing.collateralAmount.toFixed(12), 12);
     const collateralCostPerUnitScaled = floatToBigInt(collPricing.collateralCostPerUnit);
-    const underlyingPriceScaled = floatToBigInt(vanilla.underlyingPrice);
+    const underlyingPriceScaled = toBigInt(vanilla.underlyingPrice.toFixed(12), 12);
 
     /*
       Calculate collateral required (in collateral token's smallest unit)
@@ -596,9 +599,13 @@ export class MMPricingModule {
     */
     const collateralRequired = (collateralPerContractScaled * numContractsBig * decimalScale) / FLOAT_SCALE;
 
+    // Premium and collateral cost are quoted in underlying terms. 
+    // Convert to USD only when the collateral is in USD
+    const conv = collateralAsset === 'USD' ? underlyingPriceScaled : FLOAT_SCALE;
+
     // Calculate collateral cost (in collateral token's smallest unit)
     // collateralCostPerUnit is dimensionless (fraction of underlying)
-    const collateralCost = (collateralCostPerUnitScaled * numContractsBig * underlyingPriceScaled * decimalScale) / (FLOAT_SCALE * FLOAT_SCALE);
+    const collateralCost = (collateralCostPerUnitScaled * numContractsBig * conv * decimalScale) / (FLOAT_SCALE * FLOAT_SCALE);
 
     // Calculate base premium (in collateral token's smallest unit)
     // basePrice is dimensionless (fraction of underlying)
@@ -606,7 +613,7 @@ export class MMPricingModule {
     const basePrice = params.isLong ? vanilla.feeAdjustedAsk : vanilla.feeAdjustedBid;
     const basePriceScaled = floatToBigInt(basePrice);
     const basePremium =
-      (basePriceScaled * numContractsBig * underlyingPriceScaled * decimalScale)
+      (basePriceScaled * numContractsBig * conv * decimalScale)
       / (FLOAT_SCALE * FLOAT_SCALE);
 
     // Total price
@@ -698,9 +705,16 @@ export class MMPricingModule {
     // Apply single spread-level CC + FEE_MULTIPLIER to get final MM prices
     // ASK: (price + CC) * FEE_MULTIPLIER (user pays more when buying long)
     // BID: (price - CC) / FEE_MULTIPLIER (user receives less when selling short)
-    const netMmAskPrice = (netSpreadPriceAsk + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    // Clamp the FINAL quoted prices (after FEE_MULTIPLIER) to [0, width/spot]
+    // Quotes are in underlying terms, so the structural max payout (widthUsd) maps to
+    // widthUsd / underlyingPrice. Clamp AFTER ×FEE_MULTIPLIER
+    const widthPerUnderlying = near.underlyingPrice > 0
+      ? widthUsd / near.underlyingPrice
+      : Number.POSITIVE_INFINITY;
+    const rawAskPrice = (netSpreadPriceAsk + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    const netMmAskPrice = Math.min(Math.max(0, rawAskPrice), widthPerUnderlying);
     const rawBidPrice = (netSpreadPriceBid - spreadCCPerUnderlying) / FEE_MULTIPLIER;
-    const netMmBidPrice = Math.max(0, rawBidPrice);
+    const netMmBidPrice = Math.min(Math.max(0, rawBidPrice), widthPerUnderlying);
     if (rawBidPrice < 0) {
       this.client.logger.debug('Spread bid price floored to 0', {
         rawBidPrice, netSpreadPriceBid, spreadCCPerUnderlying, ticker1, ticker2,
@@ -712,7 +726,7 @@ export class MMPricingModule {
 
     // Calculate collateral required — pure bigint to avoid float overflow
     const numContracts = params.numContracts ?? BigInt(10 ** 18);
-    const widthScaled = floatToBigInt(widthUsd);
+    const widthScaled = toBigInt(widthUsd.toFixed(12), 12);
     const collateral = (widthScaled * numContracts) / (FLOAT_SCALE * (10n ** 12n));
 
     return {
@@ -801,23 +815,49 @@ export class MMPricingModule {
       : 0;
 
     // Calculate separate buy/sell nets using fee-adjusted prices (matches v4-webapp)
-    // Condor: +1 at K1, -1 at K2, -1 at K3, +1 at K4
-    // Buy net (user buys condor): use ask for bought legs, bid for sold legs
-    const buyNet =
-      legs[0].feeAdjustedAsk - legs[1].feeAdjustedBid -
-      legs[2].feeAdjustedBid + legs[3].feeAdjustedAsk;
-    // Sell net (user sells condor): use bid for bought legs, ask for sold legs
-    const sellNet =
-      legs[0].feeAdjustedBid - legs[1].feeAdjustedAsk -
-      legs[2].feeAdjustedAsk + legs[3].feeAdjustedBid;
+    let buyNet: number;
+    let sellNet: number;
+
+    if (params.type === 'iron') {
+      // Iron condor legs: [Put K1, Put K2, Call K3, Call K4]
+      // The position SELLS the inner pair (K2 put, K3 call) and BUYS the outer wings
+      // (K1 put, K4 call) — a net CREDIT, since the inner options are worth more
+      //
+      // sellNet = credit collected entering the (short) iron condor:
+      //   receive bid on the sold inner legs, pay ask on the bought outer legs
+      sellNet =
+        legs[1].feeAdjustedBid + legs[2].feeAdjustedBid -
+        legs[0].feeAdjustedAsk - legs[3].feeAdjustedAsk;
+      // buyNet = cost to take the opposite side (long body: buy inner, sell outer):
+      //   pay ask on the inner legs, receive bid on the outer legs
+      buyNet =
+        legs[1].feeAdjustedAsk + legs[2].feeAdjustedAsk -
+        legs[0].feeAdjustedBid - legs[3].feeAdjustedBid;
+    } else {
+      // Vanilla call/put condor: long outer (K1, K4), short inner (K2, K3) — a net debit
+      // Condor: +1 at K1, -1 at K2, -1 at K3, +1 at K4
+      // Buy net (user buys condor): use ask for bought legs, bid for sold legs
+      buyNet =
+        legs[0].feeAdjustedAsk - legs[1].feeAdjustedBid -
+        legs[2].feeAdjustedBid + legs[3].feeAdjustedAsk;
+      // Sell net (user sells condor): use bid for bought legs, ask for sold legs
+      sellNet =
+        legs[0].feeAdjustedBid - legs[1].feeAdjustedAsk -
+        legs[2].feeAdjustedAsk + legs[3].feeAdjustedBid;
+    }
 
     // For backward compat, netCondorPrice = buy-side net
     const netCondorPrice = buyNet;
 
     // Apply CC + FEE_MULTIPLIER (matches v4-webapp calculateCallCondorParams.ts)
-    const netMmAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    // Clamp the FINAL quoted prices (after FEE_MULTIPLIER) to [0, width/spot]
+    const widthPerUnderlying = legs[0].underlyingPrice > 0
+      ? widthUsd / legs[0].underlyingPrice
+      : Number.POSITIVE_INFINITY;
+    const rawAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    const netMmAskPrice = Math.min(Math.max(0, rawAskPrice), widthPerUnderlying);
     const rawBidPrice = (sellNet - spreadCCPerUnderlying) / FEE_MULTIPLIER;
-    const netMmBidPrice = Math.max(0, rawBidPrice);
+    const netMmBidPrice = Math.min(Math.max(0, rawBidPrice), widthPerUnderlying);
     if (rawBidPrice < 0) {
       this.client.logger.debug('Condor bid price floored to 0', {
         rawBidPrice, sellNet, spreadCCPerUnderlying, tickers,
@@ -826,7 +866,7 @@ export class MMPricingModule {
 
     // Calculate collateral — pure bigint to avoid float overflow
     const numContracts = params.numContracts ?? BigInt(10 ** 18);
-    const widthScaled = floatToBigInt(widthUsd);
+    const widthScaled = toBigInt(widthUsd.toFixed(12), 12);
     const collateral = (widthScaled * numContracts) / (FLOAT_SCALE * (10n ** 12n));
 
     let condorType: 'call_condor' | 'put_condor' | 'iron_condor';
@@ -915,9 +955,14 @@ export class MMPricingModule {
     const netButterflyPrice = buyNet;
 
     // Apply CC + FEE_MULTIPLIER (matches v4-webapp)
-    const netMmAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    // Clamp the FINAL quoted prices (after FEE_MULTIPLIER) to [0, width/spot]
+    const widthPerUnderlying = legs[0].underlyingPrice > 0
+      ? widthUsd / legs[0].underlyingPrice
+      : Number.POSITIVE_INFINITY;
+    const rawAskPrice = (buyNet + spreadCCPerUnderlying) * FEE_MULTIPLIER;
+    const netMmAskPrice = Math.min(Math.max(0, rawAskPrice), widthPerUnderlying);
     const rawBidPrice = (sellNet - spreadCCPerUnderlying) / FEE_MULTIPLIER;
-    const netMmBidPrice = Math.max(0, rawBidPrice);
+    const netMmBidPrice = Math.min(Math.max(0, rawBidPrice), widthPerUnderlying);
     if (rawBidPrice < 0) {
       this.client.logger.debug('Butterfly bid price floored to 0', {
         rawBidPrice, sellNet, spreadCCPerUnderlying, tickers,
@@ -926,7 +971,7 @@ export class MMPricingModule {
 
     // Calculate collateral (width between middle and outer) — pure bigint to avoid float overflow
     const numContracts = params.numContracts ?? BigInt(10 ** 18);
-    const widthScaled = floatToBigInt(widthUsd);
+    const widthScaled = toBigInt(widthUsd.toFixed(12), 12);
     const collateral = (widthScaled * numContracts) / (FLOAT_SCALE * (10n ** 12n));
 
     return {

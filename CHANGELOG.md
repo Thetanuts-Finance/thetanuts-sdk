@@ -2,6 +2,47 @@
 
 All notable changes to `@thetanuts-finance/thetanuts-client` are documented here.
 
+## 0.3.1 — 2026-07-13
+
+### Fixed
+
+- **Multi-leg MM quotes are now clamped to `[0, width/spot]`.** `mmPricing`'s
+  `getSpreadPricing`, `getCondorPricing`, and `getButterflyPricing` could
+  return an ask above the structure's maximum payout — and, with no floor on
+  the ask side, a negative one — for deep-ITM strikes (e.g. a $25-wide call
+  spread quoting ~$50). All three now clamp the final bid and ask (after the
+  fee multiplier) to `[0, widthUsd / underlyingPrice]`, in underlying terms.
+- **Iron condors now price as the credit structures they are.** The
+  `getCondorPricing` `type: 'iron'` branch applied the vanilla-condor leg
+  weights, so every iron condor floored its bid to $0 and computed a negative
+  ask — untradeable. Iron condors now use the correct short-inner / long-outer
+  weights; vanilla call/put condors are unchanged, bit-for-bit.
+- **`getPositionPricing` no longer throws for BTC (or wide structures) and
+  returns native-collateral premiums in the right units.** USD-magnitude values
+  (BTC ~$100k underlying prices; strikes/widths ≥ ~$9,007) were fed to
+  `floatToBigInt`, which throws past its safe-integer guard — so the method
+  threw for every BTC option and every multi-leg structure wider than ~$9,007.
+  Those callers now use the string-exact `toBigInt` path. Separately,
+  `basePremium` / `collateralCost` multiplied by spot even for native
+  (WETH/cbBTC) collateral, overstating premiums by ~spot×; the USD conversion
+  now applies only when the collateral is USD.
+- **`OptionBook.calculateMaxContracts` sizes cbBTC (base-collateral) calls
+  correctly.** Collateral was classified base-vs-quote by decimal count
+  (`>= 18`), so cbBTC (8-decimal *base* collateral) fell into the USDC branch
+  and mis-sized fills by ~1000×. Discrimination is now by token identity
+  (USDC → quote/linear, anything else → base/inverse). WETH and USDC cases are
+  unchanged.
+- **`utils.fromBigInt` renders negative sub-unit values correctly.** The module
+  copy padded the `-` into the digit string, so `fromBigInt(-500n, 6)` produced
+  `"0.00-5"` instead of `"-0.0005"`. The sign is now extracted before
+  formatting; `formatAmount` / `formatPrice` inherit the fix.
+- **`calculateNumContracts` returns 0 for degenerate strikes.** The
+  PUT/LINEAR_CALL/PHYSICAL_PUT fallback returned `tradeAmount` on a missing or
+  zero strike — an internally inconsistent "2000 contracts for $0 collateral"
+  answer — while `calculateCollateralRequired` returns 0 for the same input. It
+  now returns 0, matching every other product. The MCP `calculate_num_contracts`
+  tool schema also gained `minItems: 1` and `exclusiveMinimum: 0` on `strikes`.
+
 ## 0.3.0 — 2026-06-11
 
 ### Added
